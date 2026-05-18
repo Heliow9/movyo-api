@@ -1377,8 +1377,6 @@ exports.resumoHomeApp = async (req, res) => {
     ]);
 
     let vendasHojeGarcom = 0;
-    let rankingGarcons = [];
-    let tempoMedio = "—";
 
     if (garcomId) {
       const agg = await Pedido.aggregate([
@@ -1386,75 +1384,18 @@ exports.resumoHomeApp = async (req, res) => {
           $match: {
             restaurante: new mongoose.Types.ObjectId(restauranteId),
             garcomId: new mongoose.Types.ObjectId(garcomId),
-            status: { $in: ["pago", "finalizado", "entregue"] },
+            status: "pago",
             pagoEm: { $gte: start, $lte: end },
             canceladoEm: null,
           },
         },
-        { $group: { _id: null, total: { $sum: "$valorTotal" }, pedidos: { $sum: 1 } } },
+        { $group: { _id: null, total: { $sum: "$valorTotal" } } },
       ]);
 
       vendasHojeGarcom = Number(agg?.[0]?.total || 0);
     }
 
-    try {
-      rankingGarcons = await Pedido.aggregate([
-        {
-          $match: {
-            restaurante: new mongoose.Types.ObjectId(restauranteId),
-            status: { $in: ["pago", "finalizado", "entregue"] },
-            pagoEm: { $gte: start, $lte: end },
-            canceladoEm: null,
-          },
-        },
-        {
-          $group: {
-            _id: "$garcomId",
-            nome: { $first: "$garcomNome" },
-            total: { $sum: "$valorTotal" },
-            pedidos: { $sum: 1 },
-          },
-        },
-        { $sort: { total: -1 } },
-        { $limit: 5 },
-      ]);
-    } catch (e) {
-      rankingGarcons = [];
-    }
-
-    try {
-      const avg = await Pedido.aggregate([
-        {
-          $match: {
-            restaurante: new mongoose.Types.ObjectId(restauranteId),
-            criadoEm: { $gte: start, $lte: end },
-            atualizadoEm: { $exists: true },
-            canceladoEm: null,
-          },
-        },
-        {
-          $project: {
-            diffMin: { $divide: [{ $subtract: ["$atualizadoEm", "$criadoEm"] }, 1000 * 60] },
-          },
-        },
-        { $group: { _id: null, media: { $avg: "$diffMin" } } },
-      ]);
-      const min = Math.round(Number(avg?.[0]?.media || 0));
-      if (min > 0) tempoMedio = `${min} min`;
-    } catch (e) {
-      tempoMedio = "—";
-    }
-
-    return res.json({
-      mesasOcupadas,
-      mesasAbertas: mesasOcupadas,
-      pedidosFila,
-      pedidosPendentes: pedidosFila,
-      vendasHojeGarcom,
-      vendasTurno: vendasHojeGarcom,
-      tempoMedio,
-      rankingGarcons,
-    });
+    return res.json({ mesasOcupadas, pedidosFila, vendasHojeGarcom });
   } catch (error) {
     return res.status(500).json({
       message: "Erro ao gerar resumo da home",

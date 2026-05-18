@@ -292,10 +292,18 @@ const COZINHA_STATUS = {
 };
 
 function ensureItemCozinhaState(item) {
-  // ⚠️ esses campos precisam existir no schema do ItemSchema para persistir
-  if (!item.cozinha) item.cozinha = {};
+  if (!item || typeof item !== "object") return item;
+
+  // ✅ MySQL/JSON: registros antigos podem vir com cozinha ausente, null, string ou boolean.
+  // Normaliza sempre para objeto antes de alterar status.
+  if (!item.cozinha || typeof item.cozinha !== "object" || Array.isArray(item.cozinha)) {
+    item.cozinha = {};
+  }
+
   if (!item.cozinha.status) item.cozinha.status = COZINHA_STATUS.PENDENTE;
-  if (!item.cozinha.criadoEm) item.cozinha.criadoEm = new Date();
+  if (!item.cozinha.criadoEm) {
+    item.cozinha.criadoEm = item.criadoEm || item.createdAt || item.adicionadoEm || new Date();
+  }
   return item;
 }
 
@@ -844,6 +852,8 @@ const listarFilaCozinha = async (req, res) => {
           mesaId: p.mesaId ? String(p.mesaId) : null,
           cliente: p.nomeCliente || "",
           tempoMin: minutos,
+          tempoSeg: Math.max(0, Math.floor((Date.now() - new Date(cozinha?.criadoEm || criado).getTime()) / 1000)),
+          criadoEm: cozinha?.criadoEm || criado,
 
           itemIndex: idx,
           item: {
@@ -885,22 +895,32 @@ const listarFilaCozinha = async (req, res) => {
 ========================================================= */
 async function atualizarStatusItemCozinha(req, res, nextStatus) {
   try {
-    const { pedidoId, itemIndex } = req.params;
+    // A rota atual usa :itemId, versões anteriores usavam :itemIndex.
+    // No MySQL os itens ficam dentro de um JSON array, então aceitamos os dois formatos.
+    const { pedidoId } = req.params;
+    const itemRef = req.params.itemIndex ?? req.params.itemId ?? req.body?.itemIndex ?? req.body?.itemId;
 
     if (!mongoose.Types.ObjectId.isValid(String(pedidoId))) {
       return res.status(400).json({ message: "pedidoId inválido." });
-    }
-
-    const idx = Number(itemIndex);
-    if (!Number.isInteger(idx) || idx < 0) {
-      return res.status(400).json({ message: "itemIndex inválido." });
     }
 
     const pedido = await Pedido.findById(pedidoId);
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
 
     const itens = Array.isArray(pedido.itens) ? pedido.itens : [];
-    if (idx >= itens.length) return res.status(404).json({ message: "Item não encontrado." });
+
+    let idx = Number(itemRef);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= itens.length) {
+      const ref = String(itemRef || "").trim();
+      idx = itens.findIndex((item) => {
+        const ids = [item?._id, item?.id, item?.itemId, item?.produtoId].filter(Boolean).map(String);
+        return ids.includes(ref);
+      });
+    }
+
+    if (!Number.isInteger(idx) || idx < 0 || idx >= itens.length) {
+      return res.status(404).json({ message: "Item não encontrado.", itemRef });
+    }
 
     const it = itens[idx];
 
@@ -916,20 +936,33 @@ async function atualizarStatusItemCozinha(req, res, nextStatus) {
       it.cozinha.entregueEm = agora;
     }
 
-    // persistir
-    pedido.markModified("itens");
-    await pedido.save();
+    // ✅ MySQL: persiste o JSON completo usando update direto.
+    // Evita qualquer trecho legado de Mongoose, como markModified(), e garante updated_at.
+    const pedidoAtualizado = await Pedido.findByIdAndUpdate(
+      pedidoId,
+      { $set: { itens } },
+      { new: true }
+    );
+
+    const pedidoPlain = typeof pedido.toObject === "function" ? pedido.toObject() : pedido;
+    const pedidoFinal = pedidoAtualizado || { ...pedidoPlain, itens };
 
     // eventos realtime
-    req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
-    req.io?.to(`restaurante-${pedido.restaurante}`).emit("cozinhaItemAtualizado", {
-      pedidoId: String(pedido._id),
-      numeroPedido: pedido.numeroPedido,
+    const restauranteSala = String(pedidoFinal.restaurante?._id || pedidoFinal.restaurante || pedido.restaurante?._id || pedido.restaurante || "");
+    req.io?.to(`restaurante-${restauranteSala}`).emit("pedidoAtualizado", pedidoFinal);
+    req.io?.to(`restaurante-${restauranteSala}`).emit("cozinhaItemAtualizado", {
+      pedidoId: String(pedidoFinal._id || pedidoId),
+      numeroPedido: pedidoFinal.numeroPedido || pedido.numeroPedido,
+      itemIndex: idx,
+      status: nextStatus,
+    });
+    req.io?.to(`restaurante-${restauranteSala}`).emit("filaCozinhaAtualizada", {
+      pedidoId: String(pedidoFinal._id || pedidoId),
       itemIndex: idx,
       status: nextStatus,
     });
 
-    return res.json({ ok: true, pedido });
+    return res.json({ ok: true, pedido: pedidoFinal, itemIndex: idx, status: nextStatus });
   } catch (error) {
     console.error("Erro atualizar status item cozinha:", error);
     return res.status(500).json({ message: "Erro ao atualizar item da cozinha.", error: error.message });

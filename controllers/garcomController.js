@@ -2,14 +2,10 @@
 const Restaurante = require("../models/Restaurante");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { createObjectId, normalizeId } = require("../lib/objectId");
 
 const DEFAULT_PERMISSOES = {
   verPedidos: true,
-  verMesas: true,
-  verComanda: true,
   abrirMesa: true,
-  adicionarItem: true,
   fecharConta: false,
   cancelarPedido: false,
   // adicione aqui as chaves que existem na sua UI
@@ -29,35 +25,10 @@ const getRestauranteId = (req) => {
 
 const safeGarcom = (garcomDoc) => {
   if (!garcomDoc) return null;
-  const obj = garcomDoc.toObject ? garcomDoc.toObject() : { ...garcomDoc };
+  const obj = garcomDoc.toObject ? garcomDoc.toObject() : garcomDoc;
   // eslint-disable-next-line no-unused-vars
   const { pinHash, ...safe } = obj;
   return safe;
-};
-
-const normalizeGarconsArray = (restaurante) => {
-  if (!Array.isArray(restaurante.garcons)) restaurante.garcons = [];
-
-  let changed = false;
-  restaurante.garcons = restaurante.garcons.map((g) => {
-    const item = g && typeof g.toObject === "function" ? g.toObject() : { ...(g || {}) };
-    if (!item._id) {
-      item._id = createObjectId();
-      changed = true;
-    }
-    item.id = item._id;
-    item.ativo = item.ativo !== false;
-    item.permissoes = { ...DEFAULT_PERMISSOES, ...(item.permissoes || {}) };
-    return item;
-  });
-
-  return changed;
-};
-
-const findGarcomIndex = (restaurante, garcomId) => {
-  normalizeGarconsArray(restaurante);
-  const alvo = normalizeId(garcomId);
-  return restaurante.garcons.findIndex((g) => normalizeId(g?._id || g?.id) === alvo);
 };
 
 exports.listarGarcons = async (req, res) => {
@@ -70,10 +41,7 @@ exports.listarGarcons = async (req, res) => {
     const doc = await Restaurante.findById(restauranteId).select("garcons");
     if (!doc) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const changed = normalizeGarconsArray(doc);
-    if (changed) await doc.save();
-
-    return res.json((doc.garcons || []).map(safeGarcom));
+    return res.json(doc.garcons || []);
   } catch (err) {
     return res.status(500).json({ message: "Erro ao listar garçons.", error: err.message });
   }
@@ -105,7 +73,9 @@ exports.criarGarcom = async (req, res) => {
       return res.status(404).json({ message: "Restaurante não encontrado." });
     }
 
-    normalizeGarconsArray(restaurante);
+    if (!Array.isArray(restaurante.garcons)) {
+      restaurante.garcons = [];
+    }
 
     const telNorm = normalizarTel(telefone);
     if (!telNorm) {
@@ -119,8 +89,7 @@ exports.criarGarcom = async (req, res) => {
 
     const pinHash = await bcrypt.hash(String(pin), 10);
 
-    const novoGarcom = {
-      _id: createObjectId(),
+    restaurante.garcons.push({
       nome: nome.trim(),
       apelido: apelido?.trim() || null,
       telefone: telNorm,
@@ -132,14 +101,16 @@ exports.criarGarcom = async (req, res) => {
       ativo: true,
       criadoEm: new Date(),
       atualizadoEm: new Date(),
-    };
-    novoGarcom.id = novoGarcom._id;
-
-    restaurante.garcons.push(novoGarcom);
+    });
 
     await restaurante.save();
 
-    return res.status(201).json(safeGarcom(novoGarcom));
+    const novo = restaurante.garcons[restaurante.garcons.length - 1];
+    const obj = novo.toObject();
+    // eslint-disable-next-line no-unused-vars
+    const { pinHash: _, ...safe } = obj;
+
+    return res.status(201).json(safe);
   } catch (err) {
     console.error("🔥 ERRO criarGarcom:", err);
     return res.status(500).json({
@@ -162,9 +133,8 @@ exports.atualizarGarcom = async (req, res) => {
     const restaurante = await Restaurante.findById(restauranteId);
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const idx = findGarcomIndex(restaurante, garcomId);
-    if (idx < 0) return res.status(404).json({ message: "Garçom não encontrado." });
-    const garcom = restaurante.garcons[idx];
+    const garcom = restaurante.garcons.id(garcomId);
+    if (!garcom) return res.status(404).json({ message: "Garçom não encontrado." });
 
     if (typeof nome === "string") garcom.nome = nome.trim();
     if (typeof apelido === "string") garcom.apelido = apelido.trim();
@@ -176,7 +146,7 @@ exports.atualizarGarcom = async (req, res) => {
       const mudou = telNorm !== garcom.telefone;
       if (mudou) {
         const jaExiste = (restaurante.garcons || []).some(
-          (g) => g.telefone === telNorm && normalizeId(g._id || g.id) !== normalizeId(garcomId)
+          (g) => g.telefone === telNorm && String(g._id) !== String(garcomId)
         );
         if (jaExiste) {
           return res.status(409).json({ message: "Já existe um garçom com esse telefone." });
@@ -222,10 +192,10 @@ exports.removerGarcom = async (req, res) => {
     const restaurante = await Restaurante.findById(restauranteId);
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const idx = findGarcomIndex(restaurante, garcomId);
-    if (idx < 0) return res.status(404).json({ message: "Garçom não encontrado." });
+    const garcom = restaurante.garcons.id(garcomId);
+    if (!garcom) return res.status(404).json({ message: "Garçom não encontrado." });
 
-    restaurante.garcons.splice(idx, 1);
+    garcom.deleteOne();
     await restaurante.save();
 
     return res.json({ ok: true, message: "Garçom removido." });
@@ -246,9 +216,8 @@ exports.toggleAtivo = async (req, res) => {
     const restaurante = await Restaurante.findById(restauranteId);
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const idx = findGarcomIndex(restaurante, garcomId);
-    if (idx < 0) return res.status(404).json({ message: "Garçom não encontrado." });
-    const garcom = restaurante.garcons[idx];
+    const garcom = restaurante.garcons.id(garcomId);
+    if (!garcom) return res.status(404).json({ message: "Garçom não encontrado." });
 
     garcom.ativo = !garcom.ativo;
     garcom.atualizadoEm = new Date();
@@ -313,7 +282,7 @@ exports.loginGarcom = async (req, res) => {
 
     // ✅ AQUI ESTAVA O BUG: você não trazia mercadoPago.conectado
     const SELECT_LOGIN =
-      "nome slugIdentificador garcons ativo bloqueado mercadoPago";
+      "nome slugIdentificador garcons ativo bloqueado mercadoPago.conectado";
 
     // ✅ modo novo principal: slug + telefone
     if (slugFinal && telFinal) {

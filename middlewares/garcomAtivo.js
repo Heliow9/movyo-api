@@ -1,6 +1,5 @@
 // middlewares/garcomAtivo.js
 const Restaurante = require("../models/Restaurante");
-const { normalizeId } = require("../lib/objectId");
 
 module.exports = async function garcomAtivo(req, res, next) {
   try {
@@ -42,8 +41,7 @@ module.exports = async function garcomAtivo(req, res, next) {
       });
     }
 
-    const garcons = Array.isArray(rest.garcons) ? rest.garcons : [];
-    const garcom = garcons.find((g) => normalizeId(g?._id || g?.id) === normalizeId(garcomId));
+    const garcom = rest.garcons?.id(String(garcomId));
     if (!garcom) {
       return res.status(404).json({
         message: "Garçom não encontrado.",

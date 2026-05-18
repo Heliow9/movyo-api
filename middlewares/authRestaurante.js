@@ -1,7 +1,6 @@
 // middlewares/authRestaurante.js
 const jwt = require("jsonwebtoken");
 const Restaurante = require("../models/Restaurante");
-const { normalizeId } = require("../lib/objectId");
 require("dotenv").config();
 
 function extractToken(req) {
@@ -91,8 +90,7 @@ module.exports = async function authRestaurante(req, res, next) {
         });
       }
 
-      const garcons = Array.isArray(rest.garcons) ? rest.garcons : [];
-      const garcom = garcons.find((g) => normalizeId(g?._id || g?.id) === normalizeId(req.garcomId));
+      const garcom = rest.garcons?.id(req.garcomId);
       if (!garcom) return res.status(404).json({ mensagem: "Garçom não encontrado." });
 
       if (garcom.ativo === false) {
