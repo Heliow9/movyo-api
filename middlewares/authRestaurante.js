@@ -90,7 +90,9 @@ module.exports = async function authRestaurante(req, res, next) {
         });
       }
 
-      const garcom = rest.garcons?.id(req.garcomId);
+      // MySQL: garcons vem como JSON array, não subdocumento Mongoose.
+      const garcons = Array.isArray(rest.garcons) ? rest.garcons : [];
+      const garcom = garcons.find((g) => String(g?._id || g?.id || g?.garcomId) === String(req.garcomId));
       if (!garcom) return res.status(404).json({ mensagem: "Garçom não encontrado." });
 
       if (garcom.ativo === false) {
@@ -124,6 +126,12 @@ module.exports = async function authRestaurante(req, res, next) {
 
     return next();
   } catch (err) {
-    return res.status(401).json({ mensagem: "Token inválido." });
+    console.error("authRestaurante:", err?.message || err);
+    const msg = String(err?.message || "").toLowerCase();
+    const isJwt = msg.includes("jwt") || msg.includes("token") || msg.includes("signature");
+    return res.status(isJwt ? 401 : 500).json({
+      mensagem: isJwt ? "Token inválido." : "Erro ao validar autenticação.",
+      error: err?.message,
+    });
   }
 };

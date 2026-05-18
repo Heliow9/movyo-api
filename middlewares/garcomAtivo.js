@@ -41,7 +41,9 @@ module.exports = async function garcomAtivo(req, res, next) {
       });
     }
 
-    const garcom = rest.garcons?.id(String(garcomId));
+    // MySQL: garcons vem como JSON array, não subdocumento Mongoose.
+    const garcons = Array.isArray(rest.garcons) ? rest.garcons : [];
+    const garcom = garcons.find((g) => String(g?._id || g?.id || g?.garcomId) === String(garcomId));
     if (!garcom) {
       return res.status(404).json({
         message: "Garçom não encontrado.",

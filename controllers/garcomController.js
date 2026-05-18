@@ -2,16 +2,40 @@
 const Restaurante = require("../models/Restaurante");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const { createObjectId } = require("../lib/objectId");
 
 const DEFAULT_PERMISSOES = {
   verPedidos: true,
+  verMesas: true,
+  verComanda: true,
   abrirMesa: true,
+  adicionarItem: true,
   fecharConta: false,
   cancelarPedido: false,
-  // adicione aqui as chaves que existem na sua UI
 };
 
 const normalizarTel = (tel) => (tel ? String(tel).replace(/\D/g, "") : null);
+
+const ensureGarconsArray = (restaurante) => {
+  if (!Array.isArray(restaurante.garcons)) restaurante.garcons = [];
+  restaurante.garcons = restaurante.garcons.map((g) => {
+    const obj = g && typeof g.toObject === "function" ? g.toObject() : { ...(g || {}) };
+    const id = String(obj._id || obj.id || obj.garcomId || createObjectId());
+    return { ...obj, _id: id, id };
+  });
+  return restaurante.garcons;
+};
+
+const findGarcomIndex = (garcons, garcomId) =>
+  (Array.isArray(garcons) ? garcons : []).findIndex(
+    (g) => String(g?._id || g?.id || g?.garcomId) === String(garcomId)
+  );
+
+const persistGarcons = async (restaurante) => {
+  ensureGarconsArray(restaurante);
+  if (typeof restaurante.save === "function") return restaurante.save();
+  return Restaurante.findByIdAndUpdate(restaurante._id || restaurante.id, { garcons: restaurante.garcons }, { new: true });
+};
 
 // ✅ Compatível com seu authRestaurante atual (req.userId)
 const getRestauranteId = (req) => {
@@ -25,9 +49,10 @@ const getRestauranteId = (req) => {
 
 const safeGarcom = (garcomDoc) => {
   if (!garcomDoc) return null;
-  const obj = garcomDoc.toObject ? garcomDoc.toObject() : garcomDoc;
+  const obj = garcomDoc.toObject ? garcomDoc.toObject() : { ...garcomDoc };
+  const id = String(obj._id || obj.id || obj.garcomId || "");
   // eslint-disable-next-line no-unused-vars
-  const { pinHash, ...safe } = obj;
+  const { pinHash, ...safe } = { ...obj, _id: id || obj._id, id: id || obj.id };
   return safe;
 };
 
@@ -41,7 +66,7 @@ exports.listarGarcons = async (req, res) => {
     const doc = await Restaurante.findById(restauranteId).select("garcons");
     if (!doc) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    return res.json(doc.garcons || []);
+    return res.json((doc.garcons || []).map(safeGarcom));
   } catch (err) {
     return res.status(500).json({ message: "Erro ao listar garçons.", error: err.message });
   }
@@ -73,9 +98,7 @@ exports.criarGarcom = async (req, res) => {
       return res.status(404).json({ message: "Restaurante não encontrado." });
     }
 
-    if (!Array.isArray(restaurante.garcons)) {
-      restaurante.garcons = [];
-    }
+    ensureGarconsArray(restaurante);
 
     const telNorm = normalizarTel(telefone);
     if (!telNorm) {
@@ -89,7 +112,10 @@ exports.criarGarcom = async (req, res) => {
 
     const pinHash = await bcrypt.hash(String(pin), 10);
 
+    const novoId = createObjectId();
     restaurante.garcons.push({
+      _id: novoId,
+      id: novoId,
       nome: nome.trim(),
       apelido: apelido?.trim() || null,
       telefone: telNorm,
@@ -103,14 +129,10 @@ exports.criarGarcom = async (req, res) => {
       atualizadoEm: new Date(),
     });
 
-    await restaurante.save();
+    await persistGarcons(restaurante);
 
     const novo = restaurante.garcons[restaurante.garcons.length - 1];
-    const obj = novo.toObject();
-    // eslint-disable-next-line no-unused-vars
-    const { pinHash: _, ...safe } = obj;
-
-    return res.status(201).json(safe);
+    return res.status(201).json(safeGarcom(novo));
   } catch (err) {
     console.error("🔥 ERRO criarGarcom:", err);
     return res.status(500).json({
@@ -133,8 +155,10 @@ exports.atualizarGarcom = async (req, res) => {
     const restaurante = await Restaurante.findById(restauranteId);
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const garcom = restaurante.garcons.id(garcomId);
-    if (!garcom) return res.status(404).json({ message: "Garçom não encontrado." });
+    const garcons = ensureGarconsArray(restaurante);
+    const idx = findGarcomIndex(garcons, garcomId);
+    if (idx < 0) return res.status(404).json({ message: "Garçom não encontrado." });
+    const garcom = garcons[idx];
 
     if (typeof nome === "string") garcom.nome = nome.trim();
     if (typeof apelido === "string") garcom.apelido = apelido.trim();
@@ -172,7 +196,8 @@ exports.atualizarGarcom = async (req, res) => {
     }
 
     garcom.atualizadoEm = new Date();
-    await restaurante.save();
+    garcons[idx] = garcom;
+    await persistGarcons(restaurante);
 
     return res.json(safeGarcom(garcom));
   } catch (err) {
@@ -192,11 +217,12 @@ exports.removerGarcom = async (req, res) => {
     const restaurante = await Restaurante.findById(restauranteId);
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const garcom = restaurante.garcons.id(garcomId);
-    if (!garcom) return res.status(404).json({ message: "Garçom não encontrado." });
+    const garcons = ensureGarconsArray(restaurante);
+    const idx = findGarcomIndex(garcons, garcomId);
+    if (idx < 0) return res.status(404).json({ message: "Garçom não encontrado." });
 
-    garcom.deleteOne();
-    await restaurante.save();
+    restaurante.garcons = garcons.filter((_, i) => i !== idx);
+    await persistGarcons(restaurante);
 
     return res.json({ ok: true, message: "Garçom removido." });
   } catch (err) {
@@ -216,13 +242,16 @@ exports.toggleAtivo = async (req, res) => {
     const restaurante = await Restaurante.findById(restauranteId);
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const garcom = restaurante.garcons.id(garcomId);
-    if (!garcom) return res.status(404).json({ message: "Garçom não encontrado." });
+    const garcons = ensureGarconsArray(restaurante);
+    const idx = findGarcomIndex(garcons, garcomId);
+    if (idx < 0) return res.status(404).json({ message: "Garçom não encontrado." });
+    const garcom = garcons[idx];
 
     garcom.ativo = !garcom.ativo;
     garcom.atualizadoEm = new Date();
 
-    await restaurante.save();
+    garcons[idx] = garcom;
+    await persistGarcons(restaurante);
 
     return res.json(safeGarcom(garcom));
   } catch (err) {
@@ -316,7 +345,9 @@ exports.loginGarcom = async (req, res) => {
       });
     }
 
-    const garcom = (restaurante.garcons || []).find((g) => g.telefone === telFinal);
+    const garconsLogin = ensureGarconsArray(restaurante);
+    const garcomIdx = garconsLogin.findIndex((g) => normalizarTel(g.telefone) === telFinal);
+    const garcom = garcomIdx >= 0 ? garconsLogin[garcomIdx] : null;
     if (!garcom) return res.status(404).json({ message: "Garçom não encontrado." });
 
     // ✅ TRAVA: garçom desativado
@@ -336,6 +367,10 @@ exports.loginGarcom = async (req, res) => {
 
     const ok = await bcrypt.compare(String(pin).trim(), garcom.pinHash);
     if (!ok) return res.status(401).json({ message: "PIN inválido." });
+
+    // Garante que ids/permissões normalizados fiquem persistidos no JSON MySQL.
+    garconsLogin[garcomIdx] = garcom;
+    await persistGarcons(restaurante);
 
     const token = jwt.sign(
       {

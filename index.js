@@ -87,7 +87,11 @@ app.use("/api/imagens", imagensRoutes);
 
 // Teste / Health
 app.get("/health", (req, res) => {
-  res.json({ message: "API funcionando 🚀 v17/0126" });
+  res.json({ ok: true, message: "API funcionando 🚀", service: "movyo-api", ts: new Date().toISOString() });
+});
+
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, message: "API funcionando 🚀", service: "movyo-api", ts: new Date().toISOString() });
 });
 
 /* =========================================================
