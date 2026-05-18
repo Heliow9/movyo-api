@@ -1,0 +1,361 @@
+// controllers/mercadoPagoWebhookController.js
+const crypto = require("crypto");
+
+const Pedido = require("../models/Pedido");
+const Mesa = require("../models/mesaModel");
+const Restaurante = require("../models/Restaurante");
+
+const { consultarPagamento } = require("../services/mercadoPagoPixService");
+
+/**
+ * ✅ valida assinatura (opcional)
+ * IMPORTANTE: pra funcionar, você precisa capturar rawBody no express.json verify
+ */
+function verifyMpSignature({ req, rawBody }) {
+  const sig = String(req.headers["x-signature"] || "");
+  const reqId = String(req.headers["x-request-id"] || "");
+  const secret = String(process.env.MP_WEBHOOK_SECRET || "").trim();
+
+  if (!secret) return { ok: true, skipped: true };
+  if (!sig || !reqId) return { ok: false, reason: "missing_headers" };
+
+  // x-signature: ts=...,v1=...
+  const parts = Object.fromEntries(
+    sig.split(",").map((p) => {
+      const [k, ...rest] = p.split("=");
+      return [k.trim(), rest.join("=").trim()];
+    })
+  );
+
+  const ts = parts.ts;
+  const v1 = parts.v1;
+  if (!ts || !v1) return { ok: false, reason: "invalid_x_signature" };
+
+  const manifest = `${ts}.${reqId}.${rawBody}`;
+  const digest = crypto.createHmac("sha256", secret).update(manifest).digest("hex");
+
+  try {
+    const ok = crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(v1));
+    return { ok, reason: ok ? "ok" : "bad_signature" };
+  } catch {
+    return { ok: false, reason: "compare_failed" };
+  }
+}
+
+/* -----------------------
+   Mesa helpers
+-------------------------*/
+function finalizarPermanenciaMesa(mesa) {
+  const agora = new Date();
+  if (mesa.ocupadaDesde) {
+    const duracaoSeg = Math.max(
+      0,
+      Math.floor((agora.getTime() - new Date(mesa.ocupadaDesde).getTime()) / 1000)
+    );
+    mesa.ultimaPermanenciaSegundos = duracaoSeg;
+    mesa.ultimaFechadaEm = agora;
+  }
+  mesa.ocupadaDesde = null;
+}
+
+async function liberarMesa({ mesa, io }) {
+  finalizarPermanenciaMesa(mesa);
+
+  mesa.status = "livre";
+  mesa.pedidoAtualId = null;
+
+  mesa.sessaoToken = null;
+  mesa.sessaoExpiraEm = null;
+  mesa.sessaoInicialExpiraEm = null;
+
+  await mesa.save();
+
+  if (io) {
+    io.to(`restaurante-${mesa.restauranteId}`).emit("mesaAtualizada", mesa);
+    io.to(`mesa-${String(mesa._id)}`).emit("mesaAtualizada", mesa);
+  }
+
+  return mesa;
+}
+
+/* -----------------------
+   Status helpers
+-------------------------*/
+function isPaidStatus(st) {
+  const s = String(st || "").toLowerCase();
+  return s === "approved" || s === "paid";
+}
+
+function isFinalFailStatus(st) {
+  const s = String(st || "").toLowerCase();
+  return ["rejected", "cancelled", "canceled", "expired", "refunded", "charged_back"].includes(s);
+}
+
+// tolerância pra float
+function gteWithEps(a, b, eps = 0.009) {
+  return Number(a || 0) + eps >= Number(b || 0);
+}
+
+function toNum(v) {
+  const n = Number(String(v ?? 0).replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function round2(v) {
+  return Math.round((Number(v || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function somaPagamentosConfirmados(pagamentos = []) {
+  const arr = Array.isArray(pagamentos) ? pagamentos : [];
+  return round2(
+    arr.reduce((acc, pg) => {
+      if (!pg) return acc;
+      const st = String(pg.status || "").toLowerCase(); // ✅ no seu schema é "status"
+      if (st !== "confirmado") return acc;
+      return acc + toNum(pg.valor);
+    }, 0)
+  );
+}
+
+/**
+ * ✅ Define formadePagamento coerente no balcão
+ * - 0 confirmados: "pendente"
+ * - 1 método confirmado: "pix"|"dinheiro"|"cartao"
+ * - 2+ métodos confirmados: "misto"
+ */
+function setFormaPagamentoFromPagamentos(pedido) {
+  const pagos = (Array.isArray(pedido.pagamentos) ? pedido.pagamentos : []).filter(
+    (p) => String(p?.status || "").toLowerCase() === "confirmado"
+  );
+
+  if (pagos.length === 0) {
+    pedido.formadePagamento = pedido.formadePagamento || "pendente";
+    return { forma: pedido.formadePagamento, metodos: [] };
+  }
+
+  const metodos = [...new Set(pagos.map((p) => String(p?.metodo || "").toLowerCase()).filter(Boolean))];
+
+  if (metodos.length <= 0) {
+    pedido.formadePagamento = pedido.formadePagamento || "pendente";
+    return { forma: pedido.formadePagamento, metodos: [] };
+  }
+
+  if (metodos.length === 1) {
+    pedido.formadePagamento = metodos[0]; // "pix" | "dinheiro" | "cartao"
+    return { forma: pedido.formadePagamento, metodos };
+  }
+
+  pedido.formadePagamento = "misto";
+  return { forma: pedido.formadePagamento, metodos };
+}
+
+/**
+ * ✅ Recalcula:
+ * - valorPago / valorPendente
+ * - status = "pago" quando quitado
+ */
+/**
+ * ✅ Recalcula:
+ * - valorPago / valorPendente
+ * - NO BALCÃO: só vai pra "em_producao" quando quitar 100%
+ * - não altera o fluxo legado (mpPaymentId no pedido)
+ */
+/**
+ * ✅ Recalcula:
+ * - valorPago / valorPendente
+ * - status vai para "em_producao" quando quitado
+ * - marca statusPagamento="pago" (audit)
+ */
+/**
+ * ✅ Recalcula:
+ * - valorPago / valorPendente
+ * - NO BALCÃO: só vai pra "em_producao" quando quitar 100%
+ * - não altera o fluxo legado (mpPaymentId no pedido)
+ */
+function recalcPedidoParcial(pedido) {
+  const total = round2(toNum(pedido.valorTotal));
+  const pago = somaPagamentosConfirmados(pedido.pagamentos || []);
+  const pendente = Math.max(0, round2(total - pago));
+
+  pedido.valorPago = pago;
+  pedido.valorPendente = pendente;
+
+  const quitou = total > 0 && pendente <= 0;
+
+  if (quitou) {
+    // ✅ quitou 100% (parcial/misto balcão) -> produção
+    pedido.status = "em_producao";
+
+    // ✅ marca que está pago sem depender de status legado
+    pedido.statusPagamento = "pago";
+
+    if (!pedido.pagoEm) pedido.pagoEm = new Date();
+    if (!pedido.fechadoEm) pedido.fechadoEm = new Date();
+  } else {
+    if (pedido.status !== "cancelado") pedido.status = "aguardando_pagamento";
+    // aqui NÃO força statusPagamento (deixa null/pendente/como estiver)
+  }
+
+  return { total, pago, pendente };
+}
+
+
+
+
+/**
+ * ✅ Handler principal
+ * Compat:
+ * - legado: pedido.mpPaymentId (pix total)
+ * - parcial: pedido.pagamentos[].mpPaymentId
+ */
+exports.mpWebhook = async (req, res) => {
+  try {
+    const paymentId =
+      req.query?.["data.id"] ||
+      req.query?.data?.id ||
+      req.body?.data?.id ||
+      req.body?.id ||
+      null;
+
+    const type = (req.query?.type || req.body?.type || "").toLowerCase();
+
+    if (!paymentId || type !== "payment") {
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
+    // assinatura opcional
+    if (process.env.MP_WEBHOOK_SECRET && req.rawBody) {
+      const sig = verifyMpSignature({ req, rawBody: req.rawBody });
+      if (!sig.ok) return res.status(401).json({ ok: false, reason: sig.reason });
+    }
+
+    const paymentIdStr = String(paymentId);
+
+    // ✅ acha pedido (legado ou parcial)
+    const pedido = await Pedido.findOne({
+      $or: [{ mpPaymentId: paymentIdStr }, { "pagamentos.mpPaymentId": paymentIdStr }],
+    });
+
+    if (!pedido) {
+      return res.status(200).json({ ok: true, not_found: true });
+    }
+
+    // ✅ token do restaurante (vendedor conectado)
+    const restaurante = await Restaurante.findById(pedido.restaurante).select("mercadoPago");
+    const accessToken = restaurante?.mercadoPago?.accessToken;
+
+    if (!accessToken) {
+      return res.status(200).json({ ok: true, no_token: true });
+    }
+
+    // ✅ consulta MP
+    const mp = await consultarPagamento({ accessToken, paymentId: paymentIdStr });
+    const mpStatus = String(mp?.status || "").toLowerCase();
+    const agora = new Date();
+
+    // tenta localizar pagamento parcial
+    const pagamentosArr = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
+    const idx = pagamentosArr.findIndex((p) => String(p?.mpPaymentId || "") === paymentIdStr);
+    const isPartial = idx >= 0;
+
+    if (isPartial) {
+      const pg = pagamentosArr[idx];
+
+      // atualiza status do MP no subpagamento
+      pg.mpStatus = mpStatus || pg.mpStatus || null;
+
+      // mapeia status MP -> status do pagamento
+      if (isPaidStatus(mpStatus)) {
+        pg.status = "confirmado";
+        if (!pg.confirmadoEm) pg.confirmadoEm = agora; // ✅ existe no schema? NÃO. Mas mongoose ignora se strict.
+        // Como seu schema não tem confirmadoEm, não precisa. Vou remover abaixo:
+      } else if (isFinalFailStatus(mpStatus)) {
+        pg.status = "cancelado";
+      } else {
+        pg.status = "pendente";
+      }
+
+      // qr atualizado (se vier)
+      const tx = mp?.point_of_interaction?.transaction_data;
+      if (tx?.qr_code) pg.pixQrCode = tx.qr_code;
+      if (tx?.qr_code_base64) pg.pixQrCodeBase64 = tx.qr_code_base64;
+
+      // salva de volta no array
+      pedido.pagamentos[idx] = pg;
+
+      // forma de pagamento e totais
+      setFormaPagamentoFromPagamentos(pedido);
+      const { total, pago, pendente } = recalcPedidoParcial(pedido);
+
+      const quitouTotal = total > 0 && pendente <= 0;
+
+      // quitou -> libera mesa
+      if (quitouTotal && pedido.mesaId) {
+        const mesa = await Mesa.findById(pedido.mesaId);
+        if (mesa) await liberarMesa({ mesa, io: req.io });
+      }
+
+      await pedido.save();
+
+      if (req.io) {
+        req.io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+      }
+
+      return res.status(200).json({
+        ok: true,
+        mode: "parcial",
+        pedidoId: String(pedido._id),
+        paymentId: paymentIdStr,
+        mpStatus,
+        quitouTotal,
+        total,
+        pago,
+        pendente,
+        formadePagamento: pedido.formadePagamento,
+      });
+    }
+
+    // ✅ fluxo legado (PIX total no pedido)
+    pedido.statusPagamento = mpStatus || pedido.statusPagamento;
+
+    if (isPaidStatus(mpStatus)) {
+      pedido.status = "pago";
+      pedido.formadePagamento = pedido.formadePagamento || "pix";
+
+      if (!pedido.pagoEm) pedido.pagoEm = agora;
+      if (!pedido.fechadoEm) pedido.fechadoEm = agora;
+
+      // compat com campos novos (se você adicionar no schema)
+      // pedido.valorPago = round2(toNum(pedido.valorTotal));
+      // pedido.valorPendente = 0;
+
+      if (pedido.mesaId) {
+        const mesa = await Mesa.findById(pedido.mesaId);
+        if (mesa) await liberarMesa({ mesa, io: req.io });
+      }
+    } else if (isFinalFailStatus(mpStatus)) {
+      if (pedido.status !== "cancelado" && pedido.status !== "pago") {
+        pedido.status = "aguardando_pagamento";
+      }
+    }
+
+    await pedido.save();
+
+    if (req.io) {
+      req.io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      mode: "legado",
+      pedidoId: String(pedido._id),
+      paymentId: paymentIdStr,
+      mpStatus,
+      paid: isPaidStatus(mpStatus),
+      formadePagamento: pedido.formadePagamento,
+    });
+  } catch (err) {
+    console.error("🔥 MP webhook error:", err);
+    return res.status(200).json({ ok: true, error: "ignored" });
+  }
+};

@@ -1,0 +1,31 @@
+{
+  "name": "GoTRACK",
+  "version": "1.0.0",
+  "description": "Gotrack api",
+  "main": "index.js",
+  "author": "Helio Livramento",
+  "license": "MIT",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon --ignore sessions/ index.js",
+    "migrate:mysql": "node scripts/sync-mysql.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "axios": "^1.8.4",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "link-preview-js": "^3.0.14",
+    "mercadopago": "^2.11.0",
+    "multer": "^2.0.2",
+    "ngrok": "^5.0.0-beta.2",
+    "node-fetch": "^3.3.2",
+    "nodemon": "^3.1.9",
+    "pino": "^9.6.0",
+    "socket.io": "^4.8.1",
+    "mysql2": "^3.11.5"
+  }
+}
