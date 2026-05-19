@@ -94,6 +94,8 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, message: "API funcionando 🚀", service: "movyo-api", ts: new Date().toISOString() });
 });
 
+
+
 /* =========================================================
    ✅ ANTI-CRASH: HANDLERS GLOBAIS
    - evita o processo cair por promise rejeitada/erro não tratado
