@@ -68,9 +68,9 @@ module.exports = (io) => {
   // =========================================================
   router.get("/:restauranteId/fila-cozinha", listarFilaCozinha);
 
-  router.put("/:pedidoId/itens/:itemId/cozinha/pronto", marcarItemPronto);
-  router.put("/:pedidoId/itens/:itemId/cozinha/entregue-mesa", marcarItemEntregueMesa);
-  router.put("/:pedidoId/itens/:itemId/cozinha/entregue-cliente", marcarItemEntregueCliente);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/pronto", marcarItemPronto);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-mesa", marcarItemEntregueMesa);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-cliente", marcarItemEntregueCliente);
 
   // =========================================================
   // 🔹 BALCÃO

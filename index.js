@@ -56,6 +56,20 @@ app.use((req, res, next) => {
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+// ✅ Compat: troca de senha fora do router /api/restaurantes, para evitar 404 em builds antigos/proxy
+try {
+  const authRestauranteCompat = require("./middlewares/authRestaurante");
+  const restauranteControllerCompat = require("./controllers/restauranteController");
+  app.patch("/api/restaurante/configuracoes/senha", authRestauranteCompat, restauranteControllerCompat.trocarSenhaConfiguracoes);
+  app.put("/api/restaurante/configuracoes/senha", authRestauranteCompat, restauranteControllerCompat.trocarSenhaConfiguracoes);
+  app.post("/api/restaurante/configuracoes/senha", authRestauranteCompat, restauranteControllerCompat.trocarSenhaConfiguracoes);
+  app.patch("/api/configuracoes/senha", authRestauranteCompat, restauranteControllerCompat.trocarSenhaConfiguracoes);
+  app.put("/api/configuracoes/senha", authRestauranteCompat, restauranteControllerCompat.trocarSenhaConfiguracoes);
+  app.post("/api/configuracoes/senha", authRestauranteCompat, restauranteControllerCompat.trocarSenhaConfiguracoes);
+} catch (e) {
+  console.warn("Rotas compat de senha não carregadas:", e?.message || e);
+}
+
 // -------------------------------
 // ROTAS PADRONIZADAS
 // -------------------------------

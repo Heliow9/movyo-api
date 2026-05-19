@@ -45,7 +45,7 @@ function sumPagamentosConfirmados(pedido) {
 }
 
 function recalcularTotaisPedido(pedido) {
-  const total = round2(Number(pedido?.valorTotal || 0));
+  const total = round2(Number(pedido?.valorTotal ?? pedido?.total ?? 0));
 
   const pagosConfirmados = (pedido?.pagamentos || [])
     .filter((p) => String(p?.status || "").toLowerCase() === "confirmado")
@@ -56,6 +56,8 @@ function recalcularTotaisPedido(pedido) {
 
   pedido.valorPago = valorPago;
   pedido.valorPendente = valorPendente;
+  pedido.valorTotal = total;
+  pedido.total = total;
 
   return { valorPago, valorPendente, total };
 }
@@ -439,7 +441,7 @@ const criarPedido = async (req, res) => {
     const isBalcao = isOrigemBalcao(origem);
 
     const statusInicial = isBalcao
-      ? "aguardando_pagamento"
+      ? "em_producao"
       : isPix || isCard
       ? "aguardando_pagamento"
       : "em_producao";
@@ -820,7 +822,7 @@ const listarFilaCozinha = async (req, res) => {
 
         // não mostra finalizados
         if (
-          [COZINHA_STATUS.ENTREGUE_MESA, COZINHA_STATUS.ENTREGUE_CLIENTE, COZINHA_STATUS.CANCELADO].includes(
+          [COZINHA_STATUS.PRONTO, COZINHA_STATUS.ENTREGUE_MESA, COZINHA_STATUS.ENTREGUE_CLIENTE, COZINHA_STATUS.CANCELADO].includes(
             st
           )
         ) {
@@ -885,7 +887,8 @@ const listarFilaCozinha = async (req, res) => {
 ========================================================= */
 async function atualizarStatusItemCozinha(req, res, nextStatus) {
   try {
-    const { pedidoId, itemIndex } = req.params;
+    const { pedidoId } = req.params;
+    const itemIndex = req.params.itemIndex ?? req.params.itemId ?? req.body?.itemIndex;
 
     if (!mongoose.Types.ObjectId.isValid(String(pedidoId))) {
       return res.status(400).json({ message: "pedidoId inválido." });
@@ -917,8 +920,11 @@ async function atualizarStatusItemCozinha(req, res, nextStatus) {
     }
 
     // persistir
-    pedido.markModified("itens");
+    // Compatível com Mongoose e com o model MySQL usado nesta API.
+    if (typeof pedido.markModified === "function") pedido.markModified("itens");
     await pedido.save();
+    // reforço para MySQL/model JSON: garante persistência do array itens atualizado
+    try { await Pedido.findByIdAndUpdate(pedido._id, { $set: { itens: pedido.itens } }); } catch (_) {}
 
     // eventos realtime
     req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
@@ -1477,7 +1483,13 @@ const registrarPagamentoPedido = async (req, res) => {
 
     await pedido.save();
 
-    req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+    const room = `restaurante-${pedido.restaurante}`;
+    req.io?.to(room).emit("pedidoAtualizado", pedido);
+    // Quando pedido do balcão/garçom é quitado, o desktop precisa receber como pedido novo
+    // para o Auto Print disparar mesmo se ele ainda não estava na lista local.
+    if (String(pedido.origem || "").toLowerCase() === "balcao" && String(pedido.statusPagamento || "").toLowerCase() === "pago") {
+      req.io?.to(room).emit("novoPedido", pedido);
+    }
 
     return res.json({ ok: true, pedido });
   } catch (error) {
@@ -1729,7 +1741,7 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
 
         restaurante,
         origem: "balcao",
-        status: "aguardando_pagamento",
+        status: "em_producao",
 
         pagamentos: [],
 

@@ -19,6 +19,47 @@ function round2(v) {
   return Math.round((Number(v || 0) + Number.EPSILON) * 100) / 100;
 }
 
+
+function normalizarItemBalcao(i = {}) {
+  const produto = i.produto && typeof i.produto === "object" ? i.produto : {};
+  const qtd = Math.max(1, toNum(i.quantidade ?? i.qtd ?? i.quantity ?? i.qtde ?? 1));
+  const unitRaw = i.precoUnitario ?? i.valorUnitario ?? i.preco ?? i.valor ?? i.price ?? i.precoBase ?? produto.preco ?? produto.precoBase ?? 0;
+  let unit = toNum(unitRaw);
+  const totalRaw = i.precoTotal ?? i.total ?? i.valorTotal ?? i.subtotal ?? i.valorItemTotal;
+  let total = toNum(totalRaw);
+  if (total <= 0 && unit > 0) total = unit * qtd;
+  if (unit <= 0 && total > 0) unit = total / qtd;
+
+  const nome = String(i.nome || i.titulo || i.title || i.descricao || produto.nome || produto.titulo || "Item").trim() || "Item";
+  const produtoId = i.produtoId || i.produto || i.produto_id || produto._id || produto.id || null;
+
+  return {
+    ...i,
+    produtoId: typeof produtoId === "object" ? (produtoId._id || produtoId.id || null) : produtoId,
+    nome,
+    quantidade: qtd,
+    qtd,
+    precoUnitario: round2(unit),
+    preco: round2(unit),
+    valorUnitario: round2(unit),
+    precoTotal: round2(total),
+    total: round2(total),
+    valorTotal: round2(total),
+    imprimir: i.imprimir ?? i.imprimeNaCozinha ?? true,
+    imprimeNaCozinha: i.imprimeNaCozinha ?? i.imprimir ?? true,
+    observacao: String(i.observacao || i.obs || "").trim(),
+    saboresSelecionados: Array.isArray(i.saboresSelecionados) ? i.saboresSelecionados : (Array.isArray(i.sabores) ? i.sabores : []),
+    bordaSelecionada: i.bordaSelecionada || null,
+    adicionalSelecionado: i.adicionalSelecionado || null,
+    complementosSelecionados: Array.isArray(i.complementosSelecionados) ? i.complementosSelecionados : [],
+    tiposExtrasSelecionados: i.tiposExtrasSelecionados && typeof i.tiposExtrasSelecionados === "object" ? i.tiposExtrasSelecionados : {},
+  };
+}
+
+function normalizarItensBalcao(itens = []) {
+  return (Array.isArray(itens) ? itens : []).map(normalizarItemBalcao).filter((i) => i.nome && Number(i.quantidade) > 0);
+}
+
 function calcularTotalPedido(pedido) {
   const vt = toNum(pedido?.valorTotal);
   if (vt > 0) return round2(vt);
@@ -115,10 +156,15 @@ function recalcPagamentoPedido(pedido) {
   pedido.valorPendente = round2(pendente);
 
   if (pendente <= 0 && total > 0) {
-    pedido.status = "pago";
+    // Balcão/garçom quitado NÃO deve voltar para Recebidos.
+    // Assim que quitou, entra/fica em produção para a cozinha.
+    pedido.status = "em_producao";
+    pedido.statusPagamento = "pago";
     if (!pedido.pagoEm) pedido.pagoEm = new Date();
   } else {
-    if (String(pedido.status || "").toLowerCase() === "pago") {
+    pedido.statusPagamento = "pendente";
+    // Se ainda não foi para produção, mantém aguardando pagamento.
+    if (!["em_producao", "em_entrega", "entregue", "cancelado"].includes(String(pedido.status || "").toLowerCase())) {
       pedido.status = "aguardando_pagamento";
     }
   }
@@ -145,10 +191,11 @@ async function fecharPedidoGenerico({ req, pedido }) {
     pedido.fechadoPorRole = "restaurante";
   }
 
-  // garante status pago
+  // garante pedido quitado em produção, não em Recebidos
   const { total, pago, pendente } = recalcPagamentoPedido(pedido);
   if (pendente <= 0 && total > 0) {
-    pedido.status = "pago";
+    pedido.status = "em_producao";
+    pedido.statusPagamento = "pago";
     if (!pedido.pagoEm) pedido.pagoEm = agora;
   }
 
@@ -188,25 +235,29 @@ exports.listarPedidosBalcaoAbertos = async (req, res) => {
 ========================= */
 exports.abrirPedidoBalcao = async (req, res) => {
   try {
-    const { restauranteId, nomeCliente, telefoneCliente } = req.body;
+    const { restauranteId, nomeCliente, telefoneCliente, itens } = req.body;
 
     if (!restauranteId) {
       return res.status(400).json({ message: "Envie restauranteId." });
     }
+
+    const itensIniciais = normalizarItensBalcao(itens);
+    const totalInicial = round2(itensIniciais.reduce((acc, i) => acc + toNum(i.precoTotal), 0));
 
     const novoPedido = new Pedido({
       restaurante: restauranteId,
       mesaId: null,
       nomeCliente: nomeCliente || "Cliente balcão",
       telefoneCliente: telefoneCliente || "",
-      itens: [],
-      valorTotal: 0,
+      itens: itensIniciais,
+      valorTotal: totalInicial,
+      total: totalInicial,
       origem: "balcao",
       status: "em_producao",
       formadePagamento: "pendente",
       pagamentos: [],
       valorPago: 0,
-      valorPendente: 0,
+      valorPendente: totalInicial,
     });
 
     // se for garçom abrindo no balcão (caso use)
@@ -274,14 +325,12 @@ exports.adicionarItensBalcao = async (req, res) => {
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
 
-    const itensNormalizados = itens.map((i) => {
-      const qtd = Number(i.quantidade || 1);
-      const unit = Number(i.precoUnitario || 0);
-      const total = Number.isFinite(i.precoTotal) ? Number(i.precoTotal) : qtd * unit;
-      return { ...i, quantidade: qtd, precoUnitario: unit, precoTotal: total };
-    });
+    const itensNormalizados = normalizarItensBalcao(itens);
+    if (!itensNormalizados.length) {
+      return res.status(400).json({ message: "Nenhum item válido para adicionar." });
+    }
 
-    const totalRodada = itensNormalizados.reduce((acc, i) => acc + Number(i.precoTotal || 0), 0);
+    const totalRodada = itensNormalizados.reduce((acc, i) => acc + toNum(i.precoTotal), 0);
 
     pedido.itens = Array.isArray(pedido.itens) ? pedido.itens : [];
     pedido.itens.push(...itensNormalizados);
@@ -326,6 +375,16 @@ exports.registrarPagamentoBalcao = async (req, res) => {
         : await Pedido.findById(pedidoId);
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    // Compat: se o app do garçom mandar pagamento junto com itens, garante que nada seja impresso zerado/vazio.
+    const itensBody = normalizarItensBalcao(req.body?.itens);
+    if (itensBody.length && (!Array.isArray(pedido.itens) || pedido.itens.length === 0)) {
+      pedido.itens = itensBody;
+      const totalItensBody = round2(itensBody.reduce((acc, i) => acc + toNum(i.precoTotal), 0));
+      pedido.valorTotal = totalItensBody;
+      pedido.total = totalItensBody;
+      pedido.valorPendente = totalItensBody;
+    }
 
     pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
 

@@ -28,6 +28,11 @@ router.get("/me", authRestaurante, restauranteController.perfil);
 
 // configuracoes (✅ precisa vir ANTES do /:slug)
 router.put("/configuracoes", authRestaurante, restauranteController.atualizarConfiguracoes);
+router.patch("/configuracoes/senha", authRestaurante, restauranteController.trocarSenhaConfiguracoes);
+router.put("/configuracoes/senha", authRestaurante, restauranteController.trocarSenhaConfiguracoes);
+router.post("/configuracoes/senha", authRestaurante, restauranteController.trocarSenhaConfiguracoes);
+router.patch("/senha", authRestaurante, restauranteController.trocarSenhaConfiguracoes);
+router.put("/senha", authRestaurante, restauranteController.trocarSenhaConfiguracoes);
 
 // publico por mesa
 router.get("/mesa/:qrCodeIdentifier", restauranteController.getDadosPublicosByMesa);

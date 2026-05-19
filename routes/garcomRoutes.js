@@ -9,6 +9,7 @@ const checkPermissao = require("../middlewares/checkPermissao");
 const garcomController = require("../controllers/garcomController");
 const pedidoController = require("../controllers/pedidoController");
 const mesaController = require("../controllers/mesaController");
+const balcaoController = require("../controllers/balcaoController");
 
 /**
  * =========================
@@ -93,6 +94,17 @@ router.post(
 
 // ✅ RESUMO (Home)
 router.get("/app/resumo", checkPermissao("verMesas"), mesaController.resumoHomeApp);
+
+
+/* =========================
+   ✅ APP: BALCÃO
+========================= */
+router.post("/app/balcao", checkPermissao("adicionarItem"), balcaoController.abrirPedidoBalcao);
+router.post("/app/balcao/:pedidoId/itens", checkPermissao("adicionarItem"), balcaoController.adicionarItensBalcao);
+router.post("/app/balcao/:pedidoId/pagamento", checkPermissao("adicionarItem"), balcaoController.registrarPagamentoBalcao);
+router.post("/app/balcao/:pedidoId/pix", checkPermissao("adicionarItem"), balcaoController.gerarPixBalcao);
+router.get("/app/balcao/:pedidoId/pix/status", checkPermissao("adicionarItem"), balcaoController.statusPixBalcao);
+router.post("/app/balcao/:pedidoId/pix/enviar-whatsapp", checkPermissao("adicionarItem"), balcaoController.enviarPixWhatsappBalcao);
 
 /* =========================
    ✅ APP: PEDIDOS

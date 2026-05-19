@@ -179,6 +179,52 @@ module.exports = {
     }
   },
 
+  // PATCH /api/restaurantes/configuracoes/senha
+  async trocarSenhaConfiguracoes(req, res) {
+    try {
+      const restauranteId = String(req.restauranteId || req.userId || req.jwt?.restauranteId || req.body?.restauranteId || req.params?.id || "");
+      const body = req.body || {};
+      const senhaAtual = body.senhaAtual || body.senhaAntiga || body.senha_atual || body.passwordAtual || body.currentPassword || body.senhaAtualRestaurante;
+      const novaSenha = body.novaSenha || body.senhaNova || body.nova_senha || body.password || body.newPassword || body.senha;
+
+      if (!restauranteId) {
+        return res.status(401).json({ mensagem: "Restaurante não autenticado." });
+      }
+      if (!senhaAtual || !novaSenha) {
+        return res.status(400).json({ mensagem: "Informe a senha atual e a nova senha." });
+      }
+      if (String(novaSenha).length < 6) {
+        return res.status(400).json({ mensagem: "A nova senha precisa ter pelo menos 6 caracteres." });
+      }
+
+      const restaurante = await Restaurante.findById(restauranteId);
+      if (!restaurante) {
+        return res.status(404).json({ mensagem: "Restaurante não encontrado." });
+      }
+
+      const senhaConfere = await bcrypt.compare(String(senhaAtual), restaurante.senha || "");
+      if (!senhaConfere) {
+        return res.status(401).json({ mensagem: "Senha atual incorreta." });
+      }
+
+      const senhaHash = await bcrypt.hash(String(novaSenha), 10);
+      restaurante.senha = senhaHash;
+
+      if (typeof restaurante.save === "function") {
+        await restaurante.save();
+      } else if (typeof Restaurante.findByIdAndUpdate === "function") {
+        await Restaurante.findByIdAndUpdate(restauranteId, { $set: { senha: senhaHash } });
+      } else {
+        throw new Error("Modelo Restaurante sem método de atualização de senha.");
+      }
+
+      return res.json({ ok: true, mensagem: "Senha atualizada com sucesso." });
+    } catch (error) {
+      console.error("Erro ao trocar senha do restaurante:", error);
+      return res.status(500).json({ mensagem: "Erro ao atualizar a senha do restaurante.", erro: error.message });
+    }
+  },
+
   async teste(req, res) {
     res.send(req.body);
   },
