@@ -555,8 +555,12 @@ const criarPedido = async (req, res) => {
         novoPedido.statusPagamento = pagamento?.status || "pending";
         novoPedido.mpStatusDetail = pagamento?.status_detail || null;
 
+        // Salva nos nomes novos e antigos para compatibilidade com MySQL/model antigo e vitrine.
         novoPedido.pixQrCode = tx?.qr_code || "";
         novoPedido.pixQrCodeBase64 = tx?.qr_code_base64 || "";
+        novoPedido.pixCopiaECola = tx?.qr_code || "";
+        novoPedido.qrCode = tx?.qr_code || "";
+        novoPedido.qrCodeBase64 = tx?.qr_code_base64 || "";
 
         novoPedido.splitInfo = {
           plataformaFee: fee,
@@ -1546,6 +1550,12 @@ const gerarPixPedido = async (req, res) => {
     });
 
     const tx = pagamentoMp?.point_of_interaction?.transaction_data;
+
+    pedido.pixQrCode = tx?.qr_code || pedido.pixQrCode || "";
+    pedido.pixQrCodeBase64 = tx?.qr_code_base64 || pedido.pixQrCodeBase64 || "";
+    pedido.pixCopiaECola = tx?.qr_code || pedido.pixCopiaECola || "";
+    pedido.qrCode = tx?.qr_code || pedido.qrCode || "";
+    pedido.qrCodeBase64 = tx?.qr_code_base64 || pedido.qrCodeBase64 || "";
 
     pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
     pedido.pagamentos.push({
