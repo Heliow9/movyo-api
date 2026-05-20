@@ -79,7 +79,7 @@ module.exports = {
       }
 
       const senhaHash = await bcrypt.hash(senha, 10);
-      const recipient_id = await criarRecipient({ nome, cnpj, contaBancaria });
+      // const recipient_id = await criarRecipient({ nome, cnpj, contaBancaria });
 
       const novoRestaurante = await Restaurante.create({
         nome,
@@ -87,7 +87,7 @@ module.exports = {
         senha: senhaHash,
         cnpj,
         localizacao,
-        recipient_id,
+        // recipient_id,
       });
 
       const token = gerarToken(novoRestaurante._id);
