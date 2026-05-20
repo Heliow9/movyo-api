@@ -1018,13 +1018,22 @@ const criarOuAtualizarCliente = async (req, res) => {
 };
 
 const listarPedidosDoCliente = async (req, res) => {
-  const { telefone } = req.params;
+  const telefone = String(req.params.telefone || "").replace(/\D/g, "");
+  const restauranteId = req.query.restauranteId || req.query.restaurante || req.query.lojaId || null;
 
   try {
-    const pedidos = await Pedido.find({ telefoneCliente: telefone }).sort({ criadoEm: -1 });
-    res.status(200).json(pedidos);
+    if (!telefone || telefone.length < 8) {
+      return res.status(400).json({ message: "Telefone inválido." });
+    }
+
+    const filtro = { telefoneCliente: telefone };
+    if (restauranteId) filtro.restaurante = restauranteId;
+
+    const pedidos = await Pedido.find(filtro).sort({ criadoEm: -1 });
+    return res.status(200).json({ pedidos });
   } catch (err) {
-    res.status(500).json({ message: "Erro ao buscar pedidos do cliente", error: err.message });
+    console.error("Erro ao buscar pedidos do cliente:", err);
+    return res.status(500).json({ message: "Erro ao buscar pedidos do cliente", error: err.message });
   }
 };
 
