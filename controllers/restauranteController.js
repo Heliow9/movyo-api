@@ -429,10 +429,31 @@ module.exports = {
   async restauranteSlug(req, res) {
     try {
       const { slug } = req.params;
+      const slugLimpo = String(slug || "").trim();
 
-      const restaurante = await Restaurante.findOne({ slugIdentificador: slug });
+      // Compatibilidade da vitrine: aceita slugIdentificador, logoSlug, _id/id
+      // e também uma busca case-insensitive para evitar 404 quando o slug foi salvo
+      // com maiúsculas/minúsculas diferentes no banco.
+      let restaurante = await Restaurante.findOne({
+        $or: [
+          { slugIdentificador: slugLimpo },
+          { logoSlug: slugLimpo },
+          { _id: slugLimpo },
+          { id: slugLimpo },
+        ],
+      });
+
       if (!restaurante) {
-        return res.status(404).json({ erro: "Restaurante não encontrado." });
+        restaurante = await Restaurante.findOne({
+          $or: [
+            { slugIdentificador: { $regex: `^${slugLimpo}$`, $options: "i" } },
+            { logoSlug: { $regex: `^${slugLimpo}$`, $options: "i" } },
+          ],
+        });
+      }
+
+      if (!restaurante) {
+        return res.status(404).json({ erro: "Restaurante não encontrado.", slug: slugLimpo });
       }
 
       const categorias = await CategoriaProduto.find({
