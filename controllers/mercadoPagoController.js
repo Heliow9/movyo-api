@@ -189,15 +189,41 @@ exports.callbackOAuth = async (req, res) => {
       expires_in: data?.expires_in,
     });
 
+    // ✅ IMPORTANTE: no MySQL factory, mercadoPago é uma coluna JSON.
+    // Updates com ponto ("mercadoPago.conectado") não persistem nessa factory.
+    // Por isso salvamos o objeto JSON inteiro.
+    const restauranteAtual = await Restaurante.findById(entry.restauranteId).lean();
+    if (!restauranteAtual) {
+      console.error("❌ Restaurante não encontrado para salvar OAuth.", { restauranteId: entry.restauranteId });
+      await OAuthState.deleteOne({ _id: entry._id });
+      return res.redirect(safeRedirect(appUrl, { mp: "erro", reason: "restaurante_nao_encontrado" }));
+    }
+
+    const mercadoPagoAtual =
+      restauranteAtual.mercadoPago && typeof restauranteAtual.mercadoPago === "object"
+        ? restauranteAtual.mercadoPago
+        : {};
+
+    const mercadoPagoNovo = {
+      ...mercadoPagoAtual,
+      conectado: true,
+      userId: data?.user_id != null ? String(data.user_id) : null,
+      accessToken: data?.access_token != null ? String(data.access_token) : null,
+      refreshToken: data?.refresh_token != null ? String(data.refresh_token) : null,
+      tokenExpiraEm: new Date(Date.now() + Number(data.expires_in || 0) * 1000),
+      ultimoOAuthEm: new Date(),
+    };
+
     await Restaurante.findByIdAndUpdate(entry.restauranteId, {
-      $set: {
-        "mercadoPago.conectado": true,
-        "mercadoPago.userId": data?.user_id != null ? String(data.user_id) : null,
-        "mercadoPago.accessToken": data?.access_token != null ? String(data.access_token) : null,
-        "mercadoPago.refreshToken": data?.refresh_token != null ? String(data.refresh_token) : null,
-        "mercadoPago.tokenExpiraEm": new Date(Date.now() + Number(data.expires_in || 0) * 1000),
-        "mercadoPago.ultimoOAuthEm": new Date(),
-      },
+      $set: { mercadoPago: mercadoPagoNovo },
+    });
+
+    const restauranteConferido = await Restaurante.findById(entry.restauranteId).select("mercadoPago").lean();
+    console.log("💾 MERCADO PAGO SALVO", {
+      restauranteId: String(entry.restauranteId),
+      conectado: !!restauranteConferido?.mercadoPago?.conectado,
+      hasAccessToken: !!restauranteConferido?.mercadoPago?.accessToken,
+      userId: restauranteConferido?.mercadoPago?.userId || null,
     });
 
     await OAuthState.deleteOne({ _id: entry._id });
