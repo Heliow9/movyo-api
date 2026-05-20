@@ -91,6 +91,7 @@ app.use("/api", require("./routes/mercadoPagoWebhookRoutes"));
 app.use("/api/pedidos", require("./routes/pedidosRoutes")(io));
 app.use("/api/entregadores", require("./routes/entregadorRoutes")(io));
 
+app.use("/api/publico", mercadoPagoPublicoRoutes);
 app.use("/api/publico/mercadopago", mercadoPagoPublicoRoutes);
 app.use("/api/garcons", garcomRoutes);
 app.use("/api/estoque", require("./routes/estoqueRoutes"));

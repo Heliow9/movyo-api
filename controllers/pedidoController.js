@@ -527,7 +527,7 @@ const criarPedido = async (req, res) => {
         (telefoneNormalizado ? `cliente_${telefoneNormalizado}@example.com` : "comprador@movyo.com");
 
       const notificationUrl = process.env.API_PUBLIC_URL
-        ? `${process.env.API_PUBLIC_URL}/api/webhooks/mercadopago`
+        ? `${process.env.API_PUBLIC_URL}/api/mercadopago/webhook`
         : null;
 
       const idempotencyKey = `pedido-${novoPedido._id}-pix`;
@@ -626,7 +626,7 @@ const criarPedido = async (req, res) => {
       const payerIdentification = mpCard?.payer?.identification || undefined;
 
       const notificationUrl = process.env.API_PUBLIC_URL
-        ? `${process.env.API_PUBLIC_URL}/api/webhooks/mercadopago`
+        ? `${process.env.API_PUBLIC_URL}/api/mercadopago/webhook`
         : null;
 
       const idempotencyKey = `pedido-${novoPedido._id}-cc`;
