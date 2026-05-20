@@ -1,5 +1,6 @@
 // controllers/produtoController.js
 const Produto = require("../models/Produto");
+const CategoriaProduto = require("../models/CategoriaProduto");
 
 /** =========================
  * Helpers
@@ -103,8 +104,63 @@ const editarProduto = async (req, res) => {
 const getProdutosPorRestaurante = async (req, res) => {
   const { restauranteId } = req.params;
   try {
-    const produtos = await Produto.find({ restaurante: restauranteId }).populate("categoria");
-    res.json(normalizeProdutoListResponse(produtos));
+    // mysqlModelFactory ainda não faz populate real.
+    // Por isso buscamos as categorias manualmente para o app garçom/balcão
+    // receber categoria.nome em vez do ID da categoria.
+    const [produtos, categorias] = await Promise.all([
+      Produto.find({ restaurante: restauranteId }),
+      CategoriaProduto.find({ restaurante: restauranteId }),
+    ]);
+
+    const categoriaMap = new Map(
+      (categorias || []).map((cat) => {
+        const plain = typeof cat?.toObject === "function" ? cat.toObject() : cat;
+        return [String(plain?._id || plain?.id || ""), plain];
+      })
+    );
+
+    const produtosNormalizados = normalizeProdutoListResponse(produtos).map((produto) => {
+      const categoriaId = String(
+        produto?.categoria?._id ||
+        produto?.categoria?.id ||
+        produto?.categoria ||
+        ""
+      );
+      const categoria = categoriaMap.get(categoriaId);
+
+      if (!categoria) {
+        return {
+          ...produto,
+          categoria: categoriaId || null,
+          categoriaId: categoriaId || null,
+          categoriaNome: "Sem categoria",
+        };
+      }
+
+      return {
+        ...produto,
+        categoria: {
+          _id: categoria._id || categoria.id || categoriaId,
+          id: categoria.id || categoria._id || categoriaId,
+          nome: categoria.nome || "Sem categoria",
+          ordem: Number(categoria.ordem || 0),
+          ativa: categoria.ativa !== false,
+          permiteSabores: categoria.permiteSabores === true,
+          pizzaMultisabor: categoria.pizzaMultisabor === true,
+          calculoPrecoPor: categoria.calculoPrecoPor || "maior",
+          maxSabores: Number(categoria.maxSabores || 1),
+          tiposExtras: categoria.tiposExtras || [],
+          saboresDisponiveis: categoria.saboresDisponiveis || [],
+          bordasDisponiveis: categoria.bordasDisponiveis || [],
+          adicionaisDisponiveis: categoria.adicionaisDisponiveis || [],
+          complementosDisponiveis: categoria.complementosDisponiveis || [],
+        },
+        categoriaId,
+        categoriaNome: categoria.nome || "Sem categoria",
+      };
+    });
+
+    res.json(produtosNormalizados);
   } catch (err) {
     console.error("Erro ao buscar produtos:", err);
     res.status(500).json({ erro: "Erro ao buscar produtos." });
