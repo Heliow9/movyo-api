@@ -153,14 +153,15 @@ const atualizarOrdemCategorias = async (req, res) => {
       return res.status(400).json({ error: "Formato inválido" });
     }
 
-    const bulkOps = categorias.map(cat => ({
-      updateOne: {
-        filter: { _id: cat._id },
-        update: { ordem: cat.ordem }
-      }
-    }));
-
-    await CategoriaProduto.bulkWrite(bulkOps);
+    // Compatível com Mongo/Mongoose e com o mysqlModelFactory do projeto.
+    // bulkWrite não existe em todos os adapters, por isso atualizamos item a item.
+    await Promise.all(
+      categorias.map((cat, idx) =>
+        CategoriaProduto.findByIdAndUpdate(cat._id || cat.id, {
+          ordem: Number.isFinite(Number(cat.ordem)) ? Number(cat.ordem) : idx,
+        })
+      )
+    );
 
     res.status(200).json({ message: "Ordem atualizada com sucesso" });
   } catch (err) {

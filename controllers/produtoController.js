@@ -39,6 +39,13 @@ function normalizeProdutoBody(body = {}, { partial = false } = {}) {
 
   if (imprimeNaCozinha !== undefined) normalized.imprimeNaCozinha = imprimeNaCozinha;
 
+  const rawDestaque = normalized.destaque ?? normalized.emDestaque ?? normalized.isDestaque;
+  if (rawDestaque !== undefined) {
+    normalized.destaque = toBool(rawDestaque, false);
+  }
+  delete normalized.emDestaque;
+  delete normalized.isDestaque;
+
   const rawPreco = normalized.precoBase ?? normalized.preco;
   if (rawPreco !== undefined && rawPreco !== null && rawPreco !== '') {
     const precoNumber = Number(String(rawPreco).replace(',', '.'));

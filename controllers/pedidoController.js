@@ -1614,6 +1614,38 @@ const registrarPagamentoPedido = async (req, res) => {
 /* =========================================================
    PIX PARCIAL (BALCÃO)
 ========================================================= */
+
+function boolLikeMP(v) {
+  if (typeof v === "boolean") return v;
+  const s = String(v ?? "").trim().toLowerCase();
+  if (["true", "1", "sim", "yes", "on", "connected", "conectado"].includes(s)) return true;
+  if (["false", "0", "nao", "não", "no", "off", "desconectado"].includes(s)) return false;
+  return !!v;
+}
+
+function getMercadoPagoAccessToken(restaurante) {
+  const mp = restaurante?.mercadoPago && typeof restaurante.mercadoPago === "object"
+    ? restaurante.mercadoPago
+    : {};
+  return (
+    mp.accessToken ||
+    mp.token ||
+    mp.access_token ||
+    restaurante?.mercadoPagoAccessToken ||
+    restaurante?.mpAccessToken ||
+    ""
+  );
+}
+
+function isMercadoPagoConectado(restaurante) {
+  const mp = restaurante?.mercadoPago && typeof restaurante.mercadoPago === "object"
+    ? restaurante.mercadoPago
+    : {};
+  const token = getMercadoPagoAccessToken(restaurante);
+  return !!token && (boolLikeMP(mp.conectado) || boolLikeMP(mp.connected) || boolLikeMP(mp.ativo) || true);
+}
+
+
 const gerarPixPedido = async (req, res) => {
   try {
     const { pedidoId } = req.params;
@@ -1628,12 +1660,13 @@ const gerarPixPedido = async (req, res) => {
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
 
     const restaurante = pedido.restaurante;
-    if (!restaurante?.mercadoPago?.accessToken) {
-      return res.status(400).json({ message: "Restaurante sem Mercado Pago." });
+    const accessToken = getMercadoPagoAccessToken(restaurante);
+    if (!isMercadoPagoConectado(restaurante) || !accessToken) {
+      return res.status(400).json({ message: "Restaurante sem Mercado Pago.", code: "MP_NAO_CONECTADO" });
     }
 
     const client = new MercadoPagoConfig({
-      accessToken: restaurante.mercadoPago.accessToken,
+      accessToken,
     });
     const payment = new Payment(client);
 
