@@ -1,3 +1,11 @@
+
+const isProdutoDestaque = (p = {}) => {
+  const v = p.destaque ?? p.emDestaque ?? p.isDestaque ?? p.destaqueVitrine;
+  if (v === true || v === 1) return true;
+  if (typeof v === 'string') return ['true', '1', 'sim', 'yes', 's'].includes(v.trim().toLowerCase());
+  return false;
+};
+
 const Restaurante = require("../models/Restaurante");
 const Produto = require("../models/Produto");
 const CategoriaProduto = require("../models/CategoriaProduto");
@@ -498,7 +506,7 @@ module.exports = {
             precoBase: p.precoBase,
             imagem: p.imagem,
 
-            destaque: p.destaque === true,
+            destaque: isProdutoDestaque(p),
             ordem: p.ordem || 0,
 
             sabores: p.sabores?.length ? p.sabores : (saboresDisponiveis || []),
@@ -616,7 +624,7 @@ module.exports = {
             precoBase: p.precoBase,
             imagem: p.imagem,
 
-            destaque: p.destaque === true,
+            destaque: isProdutoDestaque(p),
             ordem: p.ordem || 0,
 
             sabores: p.sabores?.length ? p.sabores : (saboresDisponiveis || []),

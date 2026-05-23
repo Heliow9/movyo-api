@@ -11,6 +11,17 @@ const { criarPagamentoPix, consultarPagamento } = require("../services/mercadoPa
 // controllers/mesaController.js (no topo)
 const { enviarMensagem, enviarMensagemMidia, estaConectado } = require("../utils/bot");
 
+function boolLike(v) {
+  return v === true || v === 1 || String(v || "").trim().toLowerCase() === "true";
+}
+
+function getMercadoPagoInfo(restaurante) {
+  const mp = restaurante && restaurante.mercadoPago && typeof restaurante.mercadoPago === "object" ? restaurante.mercadoPago : {};
+  const accessToken = mp.accessToken || mp.token || mp.access_token || null;
+  const conectado = boolLike(mp.conectado) || !!accessToken;
+  return { conectado, accessToken, mp };
+}
+
 function normalizarNumeroMesa(valor) {
   return String(valor ?? "").trim().replace(/\s+/g, " ");
 }
@@ -138,15 +149,25 @@ function isPaidStatus(st) {
  */
 function getGarcomFromReq(req) {
   const u =
-    req?.user ||
+    req?.garcomDoc ||
     req?.garcom ||
     req?.garcomUser ||
-    req?.auth?.user ||
     req?.auth?.garcom ||
+    req?.auth?.user ||
+    req?.user ||
     null;
 
-  const id = u?._id ? String(u._id) : null;
-  const nome = u?.apelido || u?.nome || null;
+  const idRaw =
+    u?._id ||
+    u?.id ||
+    u?.garcomId ||
+    req?.garcomId ||
+    req?.user?.garcomId ||
+    req?.auth?.garcomId ||
+    null;
+
+  const id = idRaw ? String(idRaw) : null;
+  const nome = u?.apelido || u?.nome || req?.user?.apelido || req?.user?.nome || null;
 
   return { id, nome };
 }
@@ -886,8 +907,7 @@ exports.gerarPixMesaPainel = async (req, res) => {
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("nome mercadoPago telefone");
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const conectado = !!restaurante?.mercadoPago?.conectado;
-    const accessToken = restaurante?.mercadoPago?.accessToken;
+    const { conectado, accessToken } = getMercadoPagoInfo(restaurante);
 
     if (!conectado || !accessToken) {
       return res.status(400).json({
@@ -987,7 +1007,7 @@ exports.statusPixMesaPainel = async (req, res) => {
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
 
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("mercadoPago");
-    const accessToken = restaurante?.mercadoPago?.accessToken;
+    const { accessToken } = getMercadoPagoInfo(restaurante);
 
     if (!accessToken) {
       return res.status(400).json({ message: "Restaurante não conectado ao Mercado Pago." });
@@ -1180,8 +1200,7 @@ exports.gerarPixMesaApp = async (req, res) => {
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("nome mercadoPago telefone");
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const conectado = !!restaurante?.mercadoPago?.conectado;
-    const accessToken = restaurante?.mercadoPago?.accessToken;
+    const { conectado, accessToken } = getMercadoPagoInfo(restaurante);
 
     if (!conectado || !accessToken) {
       return res.status(400).json({
@@ -1281,7 +1300,7 @@ exports.statusPixMesaApp = async (req, res) => {
     }
 
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("mercadoPago");
-    const accessToken = restaurante?.mercadoPago?.accessToken;
+    const { accessToken } = getMercadoPagoInfo(restaurante);
 
     if (!accessToken) {
       return res.status(400).json({
@@ -1357,8 +1376,10 @@ exports.statusPixMesaApp = async (req, res) => {
 ========================= */
 exports.resumoHomeApp = async (req, res) => {
   try {
-    const restauranteId = req.restauranteId;
-    const garcomId = getGarcomFromReq(req)?.id;
+    const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
+    const gReq = getGarcomFromReq(req);
+    const garcomId = gReq?.id ? String(gReq.id) : null;
+    const garcomNomeReq = gReq?.nome || req.user?.nome || req.user?.apelido || "Garçom";
 
     if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
 
@@ -1367,35 +1388,180 @@ exports.resumoHomeApp = async (req, res) => {
     const end = new Date();
     end.setHours(23, 59, 59, 999);
 
-    const [mesasOcupadas, pedidosFila] = await Promise.all([
-      Mesa.countDocuments({ restauranteId, status: "ocupada" }),
-      Pedido.countDocuments({
-        restaurante: restauranteId,
-        status: { $in: ["aguardando_pagamento", "em_producao"] },
-        canceladoEm: null,
-      }),
+    const norm = (v) => String(v || "").trim().toLowerCase();
+    const toDate = (v) => {
+      const d = v ? new Date(v) : null;
+      return d && !Number.isNaN(d.getTime()) ? d : null;
+    };
+    const sameId = (a, b) => a && b && String(a) === String(b);
+    const valorPedido = (p) => Number(p?.valorTotal ?? p?.total ?? p?.valor ?? 0) || 0;
+
+    const STATUS_AGUARDANDO_PAGAMENTO = new Set(["aguardando_pagamento", "pagamento_pendente", "pending_payment"]);
+    const STATUS_FINALIZADOS = new Set(["entregue", "finalizado", "cancelado", "cancelado_cliente", "cancelado_restaurante"]);
+    const STATUS_ATIVOS = new Set([
+      "pendente",
+      "novo",
+      "em_aberto",
+      "aberto",
+      "aguardando_resposta",
+      "aceito",
+      "recebido",
+      "em_preparo",
+      "preparando",
+      "producao",
+      "em_producao",
+      "pronto",
+      "em_entrega",
+      "em_rota",
+    ]);
+    const STATUS_MESA_ABERTA = new Set(["ocupada", "aberta", "em_aberto", "aberto"]);
+
+    const isAguardandoPagamento = (pedido) =>
+      STATUS_AGUARDANDO_PAGAMENTO.has(norm(pedido?.status)) ||
+      STATUS_AGUARDANDO_PAGAMENTO.has(norm(pedido?.statusPagamento));
+
+    const isFinalizado = (pedido) =>
+      STATUS_FINALIZADOS.has(norm(pedido?.status)) || !!pedido?.canceladoEm;
+
+    const isAtivoOperacional = (pedido) => {
+      const st = norm(pedido?.status);
+      if (isAguardandoPagamento(pedido) || isFinalizado(pedido)) return false;
+      return STATUS_ATIVOS.has(st) || (!st && !isFinalizado(pedido));
+    };
+
+    const isHoje = (pedido) => {
+      const dt = toDate(pedido?.pagoEm || pedido?.createdAt || pedido?.criadoEm || pedido?.data);
+      return !!dt && dt >= start && dt <= end;
+    };
+
+    const pertenceAoGarcom = (pedido) => {
+      if (!garcomId) return false;
+      return (
+        sameId(pedido?.garcomId, garcomId) ||
+        sameId(pedido?.fechadoPor, garcomId) ||
+        sameId(pedido?.recebidoPor, garcomId) ||
+        sameId(pedido?.criadoPor, garcomId)
+      );
+    };
+
+    const [mesasRaw, todosPedidosRaw] = await Promise.all([
+      Mesa.find({ restauranteId }).lean(),
+      Pedido.find({ restaurante: restauranteId }).lean(),
     ]);
 
-    let vendasHojeGarcom = 0;
+    const todosPedidos = Array.isArray(todosPedidosRaw) ? todosPedidosRaw : [];
+    const pedidosPorId = new Map(todosPedidos.map((p) => [String(p?._id || p?.id || ""), p]));
 
-    if (garcomId) {
-      const agg = await Pedido.aggregate([
-        {
-          $match: {
-            restaurante: new mongoose.Types.ObjectId(restauranteId),
-            garcomId: new mongoose.Types.ObjectId(garcomId),
-            status: "pago",
-            pagoEm: { $gte: start, $lte: end },
-            canceladoEm: null,
-          },
-        },
-        { $group: { _id: null, total: { $sum: "$valorTotal" } } },
-      ]);
+    // Mesa aberta real: conta mesa marcada como aberta/ocupada. Se tiver pedidoAtualId, ele precisa estar ativo.
+    const mesasAbertas = (Array.isArray(mesasRaw) ? mesasRaw : []).filter((mesa) => {
+      if (!STATUS_MESA_ABERTA.has(norm(mesa?.status))) return false;
+      const pedidoId = mesa?.pedidoAtualId ? String(mesa.pedidoAtualId) : "";
+      if (!pedidoId) return true;
+      const pedido = pedidosPorId.get(pedidoId);
+      return !pedido || isAtivoOperacional(pedido);
+    }).length;
 
-      vendasHojeGarcom = Number(agg?.[0]?.total || 0);
+    // Pendente operacional = ainda precisa de ação: pendente/produção/pronto/entrega, mas nunca aguardando pagamento.
+    const pedidosOperacionaisHoje = todosPedidos.filter((pedido) => isHoje(pedido) && isAtivoOperacional(pedido));
+    const pedidosPendentes = pedidosOperacionaisHoje.length;
+
+    const isPago = (pedido) => {
+      const stPag = norm(pedido?.statusPagamento);
+      const st = norm(pedido?.status);
+      return stPag === "pago" || stPag === "confirmado" || st === "pago" || Number(pedido?.valorPago || 0) > 0;
+    };
+
+    const pagamentoConfirmadoGarcom = (pedido) => {
+      const pagamentos = Array.isArray(pedido?.pagamentos) ? pedido.pagamentos : [];
+      return [...pagamentos].reverse().find((p) => {
+        const status = norm(p?.status);
+        const role = norm(p?.recebidoPorRole || p?.role);
+        return (status === "confirmado" || status === "pago" || status === "approved") && role === "garcom";
+      }) || null;
+    };
+
+    const atribuirGarcomPedido = (pedido) => {
+      const pag = pagamentoConfirmadoGarcom(pedido);
+      const idRaw =
+        pedido?.garcomId ||
+        pedido?.fechadoPor ||
+        pedido?.recebidoPor ||
+        pedido?.criadoPor ||
+        pag?.recebidoPor ||
+        pag?.garcomId ||
+        null;
+
+      const nomeRaw =
+        pedido?.garcomNome ||
+        pedido?.fechadoPorNome ||
+        pedido?.recebidoPorNome ||
+        pedido?.criadoPorNome ||
+        pag?.recebidoPorNome ||
+        pag?.garcomNome ||
+        null;
+
+      let id = idRaw ? String(idRaw) : null;
+      let nome = nomeRaw || null;
+
+      // Compatibilidade para pedidos antigos criados antes de salvar garcomId:
+      // quando a Home é aberta pelo próprio garçom e o pedido não tem responsável,
+      // atribui ao usuário logado em vez de criar o grupo falso "Garçom".
+      if (!id && garcomId && ["balcao", "mesa", "garcom"].includes(norm(pedido?.origem))) {
+        id = garcomId;
+        nome = garcomNomeReq;
+      }
+
+      if (sameId(id, garcomId)) nome = garcomNomeReq || nome;
+      if (!id && nome) id = `nome:${String(nome).trim().toLowerCase()}`;
+
+      return id ? { id, nome: nome || (sameId(id, garcomId) ? garcomNomeReq : "Sem garçom") } : null;
+    };
+
+    const pedidosHojeGarcom = todosPedidos.filter((pedido) => {
+      if (!isHoje(pedido)) return false;
+      const atrib = atribuirGarcomPedido(pedido);
+      return atrib && sameId(atrib.id, garcomId);
+    });
+    const pedidosPagosHojeGarcom = pedidosHojeGarcom.filter(isPago);
+
+    const vendasHojeGarcom = pedidosPagosHojeGarcom.reduce((acc, p) => acc + valorPedido(p), 0);
+
+    const rankingMap = new Map();
+    todosPedidos
+      .filter((pedido) => isHoje(pedido))
+      .filter(isPago)
+      .forEach((pedido) => {
+        const atrib = atribuirGarcomPedido(pedido);
+        if (!atrib) return;
+        const atual = rankingMap.get(atrib.id) || { id: atrib.id, nome: atrib.nome, pedidos: 0, total: 0 };
+        atual.nome = sameId(atrib.id, garcomId) ? garcomNomeReq : (atrib.nome || atual.nome);
+        atual.pedidos += 1;
+        atual.total += valorPedido(pedido);
+        rankingMap.set(atrib.id, atual);
+      });
+
+    if (garcomId && !rankingMap.has(garcomId)) {
+      rankingMap.set(garcomId, { id: garcomId, nome: garcomNomeReq, pedidos: pedidosPagosHojeGarcom.length, total: vendasHojeGarcom });
     }
 
-    return res.json({ mesasOcupadas, pedidosFila, vendasHojeGarcom });
+    const rankingGarcons = Array.from(rankingMap.values())
+      .sort((a, b) => Number(b.total || 0) - Number(a.total || 0))
+      .slice(0, 5);
+
+    return res.json({
+      mesasAbertas,
+      mesasOcupadas: mesasAbertas,
+      pedidosPendentes,
+      pedidosFila: pedidosPendentes,
+      pedidosHojeGarcom: pedidosHojeGarcom.length,
+      vendasHojeGarcom,
+      rankingGarcons,
+      filtros: {
+        pedidosAtivos: Array.from(STATUS_ATIVOS),
+        ignorados: Array.from(STATUS_AGUARDANDO_PAGAMENTO),
+        hoje: { inicio: start.toISOString(), fim: end.toISOString() },
+      },
+    });
   } catch (error) {
     return res.status(500).json({
       message: "Erro ao gerar resumo da home",
