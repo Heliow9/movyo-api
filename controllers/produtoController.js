@@ -310,7 +310,7 @@ const setProdutoDestaque = async (req, res) => {
     const produto = await Produto.findById(id);
     if (!produto) return res.status(404).json({ erro: "Produto não encontrado." });
 
-    produto.destaque = !!destaque;
+    produto.destaque = destaque === true || destaque === 1 || destaque === '1' || String(destaque).toLowerCase() === 'true';
     await produto.save();
 
     return res.json({ ok: true, destaque: produto.destaque, data: produto });

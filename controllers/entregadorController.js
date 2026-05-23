@@ -29,7 +29,10 @@ const register = async (req, res) => {
       email,
       senha: senhaHash,
       restaurante: restauranteId,
-      cpf
+      cpf,
+      statusConta: 'ativo',
+      status: true,
+      disponivel: true
     });
 
     res.status(201).json({ message: 'Entregador cadastrado com sucesso', entregador: novoEntregador });
@@ -89,6 +92,9 @@ const login = async (req, res) => {
     const entregador = await Entregador.findOne({ email });
     if (!entregador) return res.status(400).json({ error: 'Usuário não encontrado.' });
 
+    const bloqueado = String(entregador.statusConta || 'ativo').toLowerCase() === 'bloqueado' || entregador.status === false;
+    if (bloqueado) return res.status(403).json({ error: 'Acesso bloqueado pelo restaurante.' });
+
     const senhaCorreta = await bcrypt.compare(senha, entregador.senha);
     if (!senhaCorreta) return res.status(400).json({ error: 'Senha incorreta.' });
 
@@ -109,7 +115,7 @@ const login = async (req, res) => {
     entregador.localizacao = { latitude, longitude };
     await entregador.save();
 
-    const token = jwt.sign({ id: entregador._id, restauranteId: entregador.restauranteId }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ id: entregador._id, restauranteId: entregador.restaurante || entregador.restauranteId }, process.env.JWT_SECRET, {
       expiresIn: '1d'
     });
 
@@ -219,7 +225,10 @@ const atualizarEntregador = async (req, res) => {
     if (nome) dadosAtualizados.nome = nome;
     if (email) dadosAtualizados.email = email;
     if (cpf) dadosAtualizados.cpf = cpf;
-    if (statusConta) dadosAtualizados.statusConta = statusConta;
+    if (statusConta) {
+      dadosAtualizados.statusConta = statusConta;
+      dadosAtualizados.status = String(statusConta).toLowerCase() !== 'bloqueado';
+    }
     if (expoPushToken) dadosAtualizados.expoPushToken = expoPushToken;
     if (senha) {
       const senhaHash = await bcrypt.hash(senha, 10);
