@@ -824,46 +824,48 @@ const listarPedidosPorRestaurante = async (req, res) => {
       req.query;
 
     const query = { restaurante: restauranteId };
-
-    // Por padrão, a tela/lista de pedidos não deve mostrar pedidos apenas com PIX/cartão aguardando pagamento.
-    // Se a tela pedir explicitamente ?status=aguardando_pagamento, aí retornamos normalmente.
-    if (status) {
-      query.status = status;
-    } else {
-      query.status = { $nin: ["aguardando_pagamento", "pagamento_pendente"] };
-    }
     if (origem) query.origem = origem;
 
-    if (somenteMesa === "true") query.mesaId = { $ne: null };
-    if (somenteBalcao === "true") query.mesaId = null;
+    // O adapter MySQL do projeto não suporta bem $nin/$exists em todos os pontos.
+    // Por isso buscamos pelo restaurante e aplicamos os filtros de status em JS, garantindo
+    // que aguardando_pagamento não suma tudo da tela nem contamine a listagem padrão.
+    let pedidosBase = await Pedido.find(query).populate("entregador").sort({ createdAt: -1, criadoEm: -1 });
+    pedidosBase = Array.isArray(pedidosBase) ? pedidosBase : [];
 
-    if (dataInicio || dataFim) {
-      const inicio = dataInicio ? new Date(`${dataInicio}T00:00:00.000Z`) : null;
-      const fim = dataFim ? new Date(`${dataFim}T23:59:59.999Z`) : null;
+    const statusBloqueadosPadrao = new Set(["aguardando_pagamento", "pagamento_pendente"]);
+    const norm = (v) => String(v || "").trim().toLowerCase();
 
-      query.$and = query.$and || [];
+    let pedidosFiltrados = pedidosBase.filter((pedido) => {
+      const st = norm(pedido?.status);
+      const stPag = norm(pedido?.statusPagamento);
 
-      const dateFilter = {};
-      if (inicio) dateFilter.$gte = inicio;
-      if (fim) dateFilter.$lte = fim;
+      if (status) {
+        if (st !== norm(status)) return false;
+      } else if (statusBloqueadosPadrao.has(st) || statusBloqueadosPadrao.has(stPag)) {
+        return false;
+      }
 
-      query.$and.push({
-        $or: [{ createdAt: dateFilter }, { criadoEm: dateFilter }],
-      });
-    }
+      if (somenteMesa === "true" && !pedido?.mesaId) return false;
+      if (somenteBalcao === "true" && pedido?.mesaId) return false;
+
+      if (dataInicio || dataFim) {
+        const inicio = dataInicio ? new Date(`${dataInicio}T00:00:00.000Z`) : null;
+        const fim = dataFim ? new Date(`${dataFim}T23:59:59.999Z`) : null;
+        const rawDate = pedido?.createdAt || pedido?.criadoEm;
+        const dt = rawDate ? new Date(rawDate) : null;
+        if (!dt || Number.isNaN(dt.getTime())) return false;
+        if (inicio && dt < inicio) return false;
+        if (fim && dt > fim) return false;
+      }
+
+      return true;
+    });
 
     const pageNum = Math.max(1, Number(page) || 1);
     const limitNum = Math.min(500, Math.max(1, Number(limit) || 200));
     const skip = (pageNum - 1) * limitNum;
-
-    const [total, pedidos] = await Promise.all([
-      Pedido.countDocuments(query),
-      Pedido.find(query)
-        .populate("entregador")
-        .sort({ createdAt: -1, criadoEm: -1 })
-        .skip(skip)
-        .limit(limitNum),
-    ]);
+    const total = pedidosFiltrados.length;
+    const pedidos = pedidosFiltrados.slice(skip, skip + limitNum);
 
     res.json({ total, page: pageNum, limit: limitNum, pedidos });
   } catch (error) {

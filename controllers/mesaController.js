@@ -1357,7 +1357,7 @@ exports.statusPixMesaApp = async (req, res) => {
 ========================= */
 exports.resumoHomeApp = async (req, res) => {
   try {
-    const restauranteId = req.restauranteId;
+    const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
     const garcomId = getGarcomFromReq(req)?.id;
 
     if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
@@ -1367,15 +1367,52 @@ exports.resumoHomeApp = async (req, res) => {
     const end = new Date();
     end.setHours(23, 59, 59, 999);
 
-    const [mesasOcupadas, pedidosFila] = await Promise.all([
-      Mesa.countDocuments({ restauranteId, status: "ocupada" }),
-      // Home do garçom não deve contar PIX de balcão ainda pendente como pedido/fila.
-      Pedido.countDocuments({
-        restaurante: restauranteId,
-        status: { $in: ["em_producao"] },
-        canceladoEm: null,
-      }),
-    ]);
+    const STATUS_AGUARDANDO_PAGAMENTO = ["aguardando_pagamento", "pagamento_pendente"];
+    const STATUS_FINALIZADOS = ["entregue", "finalizado", "cancelado", "cancelado_cliente", "cancelado_restaurante"];
+    const STATUS_ATIVOS = ["pendente", "novo", "em_aberto", "aguardando_resposta", "em_producao", "pronto", "em_entrega", "em_rota"];
+
+    const isAguardandoPagamento = (pedido) =>
+      STATUS_AGUARDANDO_PAGAMENTO.includes(String(pedido?.status || "").toLowerCase()) ||
+      STATUS_AGUARDANDO_PAGAMENTO.includes(String(pedido?.statusPagamento || "").toLowerCase());
+
+    const isFinalizado = (pedido) =>
+      STATUS_FINALIZADOS.includes(String(pedido?.status || "").toLowerCase()) || !!pedido?.canceladoEm;
+
+    const isAtivoOperacional = (pedido) => {
+      const st = String(pedido?.status || "").toLowerCase();
+      return STATUS_ATIVOS.includes(st) && !isAguardandoPagamento(pedido) && !isFinalizado(pedido);
+    };
+
+    // Mesa aberta real = mesa ocupada com pedido atual ativo.
+    // Filtramos em JS porque o adapter MySQL do projeto não suporta todos os operadores Mongo ($nin/$exists).
+    const mesasOcupadasRaw = await Mesa.find({ restauranteId, status: "ocupada" }).lean();
+    const pedidosMesaIds = (Array.isArray(mesasOcupadasRaw) ? mesasOcupadasRaw : [])
+      .map((m) => m?.pedidoAtualId)
+      .filter(Boolean)
+      .map(String);
+
+    const pedidosMesa = pedidosMesaIds.length
+      ? await Pedido.find({ restaurante: restauranteId, _id: { $in: pedidosMesaIds } }).lean()
+      : [];
+    const pedidosMesaAtivos = new Set(
+      (Array.isArray(pedidosMesa) ? pedidosMesa : [])
+        .filter(isAtivoOperacional)
+        .map((p) => String(p?._id || p?.id))
+    );
+
+    const mesasOcupadas = (Array.isArray(mesasOcupadasRaw) ? mesasOcupadasRaw : []).filter((mesa) =>
+      pedidosMesaAtivos.has(String(mesa?.pedidoAtualId || ""))
+    ).length;
+
+    // Pedido pendente na Home = pedido ativo de balcão/delivery/vitrine, já válido para operação.
+    // Não conta aguardando_pagamento e não mistura com mesa aberta.
+    const todosPedidos = await Pedido.find({ restaurante: restauranteId }).lean();
+    const pedidosFila = (Array.isArray(todosPedidos) ? todosPedidos : []).filter((pedido) => {
+      if (!isAtivoOperacional(pedido)) return false;
+      const origem = String(pedido?.origem || "").toLowerCase();
+      const temMesa = !!pedido?.mesaId;
+      return !temMesa || ["delivery", "balcao", "vitrine", "app", "site"].includes(origem);
+    }).length;
 
     let vendasHojeGarcom = 0;
 
@@ -1385,7 +1422,7 @@ exports.resumoHomeApp = async (req, res) => {
           $match: {
             restaurante: new mongoose.Types.ObjectId(restauranteId),
             garcomId: new mongoose.Types.ObjectId(garcomId),
-            status: "pago",
+            statusPagamento: "pago",
             pagoEm: { $gte: start, $lte: end },
             canceladoEm: null,
           },
@@ -1396,7 +1433,17 @@ exports.resumoHomeApp = async (req, res) => {
       vendasHojeGarcom = Number(agg?.[0]?.total || 0);
     }
 
-    return res.json({ mesasOcupadas, pedidosFila, vendasHojeGarcom });
+    return res.json({
+      mesasAbertas: mesasOcupadas,
+      mesasOcupadas,
+      pedidosPendentes: pedidosFila,
+      pedidosFila,
+      vendasHojeGarcom,
+      filtros: {
+        pedidosAtivos: STATUS_ATIVOS,
+        ignorados: STATUS_AGUARDANDO_PAGAMENTO,
+      },
+    });
   } catch (error) {
     return res.status(500).json({
       message: "Erro ao gerar resumo da home",
