@@ -125,6 +125,21 @@ function formatarExtrasItem(item = {}) {
   return linhas;
 }
 
+
+function assinaturaItemPedido(item = {}) {
+  const qtd = Number(item.quantidade || item.qtd || item.quantity || 1) || 1;
+  const nome = String(item.nome || item.titulo || item.title || item.descricao || "Item").trim().toLowerCase();
+  const total = round2(toNum(item.precoTotal ?? item.total ?? item.valorTotal ?? 0));
+  const unit = round2(toNum(item.precoUnitario ?? item.preco ?? item.valorUnitario ?? 0));
+  const obs = String(item.observacao || item.obs || "").trim().toLowerCase();
+  return `${qtd}|${nome}|${total}|${unit}|${obs}`;
+}
+
+function mesmosItensPedido(a = [], b = []) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  return a.map(assinaturaItemPedido).join("||") === b.map(assinaturaItemPedido).join("||");
+}
+
 function montarResumoItensPedido(pedido) {
   const itens = Array.isArray(pedido?.itens) ? pedido.itens : [];
   if (!itens.length) return "🛒 *Itens do pedido:*\n• Nenhum item encontrado no pedido.";
@@ -405,9 +420,26 @@ exports.adicionarItensBalcao = async (req, res) => {
     const totalRodada = itensNormalizados.reduce((acc, i) => acc + toNum(i.precoTotal), 0);
 
     pedido.itens = Array.isArray(pedido.itens) ? pedido.itens : [];
-    pedido.itens.push(...itensNormalizados);
 
-    pedido.valorTotal = round2(Number(pedido.valorTotal || 0) + totalRodada);
+    // Proteção contra duplicidade: versões antigas do app abriam o pedido com itens
+    // e logo em seguida chamavam /itens com o mesmo carrinho. Nesse caso não soma de novo.
+    const deveSubstituir =
+      req.body?.substituirItens === true ||
+      req.body?.replaceItems === true ||
+      req.body?.atualizarItens === true ||
+      mesmosItensPedido(pedido.itens, itensNormalizados);
+
+    if (deveSubstituir) {
+      pedido.itens = itensNormalizados;
+      pedido.valorTotal = round2(totalRodada);
+      pedido.total = round2(totalRodada);
+      pedido.valorPago = round2(toNum(pedido.valorPago));
+      pedido.valorPendente = round2(Math.max(0, totalRodada - toNum(pedido.valorPago)));
+    } else {
+      pedido.itens.push(...itensNormalizados);
+      pedido.valorTotal = round2(Number(pedido.valorTotal || 0) + totalRodada);
+      pedido.total = pedido.valorTotal;
+    }
 
     const { total, pago, pendente } = recalcPagamentoPedido(pedido);
     await pedido.save();
