@@ -60,6 +60,67 @@ function normalizarItensBalcao(itens = []) {
   return (Array.isArray(itens) ? itens : []).map(normalizarItemBalcao).filter((i) => i.nome && Number(i.quantidade) > 0);
 }
 
+
+function extrairItensResumoBody(body = {}) {
+  const candidatos = [
+    body.itens,
+    body.itensPedido,
+    body.itensDetalhados,
+    body.produtos,
+    body.pedidoItens,
+    body.carrinho,
+    body.orderItems,
+    body?.pedido?.itens,
+    body?.pedido?.itensPedido,
+    body?.pedido?.produtos,
+  ];
+
+  for (const cand of candidatos) {
+    const itens = normalizarItensBalcao(cand);
+    if (itens.length) return itens;
+  }
+
+  return [];
+}
+
+function totalItensBalcao(itens = []) {
+  return round2((Array.isArray(itens) ? itens : []).reduce((acc, it) => {
+    const qtd = Math.max(1, toNum(it?.quantidade ?? it?.qtd ?? 1));
+    const total = toNum(it?.precoTotal ?? it?.total ?? it?.valorTotal ?? 0);
+    const unit = toNum(it?.precoUnitario ?? it?.preco ?? it?.valorUnitario ?? 0);
+    return acc + (total > 0 ? total : unit * qtd);
+  }, 0));
+}
+
+function assinaturaResumoWhats(item = {}) {
+  const produtoId = String(item.produtoId || item.produto?._id || item.produto?.id || "");
+  const nome = String(item.nome || item.titulo || item.title || item.descricao || "Item").trim().toLowerCase();
+  const qtd = Number(item.quantidade || item.qtd || item.quantity || 1) || 1;
+  const total = round2(toNum(item.precoTotal ?? item.total ?? item.valorTotal ?? 0));
+  const unit = round2(toNum(item.precoUnitario ?? item.preco ?? item.valorUnitario ?? 0));
+  const extras = JSON.stringify({
+    sabores: item.saboresSelecionados || item.sabores || [],
+    borda: item.bordaSelecionada || item.borda || null,
+    adicional: item.adicionalSelecionado || item.adicional || null,
+    complementos: item.complementosSelecionados || item.complementos || [],
+    tipos: item.tiposExtrasSelecionados || {},
+    obs: String(item.observacao || item.obs || "").trim().toLowerCase(),
+  });
+  return `${produtoId}|${nome}|${qtd}|${unit}|${total}|${extras}`;
+}
+
+function deduplicarItensResumoWhats(itens = []) {
+  const out = [];
+  const seen = new Set();
+  for (const item of Array.isArray(itens) ? itens : []) {
+    const sig = assinaturaResumoWhats(item);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push(item);
+  }
+  return out;
+}
+
 function calcularTotalPedido(pedido) {
   const vt = toNum(pedido?.valorTotal);
   if (vt > 0) return round2(vt);
@@ -876,13 +937,36 @@ exports.enviarPixWhatsappBalcao = async (req, res) => {
       });
     }
 
+    const itensBody = deduplicarItensResumoWhats(extrairItensResumoBody(req.body));
+
+    // Quando o app envia o carrinho no body, ele é a fonte mais confiável para o WhatsApp.
+    // Isso evita mostrar item duplicado caso alguma versão antiga tenha somado o mesmo carrinho no pedido.
+    const itensResumo = itensBody.length ? itensBody : deduplicarItensResumoWhats(Array.isArray(pedido.itens) ? pedido.itens : []);
+    const totalResumo = itensBody.length ? totalItensBalcao(itensBody) : 0;
+
+    if (itensBody.length) {
+      pedido.itens = itensBody;
+      pedido.valorTotal = totalResumo;
+      pedido.total = totalResumo;
+      pedido.valorPendente = round2(Math.max(0, totalResumo - toNum(pedido.valorPago)));
+    }
+
     const { total, pago, pendente } = recalcPagamentoPedido(pedido);
     await pedido.save().catch(() => {});
 
-    const nomeCliente = pedido?.nomeCliente || "Cliente";
+    const nomeCliente = pedido?.nomeCliente || req.body?.nomeCliente || req.body?.cliente || "Cliente";
     const qrBase64 = String(alvo.pixQrCodeBase64 || "").trim();
 
-    const resumoItens = montarResumoItensPedido(pedido);
+    const pedidoParaResumo = {
+      ...(typeof pedido.toObject === "function" ? pedido.toObject() : pedido),
+      itens: itensResumo,
+      valorTotal: totalResumo || total,
+      total: totalResumo || total,
+    };
+    const resumoItens = montarResumoItensPedido(pedidoParaResumo);
+
+    const totalMensagem = totalResumo || total || valorPix;
+    const pendenteMensagem = itensBody.length ? valorPix : pendente;
 
     const resumo = [
       "📲 *PAGAMENTO VIA PIX*",
@@ -891,9 +975,9 @@ exports.enviarPixWhatsappBalcao = async (req, res) => {
       resumoItens,
       "",
       `💰 *Valor do PIX:* ${formatBRL(valorPix)}`,
-      `🧾 *Total:* ${formatBRL(total || 0)}`,
+      `🧾 *Total:* ${formatBRL(totalMensagem || 0)}`,
       `✅ *Pago:* ${formatBRL(pago || 0)}`,
-      `⏳ *Pendente:* ${formatBRL(pendente || 0)}`,
+      `⏳ *Pendente:* ${formatBRL(pendenteMensagem || 0)}`,
       "",
       "Abra o app do banco e escaneie o QR ✅",
     ].join("\n");
