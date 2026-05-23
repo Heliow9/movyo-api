@@ -391,6 +391,22 @@ exports.listarPedidosBalcaoAbertos = async (req, res) => {
 /* =========================
    ABRIR PEDIDO (balcão)
 ========================= */
+async function gerarProximoNumeroBalcao(restauranteId) {
+  const prefixo = "BK";
+  const regex = new RegExp(`^${prefixo}(\\d+)$`);
+
+  const ultimo = await Pedido.findOne({
+    restaurante: restauranteId,
+    numeroPedido: { $regex: `^${prefixo}` },
+  })
+    .sort({ criadoEm: -1, createdAt: -1 })
+    .select("numeroPedido")
+    .lean();
+
+  const atual = String(ultimo?.numeroPedido || "").match(regex)?.[1] || "0";
+  return `${prefixo}${String(Number(atual) + 1).padStart(5, "0")}`;
+}
+
 exports.abrirPedidoBalcao = async (req, res) => {
   try {
     const { restauranteId, nomeCliente, telefoneCliente, itens } = req.body;
@@ -402,7 +418,10 @@ exports.abrirPedidoBalcao = async (req, res) => {
     const itensIniciais = normalizarItensBalcao(itens);
     const totalInicial = round2(itensIniciais.reduce((acc, i) => acc + toNum(i.precoTotal), 0));
 
+    const numeroPedido = await gerarProximoNumeroBalcao(restauranteId);
+
     const novoPedido = new Pedido({
+      numeroPedido,
       restaurante: restauranteId,
       mesaId: null,
       nomeCliente: nomeCliente || "Cliente balcão",
