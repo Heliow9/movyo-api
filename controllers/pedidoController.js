@@ -260,8 +260,33 @@ function isOrigemBalcao(origem) {
 function normalizeFormaPagamento(fpRaw) {
   const fp = String(fpRaw || "").toLowerCase().trim();
   const isPix = fp === "pix";
-  const isCard = fp === "cartaocredito" || fp === "cartao" || fp === "cartão";
+  const isCard = fp === "cartaocredito" || fp === "cartao" || fp === "cartão" || fp === "credito" || fp === "debito" || fp === "crédito" || fp === "débito";
   return { fp, isPix, isCard };
+}
+
+function formaPagamentoRelatorio(fpRaw) {
+  const { fp, isPix, isCard } = normalizeFormaPagamento(fpRaw);
+  if (isPix) return "pix";
+  if (isCard) return "cartao";
+  if (["dinheiro", "cash", "money"].includes(fp)) return "dinheiro";
+  if (["misto", "parcial"].includes(fp)) return "misto";
+  return fp || "pendente";
+}
+
+function upsertPagamentoPedido(pedido, pagamentoNovo = {}) {
+  pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
+
+  const mpPaymentId = pagamentoNovo?.mpPaymentId ? String(pagamentoNovo.mpPaymentId) : "";
+  if (mpPaymentId) {
+    const idx = pedido.pagamentos.findIndex((p) => String(p?.mpPaymentId || "") === mpPaymentId);
+    if (idx >= 0) {
+      pedido.pagamentos[idx] = { ...pedido.pagamentos[idx], ...pagamentoNovo };
+      return pedido.pagamentos[idx];
+    }
+  }
+
+  pedido.pagamentos.push(pagamentoNovo);
+  return pagamentoNovo;
 }
 
 /* =========================================================
@@ -438,6 +463,7 @@ const criarPedido = async (req, res) => {
     // 4) Cria pedido base
     // =========================
     const { isPix, isCard } = normalizeFormaPagamento(formadePagamento);
+    const formaRelatorio = formaPagamentoRelatorio(formadePagamento);
     const isBalcao = isOrigemBalcao(origem);
 
     const statusInicial = isBalcao
@@ -465,7 +491,9 @@ const criarPedido = async (req, res) => {
       valorPago: 0,
       valorPendente: round2(totalNumber),
 
-      formadePagamento: formadePagamento || "pendente",
+      formadePagamento: formaRelatorio,
+      formaPagamento: formaRelatorio,
+      statusPagamento: isPix || isCard || isBalcao ? "pendente" : "pago",
       descricaoPedido,
       restaurante,
       entregador: entregadorObjectId,
@@ -477,6 +505,27 @@ const criarPedido = async (req, res) => {
 
       pagamentos: [],
     });
+
+    // Para relatórios futuros, pedidos offline da vitrine/salão também ficam com
+    // a forma e o lançamento financeiro salvos no banco.
+    // PIX/cartão online entram como pendentes/confirmados nos blocos do Mercado Pago.
+    if (!isBalcao && !isPix && !isCard && formaRelatorio !== "pendente") {
+      const agora = new Date();
+      upsertPagamentoPedido(novoPedido, {
+        metodo: formaRelatorio,
+        valor: round2(totalNumber),
+        status: "confirmado",
+        recebidoEm: agora,
+        confirmadoEm: agora,
+        recebidoPor: null,
+        recebidoPorRole: "cliente",
+        obs: "Pagamento offline informado na vitrine/salão",
+      });
+      novoPedido.valorPago = round2(totalNumber);
+      novoPedido.valorPendente = 0;
+      novoPedido.statusPagamento = "pago";
+      if (!novoPedido.pagoEm) novoPedido.pagoEm = agora;
+    }
 
     await novoPedido.save();
 
@@ -562,6 +611,22 @@ const criarPedido = async (req, res) => {
         novoPedido.pixCopiaECola = tx?.qr_code || "";
         novoPedido.qrCode = tx?.qr_code || "";
         novoPedido.qrCodeBase64 = tx?.qr_code_base64 || "";
+        novoPedido.formadePagamento = "pix";
+        novoPedido.formaPagamento = "pix";
+
+        upsertPagamentoPedido(novoPedido, {
+          metodo: "pix",
+          valor: round2(totalNumber),
+          status: "pendente",
+          recebidoEm: new Date(),
+          recebidoPor: null,
+          recebidoPorRole: "mercadopago",
+          obs: "PIX Mercado Pago aguardando aprovação",
+          mpPaymentId: novoPedido.mpPaymentId,
+          mpStatus: String(pagamento?.status || "pending").toLowerCase(),
+          pixQrCode: novoPedido.pixQrCode,
+          pixQrCodeBase64: novoPedido.pixQrCodeBase64,
+        });
 
         novoPedido.splitInfo = {
           plataformaFee: fee,
@@ -570,7 +635,8 @@ const criarPedido = async (req, res) => {
 
         await novoPedido.save();
 
-        req.io?.to(`restaurante-${restaurante}`).emit("novoPedido", novoPedido);
+        // PIX pendente ainda não é pedido confirmado; não dispara notificação de novo pedido.
+        req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
 
         return res.status(201).json({
           pedidoId: novoPedido._id,
@@ -665,6 +731,7 @@ const criarPedido = async (req, res) => {
         novoPedido.mpStatusDetail = pagamento?.status_detail || null;
 
         novoPedido.formadePagamento = "cartao";
+        novoPedido.formaPagamento = "cartao";
 
         novoPedido.splitInfo = {
           plataformaFee: fee,
@@ -672,24 +739,23 @@ const criarPedido = async (req, res) => {
         };
 
         const st = String(pagamento?.status || "").toLowerCase();
+        const agora = new Date();
+        const cartaoConfirmado = st === "approved" || st === "paid";
 
-        if (st === "approved" || st === "paid") {
-          const agora = new Date();
+        upsertPagamentoPedido(novoPedido, {
+          metodo: "cartao",
+          valor: round2(totalNumber),
+          status: cartaoConfirmado ? "confirmado" : "pendente",
+          recebidoEm: agora,
+          recebidoPor: null,
+          recebidoPorRole: "mercadopago",
+          obs: "Cartão Mercado Pago",
+          mpPaymentId: novoPedido.mpPaymentId,
+          mpStatus: st,
+          ...(cartaoConfirmado ? { confirmadoEm: agora } : {}),
+        });
 
-          novoPedido.pagamentos = Array.isArray(novoPedido.pagamentos) ? novoPedido.pagamentos : [];
-          novoPedido.pagamentos.push({
-            metodo: "cartao",
-            valor: round2(totalNumber),
-            status: "confirmado",
-            recebidoEm: agora,
-            recebidoPor: null,
-            recebidoPorRole: "restaurante",
-            obs: "Cartão Mercado Pago",
-            mpPaymentId: novoPedido.mpPaymentId,
-            mpStatus: st,
-            confirmadoEm: agora,
-          });
-
+        if (cartaoConfirmado) {
           novoPedido.valorPago = round2(totalNumber);
           novoPedido.valorPendente = 0;
 
@@ -703,7 +769,12 @@ const criarPedido = async (req, res) => {
 
         await novoPedido.save();
 
-        req.io?.to(`restaurante-${restaurante}`).emit("novoPedido", novoPedido);
+        // Cartão só vira novo pedido quando aprovado. Se ficar pendente, não notifica desktop.
+        if (novoPedido.status === "aguardando_pagamento" || novoPedido.statusPagamento === "pendente") {
+          req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
+        } else {
+          req.io?.to(`restaurante-${restaurante}`).emit("novoPedido", novoPedido);
+        }
 
         return res.status(201).json({
           pedidoId: novoPedido._id,
@@ -754,7 +825,13 @@ const listarPedidosPorRestaurante = async (req, res) => {
 
     const query = { restaurante: restauranteId };
 
-    if (status) query.status = status;
+    // Por padrão, a tela/lista de pedidos não deve mostrar pedidos apenas com PIX/cartão aguardando pagamento.
+    // Se a tela pedir explicitamente ?status=aguardando_pagamento, aí retornamos normalmente.
+    if (status) {
+      query.status = status;
+    } else {
+      query.status = { $nin: ["aguardando_pagamento", "pagamento_pendente"] };
+    }
     if (origem) query.origem = origem;
 
     if (somenteMesa === "true") query.mesaId = { $ne: null };

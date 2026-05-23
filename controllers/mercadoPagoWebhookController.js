@@ -167,6 +167,22 @@ function setFormaPagamentoFromPagamentos(pedido) {
   return { forma: pedido.formadePagamento, metodos };
 }
 
+function upsertPagamentoPedido(pedido, pagamentoNovo = {}) {
+  pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
+
+  const mpPaymentId = pagamentoNovo?.mpPaymentId ? String(pagamentoNovo.mpPaymentId) : "";
+  if (mpPaymentId) {
+    const idx = pedido.pagamentos.findIndex((p) => String(p?.mpPaymentId || "") === mpPaymentId);
+    if (idx >= 0) {
+      pedido.pagamentos[idx] = { ...pedido.pagamentos[idx], ...pagamentoNovo };
+      return pedido.pagamentos[idx];
+    }
+  }
+
+  pedido.pagamentos.push(pagamentoNovo);
+  return pagamentoNovo;
+}
+
 /**
  * ✅ Recalcula:
  * - valorPago / valorPendente
@@ -340,34 +356,79 @@ exports.mpWebhook = async (req, res) => {
       });
     }
 
-    // ✅ fluxo legado (PIX total no pedido)
+    // ✅ fluxo legado (PIX/cartão total no pedido)
     pedido.statusPagamento = mpStatus || pedido.statusPagamento;
+
+    const metodoLegado = String(pedido.formadePagamento || "pix").toLowerCase().includes("cart")
+      ? "cartao"
+      : "pix";
+
+    const valorLegado = round2(toNum(pedido.valorTotal || pedido.total || mp?.transaction_amount || 0));
 
     if (isPaidStatus(mpStatus)) {
       pedido.status = "pago";
-      pedido.formadePagamento = pedido.formadePagamento || "pix";
+      pedido.formadePagamento = metodoLegado;
+      pedido.formaPagamento = metodoLegado;
+      pedido.statusPagamento = "pago";
+      pedido.valorPago = valorLegado;
+      pedido.valorPendente = 0;
+
+      upsertPagamentoPedido(pedido, {
+        metodo: metodoLegado,
+        valor: valorLegado,
+        status: "confirmado",
+        recebidoEm: pedido.criadoEm || agora,
+        confirmadoEm: agora,
+        recebidoPor: null,
+        recebidoPorRole: "mercadopago",
+        obs: metodoLegado === "cartao" ? "Cartão Mercado Pago confirmado" : "PIX Mercado Pago confirmado",
+        mpPaymentId: paymentIdStr,
+        mpStatus,
+      });
 
       if (!pedido.pagoEm) pedido.pagoEm = agora;
       if (!pedido.fechadoEm) pedido.fechadoEm = agora;
-
-      // compat com campos novos (se você adicionar no schema)
-      // pedido.valorPago = round2(toNum(pedido.valorTotal));
-      // pedido.valorPendente = 0;
 
       if (pedido.mesaId) {
         const mesa = await Mesa.findById(pedido.mesaId);
         if (mesa) await liberarMesa({ mesa, io: req.io });
       }
     } else if (isFinalFailStatus(mpStatus)) {
+      upsertPagamentoPedido(pedido, {
+        metodo: metodoLegado,
+        valor: valorLegado,
+        status: "cancelado",
+        recebidoEm: pedido.criadoEm || agora,
+        recebidoPor: null,
+        recebidoPorRole: "mercadopago",
+        obs: "Pagamento Mercado Pago recusado/cancelado",
+        mpPaymentId: paymentIdStr,
+        mpStatus,
+      });
       if (pedido.status !== "cancelado" && pedido.status !== "pago") {
         pedido.status = "aguardando_pagamento";
       }
+    } else {
+      upsertPagamentoPedido(pedido, {
+        metodo: metodoLegado,
+        valor: valorLegado,
+        status: "pendente",
+        recebidoEm: pedido.criadoEm || agora,
+        recebidoPor: null,
+        recebidoPorRole: "mercadopago",
+        obs: "Pagamento Mercado Pago aguardando aprovação",
+        mpPaymentId: paymentIdStr,
+        mpStatus,
+      });
     }
 
     await pedido.save();
 
     if (req.io) {
       req.io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+      if (isPaidStatus(mpStatus)) {
+        req.io.to(`restaurante-${pedido.restaurante}`).emit("novoPedido", pedido);
+      }
     }
 
     return res.status(200).json({
