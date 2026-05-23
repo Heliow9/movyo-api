@@ -138,15 +138,25 @@ function isPaidStatus(st) {
  */
 function getGarcomFromReq(req) {
   const u =
-    req?.user ||
+    req?.garcomDoc ||
     req?.garcom ||
     req?.garcomUser ||
-    req?.auth?.user ||
     req?.auth?.garcom ||
+    req?.auth?.user ||
+    req?.user ||
     null;
 
-  const id = u?._id ? String(u._id) : null;
-  const nome = u?.apelido || u?.nome || null;
+  const idRaw =
+    u?._id ||
+    u?.id ||
+    u?.garcomId ||
+    req?.garcomId ||
+    req?.user?.garcomId ||
+    req?.auth?.garcomId ||
+    null;
+
+  const id = idRaw ? String(idRaw) : null;
+  const nome = u?.apelido || u?.nome || req?.user?.apelido || req?.user?.nome || null;
 
   return { id, nome };
 }
@@ -1446,30 +1456,79 @@ exports.resumoHomeApp = async (req, res) => {
     const pedidosOperacionaisHoje = todosPedidos.filter((pedido) => isHoje(pedido) && isAtivoOperacional(pedido));
     const pedidosPendentes = pedidosOperacionaisHoje.length;
 
-    const pedidosHojeGarcom = todosPedidos.filter((pedido) => isHoje(pedido) && pertenceAoGarcom(pedido));
-    const pedidosPagosHojeGarcom = pedidosHojeGarcom.filter((pedido) => {
+    const isPago = (pedido) => {
       const stPag = norm(pedido?.statusPagamento);
       const st = norm(pedido?.status);
       return stPag === "pago" || stPag === "confirmado" || st === "pago" || Number(pedido?.valorPago || 0) > 0;
+    };
+
+    const pagamentoConfirmadoGarcom = (pedido) => {
+      const pagamentos = Array.isArray(pedido?.pagamentos) ? pedido.pagamentos : [];
+      return [...pagamentos].reverse().find((p) => {
+        const status = norm(p?.status);
+        const role = norm(p?.recebidoPorRole || p?.role);
+        return (status === "confirmado" || status === "pago" || status === "approved") && role === "garcom";
+      }) || null;
+    };
+
+    const atribuirGarcomPedido = (pedido) => {
+      const pag = pagamentoConfirmadoGarcom(pedido);
+      const idRaw =
+        pedido?.garcomId ||
+        pedido?.fechadoPor ||
+        pedido?.recebidoPor ||
+        pedido?.criadoPor ||
+        pag?.recebidoPor ||
+        pag?.garcomId ||
+        null;
+
+      const nomeRaw =
+        pedido?.garcomNome ||
+        pedido?.fechadoPorNome ||
+        pedido?.recebidoPorNome ||
+        pedido?.criadoPorNome ||
+        pag?.recebidoPorNome ||
+        pag?.garcomNome ||
+        null;
+
+      let id = idRaw ? String(idRaw) : null;
+      let nome = nomeRaw || null;
+
+      // Compatibilidade para pedidos antigos criados antes de salvar garcomId:
+      // quando a Home é aberta pelo próprio garçom e o pedido não tem responsável,
+      // atribui ao usuário logado em vez de criar o grupo falso "Garçom".
+      if (!id && garcomId && ["balcao", "mesa", "garcom"].includes(norm(pedido?.origem))) {
+        id = garcomId;
+        nome = garcomNomeReq;
+      }
+
+      if (sameId(id, garcomId)) nome = garcomNomeReq || nome;
+      if (!id && nome) id = `nome:${String(nome).trim().toLowerCase()}`;
+
+      return id ? { id, nome: nome || (sameId(id, garcomId) ? garcomNomeReq : "Sem garçom") } : null;
+    };
+
+    const pedidosHojeGarcom = todosPedidos.filter((pedido) => {
+      if (!isHoje(pedido)) return false;
+      const atrib = atribuirGarcomPedido(pedido);
+      return atrib && sameId(atrib.id, garcomId);
     });
+    const pedidosPagosHojeGarcom = pedidosHojeGarcom.filter(isPago);
 
     const vendasHojeGarcom = pedidosPagosHojeGarcom.reduce((acc, p) => acc + valorPedido(p), 0);
 
     const rankingMap = new Map();
     todosPedidos
       .filter((pedido) => isHoje(pedido))
-      .filter((pedido) => {
-        const stPag = norm(pedido?.statusPagamento);
-        const st = norm(pedido?.status);
-        return stPag === "pago" || stPag === "confirmado" || st === "pago" || Number(pedido?.valorPago || 0) > 0;
-      })
+      .filter(isPago)
       .forEach((pedido) => {
-        const id = String(pedido?.garcomId || pedido?.fechadoPor || pedido?.recebidoPor || pedido?.criadoPor || pedido?.garcomNome || "sem_garcom");
-        const nome = pedido?.garcomNome || (sameId(id, garcomId) ? garcomNomeReq : "Garçom");
-        const atual = rankingMap.get(id) || { id, nome, pedidos: 0, total: 0 };
+        const atrib = atribuirGarcomPedido(pedido);
+        if (!atrib) return;
+        const atual = rankingMap.get(atrib.id) || { id: atrib.id, nome: atrib.nome, pedidos: 0, total: 0 };
+        atual.nome = sameId(atrib.id, garcomId) ? garcomNomeReq : (atrib.nome || atual.nome);
         atual.pedidos += 1;
         atual.total += valorPedido(pedido);
-        rankingMap.set(id, atual);
+        rankingMap.set(atrib.id, atual);
       });
 
     if (garcomId && !rankingMap.has(garcomId)) {

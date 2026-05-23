@@ -233,15 +233,25 @@ async function notificarPedidoNovoSePago(req, pedido) {
  */
 function getGarcomFromReq(req) {
   const u =
-    req?.user ||
+    req?.garcomDoc ||
     req?.garcom ||
     req?.garcomUser ||
-    req?.auth?.user ||
     req?.auth?.garcom ||
+    req?.auth?.user ||
+    req?.user ||
     null;
 
-  const id = u?._id ? String(u._id) : null;
-  const nome = u?.apelido || u?.nome || null;
+  const idRaw =
+    u?._id ||
+    u?.id ||
+    u?.garcomId ||
+    req?.garcomId ||
+    req?.user?.garcomId ||
+    req?.auth?.garcomId ||
+    null;
+
+  const id = idRaw ? String(idRaw) : null;
+  const nome = u?.apelido || u?.nome || req?.user?.apelido || req?.user?.nome || null;
 
   return { id, nome };
 }
@@ -558,6 +568,13 @@ exports.registrarPagamentoBalcao = async (req, res) => {
     const recebidoPorId =
       recebidoPorRole === "garcom" ? (g.id || null) : (req.userId ? String(req.userId) : null);
 
+    if (recebidoPorRole === "garcom" && recebidoPorId) {
+      pedido.garcomId = pedido.garcomId || recebidoPorId;
+      pedido.garcomNome = pedido.garcomNome || g.nome || "Garçom";
+      pedido.recebidoPor = recebidoPorId;
+      pedido.recebidoPorNome = g.nome || pedido.garcomNome || "Garçom";
+    }
+
     pedido.pagamentos.push({
       metodo: m,
       valor: v,
@@ -568,6 +585,7 @@ exports.registrarPagamentoBalcao = async (req, res) => {
           ? new mongoose.Types.ObjectId(recebidoPorId)
           : null,
       recebidoPorRole,
+      recebidoPorNome: recebidoPorRole === "garcom" ? (g.nome || pedido.garcomNome || "Garçom") : null,
       obs: String(obs || "").trim(),
     });
 
@@ -659,6 +677,13 @@ exports.gerarPixBalcao = async (req, res) => {
     const recebidoPorId =
       recebidoPorRole === "garcom" ? (g.id || null) : (req.userId ? String(req.userId) : null);
 
+    if (recebidoPorRole === "garcom" && recebidoPorId) {
+      pedido.garcomId = pedido.garcomId || recebidoPorId;
+      pedido.garcomNome = pedido.garcomNome || g.nome || "Garçom";
+      pedido.recebidoPor = recebidoPorId;
+      pedido.recebidoPorNome = g.nome || pedido.garcomNome || "Garçom";
+    }
+
     pedido.pagamentos.push({
       metodo: "pix",
       valor: valorPix,
@@ -669,6 +694,7 @@ exports.gerarPixBalcao = async (req, res) => {
           ? new mongoose.Types.ObjectId(recebidoPorId)
           : null,
       recebidoPorRole,
+      recebidoPorNome: recebidoPorRole === "garcom" ? (g.nome || pedido.garcomNome || "Garçom") : null,
       mpPaymentId: pix?.paymentId ? String(pix.paymentId) : null,
       mpStatus: pix?.status || "pending",
       pixQrCode: pix?.qrCode || "",
