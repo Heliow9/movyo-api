@@ -1358,7 +1358,9 @@ exports.statusPixMesaApp = async (req, res) => {
 exports.resumoHomeApp = async (req, res) => {
   try {
     const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
-    const garcomId = getGarcomFromReq(req)?.id;
+    const gReq = getGarcomFromReq(req);
+    const garcomId = gReq?.id ? String(gReq.id) : null;
+    const garcomNomeReq = gReq?.nome || req.user?.nome || req.user?.apelido || "Garçom";
 
     if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
 
@@ -1367,81 +1369,129 @@ exports.resumoHomeApp = async (req, res) => {
     const end = new Date();
     end.setHours(23, 59, 59, 999);
 
-    const STATUS_AGUARDANDO_PAGAMENTO = ["aguardando_pagamento", "pagamento_pendente"];
-    const STATUS_FINALIZADOS = ["entregue", "finalizado", "cancelado", "cancelado_cliente", "cancelado_restaurante"];
-    const STATUS_ATIVOS = ["pendente", "novo", "em_aberto", "aguardando_resposta", "em_producao", "pronto", "em_entrega", "em_rota"];
+    const norm = (v) => String(v || "").trim().toLowerCase();
+    const toDate = (v) => {
+      const d = v ? new Date(v) : null;
+      return d && !Number.isNaN(d.getTime()) ? d : null;
+    };
+    const sameId = (a, b) => a && b && String(a) === String(b);
+    const valorPedido = (p) => Number(p?.valorTotal ?? p?.total ?? p?.valor ?? 0) || 0;
+
+    const STATUS_AGUARDANDO_PAGAMENTO = new Set(["aguardando_pagamento", "pagamento_pendente", "pending_payment"]);
+    const STATUS_FINALIZADOS = new Set(["entregue", "finalizado", "cancelado", "cancelado_cliente", "cancelado_restaurante"]);
+    const STATUS_ATIVOS = new Set([
+      "pendente",
+      "novo",
+      "em_aberto",
+      "aberto",
+      "aguardando_resposta",
+      "aceito",
+      "recebido",
+      "em_preparo",
+      "preparando",
+      "producao",
+      "em_producao",
+      "pronto",
+      "em_entrega",
+      "em_rota",
+    ]);
+    const STATUS_MESA_ABERTA = new Set(["ocupada", "aberta", "em_aberto", "aberto"]);
 
     const isAguardandoPagamento = (pedido) =>
-      STATUS_AGUARDANDO_PAGAMENTO.includes(String(pedido?.status || "").toLowerCase()) ||
-      STATUS_AGUARDANDO_PAGAMENTO.includes(String(pedido?.statusPagamento || "").toLowerCase());
+      STATUS_AGUARDANDO_PAGAMENTO.has(norm(pedido?.status)) ||
+      STATUS_AGUARDANDO_PAGAMENTO.has(norm(pedido?.statusPagamento));
 
     const isFinalizado = (pedido) =>
-      STATUS_FINALIZADOS.includes(String(pedido?.status || "").toLowerCase()) || !!pedido?.canceladoEm;
+      STATUS_FINALIZADOS.has(norm(pedido?.status)) || !!pedido?.canceladoEm;
 
     const isAtivoOperacional = (pedido) => {
-      const st = String(pedido?.status || "").toLowerCase();
-      return STATUS_ATIVOS.includes(st) && !isAguardandoPagamento(pedido) && !isFinalizado(pedido);
+      const st = norm(pedido?.status);
+      if (isAguardandoPagamento(pedido) || isFinalizado(pedido)) return false;
+      return STATUS_ATIVOS.has(st) || (!st && !isFinalizado(pedido));
     };
 
-    // Mesa aberta real = mesa ocupada com pedido atual ativo.
-    // Filtramos em JS porque o adapter MySQL do projeto não suporta todos os operadores Mongo ($nin/$exists).
-    const mesasOcupadasRaw = await Mesa.find({ restauranteId, status: "ocupada" }).lean();
-    const pedidosMesaIds = (Array.isArray(mesasOcupadasRaw) ? mesasOcupadasRaw : [])
-      .map((m) => m?.pedidoAtualId)
-      .filter(Boolean)
-      .map(String);
+    const isHoje = (pedido) => {
+      const dt = toDate(pedido?.pagoEm || pedido?.createdAt || pedido?.criadoEm || pedido?.data);
+      return !!dt && dt >= start && dt <= end;
+    };
 
-    const pedidosMesa = pedidosMesaIds.length
-      ? await Pedido.find({ restaurante: restauranteId, _id: { $in: pedidosMesaIds } }).lean()
-      : [];
-    const pedidosMesaAtivos = new Set(
-      (Array.isArray(pedidosMesa) ? pedidosMesa : [])
-        .filter(isAtivoOperacional)
-        .map((p) => String(p?._id || p?.id))
-    );
+    const pertenceAoGarcom = (pedido) => {
+      if (!garcomId) return false;
+      return (
+        sameId(pedido?.garcomId, garcomId) ||
+        sameId(pedido?.fechadoPor, garcomId) ||
+        sameId(pedido?.recebidoPor, garcomId) ||
+        sameId(pedido?.criadoPor, garcomId)
+      );
+    };
 
-    const mesasOcupadas = (Array.isArray(mesasOcupadasRaw) ? mesasOcupadasRaw : []).filter((mesa) =>
-      pedidosMesaAtivos.has(String(mesa?.pedidoAtualId || ""))
-    ).length;
+    const [mesasRaw, todosPedidosRaw] = await Promise.all([
+      Mesa.find({ restauranteId }).lean(),
+      Pedido.find({ restaurante: restauranteId }).lean(),
+    ]);
 
-    // Pedido pendente na Home = pedido ativo de balcão/delivery/vitrine, já válido para operação.
-    // Não conta aguardando_pagamento e não mistura com mesa aberta.
-    const todosPedidos = await Pedido.find({ restaurante: restauranteId }).lean();
-    const pedidosFila = (Array.isArray(todosPedidos) ? todosPedidos : []).filter((pedido) => {
-      if (!isAtivoOperacional(pedido)) return false;
-      const origem = String(pedido?.origem || "").toLowerCase();
-      const temMesa = !!pedido?.mesaId;
-      return !temMesa || ["delivery", "balcao", "vitrine", "app", "site"].includes(origem);
+    const todosPedidos = Array.isArray(todosPedidosRaw) ? todosPedidosRaw : [];
+    const pedidosPorId = new Map(todosPedidos.map((p) => [String(p?._id || p?.id || ""), p]));
+
+    // Mesa aberta real: conta mesa marcada como aberta/ocupada. Se tiver pedidoAtualId, ele precisa estar ativo.
+    const mesasAbertas = (Array.isArray(mesasRaw) ? mesasRaw : []).filter((mesa) => {
+      if (!STATUS_MESA_ABERTA.has(norm(mesa?.status))) return false;
+      const pedidoId = mesa?.pedidoAtualId ? String(mesa.pedidoAtualId) : "";
+      if (!pedidoId) return true;
+      const pedido = pedidosPorId.get(pedidoId);
+      return !pedido || isAtivoOperacional(pedido);
     }).length;
 
-    let vendasHojeGarcom = 0;
+    // Pendente operacional = ainda precisa de ação: pendente/produção/pronto/entrega, mas nunca aguardando pagamento.
+    const pedidosOperacionaisHoje = todosPedidos.filter((pedido) => isHoje(pedido) && isAtivoOperacional(pedido));
+    const pedidosPendentes = pedidosOperacionaisHoje.length;
 
-    if (garcomId) {
-      const agg = await Pedido.aggregate([
-        {
-          $match: {
-            restaurante: new mongoose.Types.ObjectId(restauranteId),
-            garcomId: new mongoose.Types.ObjectId(garcomId),
-            statusPagamento: "pago",
-            pagoEm: { $gte: start, $lte: end },
-            canceladoEm: null,
-          },
-        },
-        { $group: { _id: null, total: { $sum: "$valorTotal" } } },
-      ]);
+    const pedidosHojeGarcom = todosPedidos.filter((pedido) => isHoje(pedido) && pertenceAoGarcom(pedido));
+    const pedidosPagosHojeGarcom = pedidosHojeGarcom.filter((pedido) => {
+      const stPag = norm(pedido?.statusPagamento);
+      const st = norm(pedido?.status);
+      return stPag === "pago" || stPag === "confirmado" || st === "pago" || Number(pedido?.valorPago || 0) > 0;
+    });
 
-      vendasHojeGarcom = Number(agg?.[0]?.total || 0);
+    const vendasHojeGarcom = pedidosPagosHojeGarcom.reduce((acc, p) => acc + valorPedido(p), 0);
+
+    const rankingMap = new Map();
+    todosPedidos
+      .filter((pedido) => isHoje(pedido))
+      .filter((pedido) => {
+        const stPag = norm(pedido?.statusPagamento);
+        const st = norm(pedido?.status);
+        return stPag === "pago" || stPag === "confirmado" || st === "pago" || Number(pedido?.valorPago || 0) > 0;
+      })
+      .forEach((pedido) => {
+        const id = String(pedido?.garcomId || pedido?.fechadoPor || pedido?.recebidoPor || pedido?.criadoPor || pedido?.garcomNome || "sem_garcom");
+        const nome = pedido?.garcomNome || (sameId(id, garcomId) ? garcomNomeReq : "Garçom");
+        const atual = rankingMap.get(id) || { id, nome, pedidos: 0, total: 0 };
+        atual.pedidos += 1;
+        atual.total += valorPedido(pedido);
+        rankingMap.set(id, atual);
+      });
+
+    if (garcomId && !rankingMap.has(garcomId)) {
+      rankingMap.set(garcomId, { id: garcomId, nome: garcomNomeReq, pedidos: pedidosPagosHojeGarcom.length, total: vendasHojeGarcom });
     }
 
+    const rankingGarcons = Array.from(rankingMap.values())
+      .sort((a, b) => Number(b.total || 0) - Number(a.total || 0))
+      .slice(0, 5);
+
     return res.json({
-      mesasAbertas: mesasOcupadas,
-      mesasOcupadas,
-      pedidosPendentes: pedidosFila,
-      pedidosFila,
+      mesasAbertas,
+      mesasOcupadas: mesasAbertas,
+      pedidosPendentes,
+      pedidosFila: pedidosPendentes,
+      pedidosHojeGarcom: pedidosHojeGarcom.length,
       vendasHojeGarcom,
+      rankingGarcons,
       filtros: {
-        pedidosAtivos: STATUS_ATIVOS,
-        ignorados: STATUS_AGUARDANDO_PAGAMENTO,
+        pedidosAtivos: Array.from(STATUS_ATIVOS),
+        ignorados: Array.from(STATUS_AGUARDANDO_PAGAMENTO),
+        hoje: { inicio: start.toISOString(), fim: end.toISOString() },
       },
     });
   } catch (error) {

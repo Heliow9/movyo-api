@@ -849,8 +849,9 @@ const listarPedidosPorRestaurante = async (req, res) => {
       if (somenteBalcao === "true" && pedido?.mesaId) return false;
 
       if (dataInicio || dataFim) {
-        const inicio = dataInicio ? new Date(`${dataInicio}T00:00:00.000Z`) : null;
-        const fim = dataFim ? new Date(`${dataFim}T23:59:59.999Z`) : null;
+        // Usa horário local do servidor para bater com o "dia" exibido no app do garçom.
+        const inicio = dataInicio ? new Date(`${dataInicio}T00:00:00.000`) : null;
+        const fim = dataFim ? new Date(`${dataFim}T23:59:59.999`) : null;
         const rawDate = pedido?.createdAt || pedido?.criadoEm;
         const dt = rawDate ? new Date(rawDate) : null;
         if (!dt || Number.isNaN(dt.getTime())) return false;
@@ -1321,6 +1322,25 @@ const listarPedidos = async (req, res) => {
   try {
     const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
     if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
+
+    const role = String(req.user?.role || req.role || "").toLowerCase();
+
+    // ✅ App do garçom: por padrão mostra somente pedidos do dia.
+    // Evita histórico antigo poluindo a tela e mantém produção/pronto/entrega visíveis.
+    if (role === "garcom") {
+      const hoje = new Date();
+      const yyyy = hoje.getFullYear();
+      const mm = String(hoje.getMonth() + 1).padStart(2, "0");
+      const dd = String(hoje.getDate()).padStart(2, "0");
+      const hojeStr = `${yyyy}-${mm}-${dd}`;
+
+      req.query = {
+        ...req.query,
+        dataInicio: req.query?.dataInicio || hojeStr,
+        dataFim: req.query?.dataFim || hojeStr,
+        limit: req.query?.limit || 300,
+      };
+    }
 
     req.params.restauranteId = restauranteId;
     return listarPedidosPorRestaurante(req, res);
