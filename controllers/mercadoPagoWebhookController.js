@@ -6,6 +6,7 @@ const Mesa = require("../models/mesaModel");
 const Restaurante = require("../models/Restaurante");
 
 const { consultarPagamento } = require("../services/mercadoPagoPixService");
+const { enviarMensagem, estaConectado } = require("../utils/bot");
 
 /**
  * ✅ valida assinatura (opcional)
@@ -104,6 +105,23 @@ function toNum(v) {
 function round2(v) {
   return Math.round((Number(v || 0) + Number.EPSILON) * 100) / 100;
 }
+function formatBRL(v) {
+  return `R$ ${Number(v || 0).toFixed(2).replace(".", ",")}`;
+}
+
+async function enviarConfirmacaoWhatsappSePossivel({ pedido, pagamento, total }) {
+  const restauranteId = String(pedido?.restaurante || "");
+  const numero = String(pagamento?.whatsappPixNumero || pedido?.telefoneCliente || "").replace(/\D/g, "");
+  if (!restauranteId || !numero) return;
+  if (!estaConectado(restauranteId)) return;
+
+  await enviarMensagem(
+    restauranteId,
+    numero,
+    `✅ *Pagamento confirmado!*\n\nSeu pedido foi confirmado e já foi enviado para produção.\n\n🧾 *Total:* ${formatBRL(total || pedido.valorTotal || pedido.total || 0)}`
+  ).catch(() => {});
+}
+
 
 function somaPagamentosConfirmados(pagamentos = []) {
   const arr = Array.isArray(pagamentos) ? pagamentos : [];
@@ -297,8 +315,15 @@ exports.mpWebhook = async (req, res) => {
 
       await pedido.save();
 
+      if (quitouTotal) {
+        await enviarConfirmacaoWhatsappSePossivel({ pedido, pagamento: pg, total });
+      }
+
       if (req.io) {
         req.io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+        if (quitouTotal) {
+          req.io.to(`restaurante-${pedido.restaurante}`).emit("novoPedido", pedido);
+        }
       }
 
       return res.status(200).json({

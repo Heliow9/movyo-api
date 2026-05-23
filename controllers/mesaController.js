@@ -1369,9 +1369,10 @@ exports.resumoHomeApp = async (req, res) => {
 
     const [mesasOcupadas, pedidosFila] = await Promise.all([
       Mesa.countDocuments({ restauranteId, status: "ocupada" }),
+      // Home do garçom não deve contar PIX de balcão ainda pendente como pedido/fila.
       Pedido.countDocuments({
         restaurante: restauranteId,
-        status: { $in: ["aguardando_pagamento", "em_producao"] },
+        status: { $in: ["em_producao"] },
         canceladoEm: null,
       }),
     ]);

@@ -80,6 +80,78 @@ function isPaidStatus(st) {
   return s === "approved" || s === "paid" || s === "aprovado" || s === "confirmado";
 }
 
+function formatBRL(v) {
+  return `R$ ${Number(v || 0).toFixed(2).replace(".", ",")}`;
+}
+
+function extrairNomeExtra(x) {
+  if (!x) return "";
+  if (typeof x === "string") return x.trim();
+  return String(x.nome || x.titulo || x.title || x.descricao || x.label || x.sabor || x.adicional || x.complemento || "").trim();
+}
+
+function formatarExtrasItem(item = {}) {
+  const linhas = [];
+
+  const addLista = (label, arr) => {
+    const nomes = (Array.isArray(arr) ? arr : [])
+      .map(extrairNomeExtra)
+      .filter(Boolean);
+    if (nomes.length) linhas.push(`   • ${label}: ${nomes.join(", ")}`);
+  };
+
+  addLista("Sabores", item.saboresSelecionados || item.sabores);
+
+  const borda = extrairNomeExtra(item.bordaSelecionada || item.borda);
+  if (borda) linhas.push(`   • Borda: ${borda}`);
+
+  const adicional = extrairNomeExtra(item.adicionalSelecionado || item.adicional);
+  if (adicional) linhas.push(`   • Adicional: ${adicional}`);
+
+  addLista("Complementos", item.complementosSelecionados || item.complementos);
+  addLista("Extras", item.extrasSelecionados || item.extras);
+
+  const tipos = item.tiposExtrasSelecionados;
+  if (tipos && typeof tipos === "object" && !Array.isArray(tipos)) {
+    Object.entries(tipos).forEach(([grupo, valor]) => {
+      const nomes = (Array.isArray(valor) ? valor : [valor]).map(extrairNomeExtra).filter(Boolean);
+      if (nomes.length) linhas.push(`   • ${grupo}: ${nomes.join(", ")}`);
+    });
+  }
+
+  const obs = String(item.observacao || item.obs || "").trim();
+  if (obs) linhas.push(`   • Obs: ${obs}`);
+
+  return linhas;
+}
+
+function montarResumoItensPedido(pedido) {
+  const itens = Array.isArray(pedido?.itens) ? pedido.itens : [];
+  if (!itens.length) return "🛒 *Itens do pedido:*\n• Nenhum item encontrado no pedido.";
+
+  const linhas = ["🛒 *Itens do pedido:*"];
+  itens.forEach((item, idx) => {
+    const qtd = Number(item.quantidade || item.qtd || item.quantity || 1) || 1;
+    const nome = String(item.nome || item.titulo || item.title || item.descricao || "Item").trim() || "Item";
+    const total = toNum(item.precoTotal ?? item.total ?? item.valorTotal ?? 0);
+    const unit = toNum(item.precoUnitario ?? item.preco ?? item.valorUnitario ?? 0);
+    const valorLinha = total > 0 ? total : unit * qtd;
+    linhas.push(`${idx + 1}. ${qtd}x ${nome} — ${formatBRL(valorLinha)}`);
+    linhas.push(...formatarExtrasItem(item));
+  });
+  return linhas.join("\n");
+}
+
+async function notificarPedidoNovoSePago(req, pedido) {
+  if (!req?.io || !pedido) return;
+  const statusPagamento = String(pedido.statusPagamento || "").toLowerCase();
+  const pendente = Number(pedido.valorPendente || 0);
+  const total = Number(pedido.valorTotal || pedido.total || 0);
+  if ((statusPagamento === "pago" || pendente <= 0) && total > 0) {
+    req.io.to(`restaurante-${String(pedido.restaurante)}`).emit("novoPedido", pedido);
+  }
+}
+
 /**
  * ✅ Pega usuário (garçom/restaurante) de forma robusta
  */
@@ -253,7 +325,7 @@ exports.abrirPedidoBalcao = async (req, res) => {
       valorTotal: totalInicial,
       total: totalInicial,
       origem: "balcao",
-      status: "em_producao",
+      status: "aguardando_pagamento",
       formadePagamento: "pendente",
       pagamentos: [],
       valorPago: 0,
@@ -272,7 +344,7 @@ exports.abrirPedidoBalcao = async (req, res) => {
     await novoPedido.save();
 
     if (req.io) {
-      req.io.to(`restaurante-${restauranteId}`).emit("novoPedido", novoPedido);
+      // Não dispara "novoPedido" aqui: balcão com PIX ainda pendente não deve tocar notificação no desktop.
       req.io.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", novoPedido);
     }
 
@@ -610,6 +682,21 @@ exports.statusPixBalcao = async (req, res) => {
     // se quitou, fecha o pedido balcão automaticamente
     if (pendente <= 0 && total > 0) {
       const out = await fecharPedidoGenerico({ req, pedido });
+      await notificarPedidoNovoSePago(req, pedido);
+
+      const numeroConfirmacao = String(alvo.whatsappPixNumero || pedido.telefoneCliente || "").replace(/\D/g, "");
+      if (numeroConfirmacao && estaConectado(String(pedido.restaurante))) {
+        await enviarMensagem(
+          String(pedido.restaurante),
+          numeroConfirmacao,
+          `✅ *Pagamento confirmado!*
+
+Seu pedido de balcão foi confirmado e já foi enviado para produção.
+
+🧾 *Total:* ${formatBRL(total)}`
+        ).catch(() => {});
+      }
+
       return res.json({
         ok: true,
         paid: true,
@@ -763,17 +850,26 @@ exports.enviarPixWhatsappBalcao = async (req, res) => {
     const nomeCliente = pedido?.nomeCliente || "Cliente";
     const qrBase64 = String(alvo.pixQrCodeBase64 || "").trim();
 
+    const resumoItens = montarResumoItensPedido(pedido);
+
     const resumo = [
       "📲 *PAGAMENTO VIA PIX*",
       `👤 *Cliente:* ${nomeCliente}`,
       "",
-      `💰 *Valor do PIX:* R$ ${Number(valorPix).toFixed(2)}`,
-      `🧾 *Total:* R$ ${Number(total || 0).toFixed(2)}`,
-      `✅ *Pago:* R$ ${Number(pago || 0).toFixed(2)}`,
-      `⏳ *Pendente:* R$ ${Number(pendente || 0).toFixed(2)}`,
+      resumoItens,
+      "",
+      `💰 *Valor do PIX:* ${formatBRL(valorPix)}`,
+      `🧾 *Total:* ${formatBRL(total || 0)}`,
+      `✅ *Pago:* ${formatBRL(pago || 0)}`,
+      `⏳ *Pendente:* ${formatBRL(pendente || 0)}`,
       "",
       "Abra o app do banco e escaneie o QR ✅",
     ].join("\n");
+
+    alvo.whatsappPixNumero = numeroFinal;
+    alvo.whatsappPixEnviadoEm = new Date();
+    pedido.telefoneCliente = pedido.telefoneCliente || numeroFinal;
+    await pedido.save().catch(() => {});
 
     if (qrBase64) await enviarMensagemMidia(restauranteId, numeroFinal, qrBase64, resumo);
     else await enviarMensagem(restauranteId, numeroFinal, resumo);

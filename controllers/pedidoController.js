@@ -441,7 +441,7 @@ const criarPedido = async (req, res) => {
     const isBalcao = isOrigemBalcao(origem);
 
     const statusInicial = isBalcao
-      ? "em_producao"
+      ? "aguardando_pagamento"
       : isPix || isCard
       ? "aguardando_pagamento"
       : "em_producao";
@@ -484,7 +484,8 @@ const criarPedido = async (req, res) => {
     // ✅ BALCÃO: encerra aqui
     // =========================================================
     if (isBalcao) {
-      req.io?.to(`restaurante-${restaurante}`).emit("novoPedido", novoPedido);
+      // Balcão com pagamento pendente não deve notificar o desktop como novo pedido.
+      req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
       return res.status(201).json({
         pedidoId: novoPedido._id,
         numeroPedido: novoPedido.numeroPedido,
@@ -1760,7 +1761,7 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
 
         restaurante,
         origem: "balcao",
-        status: "em_producao",
+        status: "aguardando_pagamento",
 
         pagamentos: [],
 
@@ -1786,7 +1787,8 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
         );
       }
 
-      req.io?.to(`restaurante-${restaurante}`).emit("novoPedido", novoPedido);
+      // Pedido de balcão recém-criado ainda não está pago; não toca notificação no desktop.
+      req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
       return res.status(201).json({ ok: true, criado: true, pedido: novoPedido });
     }
 
