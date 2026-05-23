@@ -12,25 +12,6 @@ const Restaurante = require('../models/Restaurante');
 const path = require('path');
 const fs = require('fs');
 
-function safeJson(value, fallback = {}) {
-  if (value === null || value === undefined || value === '') return fallback;
-  if (typeof value === 'object') return value;
-  try { return JSON.parse(String(value)); } catch { return fallback; }
-}
-function normalizeBoolean(value, defaultValue = false) {
-  if (value === undefined || value === null || value === '') return defaultValue;
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
-  const s = String(value).trim().toLowerCase();
-  if (['false','0','nao','não','no','off','desligado'].includes(s)) return false;
-  if (['true','1','sim','yes','on','ligado'].includes(s)) return true;
-  return defaultValue;
-}
-function getStatusBotObj(restaurante) {
-  const st = safeJson(restaurante?.statusBot, {});
-  return st && typeof st === 'object' ? st : {};
-}
-
 // Iniciar bot com persistência
 exports.startBot = async (req, res) => {
   const { restauranteId } = req.body;
@@ -100,26 +81,14 @@ exports.getStatus = async (req, res) => {
     const estado = getEstadoBot(restauranteId);
 
     // Passo 3: Retornar a combinação correta e COMPLETA das informações.
-    const statusBot = getStatusBotObj(restaurante);
-    const ligado = normalizeBoolean(statusBot.ligado, false);
-
-    // Se o usuário deixou o Bot ligado, mas a API reiniciou e a instância ainda não subiu,
-    // dispara a reconexão em background. Isso mantém o WhatsApp persistente.
-    if (ligado && !conectadoNaMemoria && !estado.temInstancia && estado.estado !== 'connecting') {
-      liberarBot(restauranteId);
-      iniciarBot(restauranteId).catch((err) => {
-        console.error('Erro ao restaurar bot pelo status:', err?.message || err);
-      });
-    }
-
     return res.json({
-      ligado,
-      conectado: conectadoNaMemoria,
+      ligado: (typeof restaurante.statusBot === 'string' ? (() => { try { return JSON.parse(restaurante.statusBot)?.ligado !== false } catch { return true } })() : restaurante.statusBot?.ligado !== false), // A intenção vem do banco.
+      conectado: conectadoNaMemoria,                   // O status "real" (chip) vem da memória.
       estado: estado.estado,
       temQr: estado.temQr,
       tentativas: estado.tentativas,
-      erroConexao: statusBot.erroConexao || null,
-      atualizadoEm: statusBot.atualizadoEm || null,
+      erroConexao: restaurante.statusBot?.erroConexao || null,
+      atualizadoEm: restaurante.statusBot?.atualizadoEm || null,
     });
 
   } catch (error) {

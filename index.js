@@ -131,28 +131,7 @@ async function restaurarBotsLigados() {
   if (botsRestaurados) return;
   botsRestaurados = true;
   try {
-    const safeJsonLocal = (value, fallback = {}) => {
-      if (value === null || value === undefined || value === '') return fallback;
-      if (typeof value === 'object') return value;
-      try { return JSON.parse(String(value)); } catch { return fallback; }
-    };
-    const normalizeBoolLocal = (value, defaultValue = false) => {
-      if (value === undefined || value === null || value === '') return defaultValue;
-      if (typeof value === 'boolean') return value;
-      if (typeof value === 'number') return value !== 0;
-      const s = String(value).trim().toLowerCase();
-      if (['false','0','nao','não','no','off','desligado'].includes(s)) return false;
-      if (['true','1','sim','yes','on','ligado'].includes(s)) return true;
-      return defaultValue;
-    };
-
-    // MySQL salva statusBot como JSON em LONGTEXT; consulta por "statusBot.ligado" pode não funcionar.
-    // Busca os restaurantes e filtra em JS para restaurar somente os bots marcados como ligados.
-    const restaurantes = await Restaurante.find({}).lean();
-    const botsLigados = (restaurantes || []).filter((r) => {
-      const st = safeJsonLocal(r?.statusBot, {});
-      return normalizeBoolLocal(st?.ligado, false);
-    });
+    const botsLigados = await Restaurante.find({ "statusBot.ligado": true }).lean();
     botsLigados.forEach((r) => iniciarBot(String(r._id)));
     console.log(`🤖 Bots restaurados: ${botsLigados.length}`);
   } catch (e) {

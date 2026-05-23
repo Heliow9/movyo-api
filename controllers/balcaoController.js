@@ -60,67 +60,6 @@ function normalizarItensBalcao(itens = []) {
   return (Array.isArray(itens) ? itens : []).map(normalizarItemBalcao).filter((i) => i.nome && Number(i.quantidade) > 0);
 }
 
-
-function extrairItensResumoBody(body = {}) {
-  const candidatos = [
-    body.itens,
-    body.itensPedido,
-    body.itensDetalhados,
-    body.produtos,
-    body.pedidoItens,
-    body.carrinho,
-    body.orderItems,
-    body?.pedido?.itens,
-    body?.pedido?.itensPedido,
-    body?.pedido?.produtos,
-  ];
-
-  for (const cand of candidatos) {
-    const itens = normalizarItensBalcao(cand);
-    if (itens.length) return itens;
-  }
-
-  return [];
-}
-
-function totalItensBalcao(itens = []) {
-  return round2((Array.isArray(itens) ? itens : []).reduce((acc, it) => {
-    const qtd = Math.max(1, toNum(it?.quantidade ?? it?.qtd ?? 1));
-    const total = toNum(it?.precoTotal ?? it?.total ?? it?.valorTotal ?? 0);
-    const unit = toNum(it?.precoUnitario ?? it?.preco ?? it?.valorUnitario ?? 0);
-    return acc + (total > 0 ? total : unit * qtd);
-  }, 0));
-}
-
-function assinaturaResumoWhats(item = {}) {
-  const produtoId = String(item.produtoId || item.produto?._id || item.produto?.id || "");
-  const nome = String(item.nome || item.titulo || item.title || item.descricao || "Item").trim().toLowerCase();
-  const qtd = Number(item.quantidade || item.qtd || item.quantity || 1) || 1;
-  const total = round2(toNum(item.precoTotal ?? item.total ?? item.valorTotal ?? 0));
-  const unit = round2(toNum(item.precoUnitario ?? item.preco ?? item.valorUnitario ?? 0));
-  const extras = JSON.stringify({
-    sabores: item.saboresSelecionados || item.sabores || [],
-    borda: item.bordaSelecionada || item.borda || null,
-    adicional: item.adicionalSelecionado || item.adicional || null,
-    complementos: item.complementosSelecionados || item.complementos || [],
-    tipos: item.tiposExtrasSelecionados || {},
-    obs: String(item.observacao || item.obs || "").trim().toLowerCase(),
-  });
-  return `${produtoId}|${nome}|${qtd}|${unit}|${total}|${extras}`;
-}
-
-function deduplicarItensResumoWhats(itens = []) {
-  const out = [];
-  const seen = new Set();
-  for (const item of Array.isArray(itens) ? itens : []) {
-    const sig = assinaturaResumoWhats(item);
-    if (seen.has(sig)) continue;
-    seen.add(sig);
-    out.push(item);
-  }
-  return out;
-}
-
 function calcularTotalPedido(pedido) {
   const vt = toNum(pedido?.valorTotal);
   if (vt > 0) return round2(vt);
@@ -141,117 +80,20 @@ function isPaidStatus(st) {
   return s === "approved" || s === "paid" || s === "aprovado" || s === "confirmado";
 }
 
-function formatBRL(v) {
-  return `R$ ${Number(v || 0).toFixed(2).replace(".", ",")}`;
-}
-
-function extrairNomeExtra(x) {
-  if (!x) return "";
-  if (typeof x === "string") return x.trim();
-  return String(x.nome || x.titulo || x.title || x.descricao || x.label || x.sabor || x.adicional || x.complemento || "").trim();
-}
-
-function formatarExtrasItem(item = {}) {
-  const linhas = [];
-
-  const addLista = (label, arr) => {
-    const nomes = (Array.isArray(arr) ? arr : [])
-      .map(extrairNomeExtra)
-      .filter(Boolean);
-    if (nomes.length) linhas.push(`   • ${label}: ${nomes.join(", ")}`);
-  };
-
-  addLista("Sabores", item.saboresSelecionados || item.sabores);
-
-  const borda = extrairNomeExtra(item.bordaSelecionada || item.borda);
-  if (borda) linhas.push(`   • Borda: ${borda}`);
-
-  const adicional = extrairNomeExtra(item.adicionalSelecionado || item.adicional);
-  if (adicional) linhas.push(`   • Adicional: ${adicional}`);
-
-  addLista("Complementos", item.complementosSelecionados || item.complementos);
-  addLista("Extras", item.extrasSelecionados || item.extras);
-
-  const tipos = item.tiposExtrasSelecionados;
-  if (tipos && typeof tipos === "object" && !Array.isArray(tipos)) {
-    Object.entries(tipos).forEach(([grupo, valor]) => {
-      const nomes = (Array.isArray(valor) ? valor : [valor]).map(extrairNomeExtra).filter(Boolean);
-      if (nomes.length) linhas.push(`   • ${grupo}: ${nomes.join(", ")}`);
-    });
-  }
-
-  const obs = String(item.observacao || item.obs || "").trim();
-  if (obs) linhas.push(`   • Obs: ${obs}`);
-
-  return linhas;
-}
-
-
-function assinaturaItemPedido(item = {}) {
-  const qtd = Number(item.quantidade || item.qtd || item.quantity || 1) || 1;
-  const nome = String(item.nome || item.titulo || item.title || item.descricao || "Item").trim().toLowerCase();
-  const total = round2(toNum(item.precoTotal ?? item.total ?? item.valorTotal ?? 0));
-  const unit = round2(toNum(item.precoUnitario ?? item.preco ?? item.valorUnitario ?? 0));
-  const obs = String(item.observacao || item.obs || "").trim().toLowerCase();
-  return `${qtd}|${nome}|${total}|${unit}|${obs}`;
-}
-
-function mesmosItensPedido(a = [], b = []) {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-  return a.map(assinaturaItemPedido).join("||") === b.map(assinaturaItemPedido).join("||");
-}
-
-function montarResumoItensPedido(pedido) {
-  const itens = Array.isArray(pedido?.itens) ? pedido.itens : [];
-  if (!itens.length) return "🛒 *Itens do pedido:*\n• Nenhum item encontrado no pedido.";
-
-  const linhas = ["🛒 *Itens do pedido:*"];
-  itens.forEach((item, idx) => {
-    const qtd = Number(item.quantidade || item.qtd || item.quantity || 1) || 1;
-    const nome = String(item.nome || item.titulo || item.title || item.descricao || "Item").trim() || "Item";
-    const total = toNum(item.precoTotal ?? item.total ?? item.valorTotal ?? 0);
-    const unit = toNum(item.precoUnitario ?? item.preco ?? item.valorUnitario ?? 0);
-    const valorLinha = total > 0 ? total : unit * qtd;
-    linhas.push(`${idx + 1}. ${qtd}x ${nome} — ${formatBRL(valorLinha)}`);
-    linhas.push(...formatarExtrasItem(item));
-  });
-  return linhas.join("\n");
-}
-
-async function notificarPedidoNovoSePago(req, pedido) {
-  if (!req?.io || !pedido) return;
-  const statusPagamento = String(pedido.statusPagamento || "").toLowerCase();
-  const pendente = Number(pedido.valorPendente || 0);
-  const total = Number(pedido.valorTotal || pedido.total || 0);
-  if ((statusPagamento === "pago" || pendente <= 0) && total > 0) {
-    req.io.to(`restaurante-${String(pedido.restaurante)}`).emit("novoPedido", pedido);
-  }
-}
-
 /**
  * ✅ Pega usuário (garçom/restaurante) de forma robusta
  */
 function getGarcomFromReq(req) {
   const u =
-    req?.garcomDoc ||
+    req?.user ||
     req?.garcom ||
     req?.garcomUser ||
-    req?.auth?.garcom ||
     req?.auth?.user ||
-    req?.user ||
+    req?.auth?.garcom ||
     null;
 
-  const idRaw =
-    u?._id ||
-    u?.id ||
-    u?.garcomId ||
-    req?.garcomId ||
-    req?.user?.garcomId ||
-    req?.auth?.garcomId ||
-    null;
-
-  const id = idRaw ? String(idRaw) : null;
-  const nome = u?.apelido || u?.nome || req?.user?.apelido || req?.user?.nome || null;
+  const id = u?._id ? String(u._id) : null;
+  const nome = u?.apelido || u?.nome || null;
 
   return { id, nome };
 }
@@ -411,7 +253,7 @@ exports.abrirPedidoBalcao = async (req, res) => {
       valorTotal: totalInicial,
       total: totalInicial,
       origem: "balcao",
-      status: "aguardando_pagamento",
+      status: "em_producao",
       formadePagamento: "pendente",
       pagamentos: [],
       valorPago: 0,
@@ -430,7 +272,7 @@ exports.abrirPedidoBalcao = async (req, res) => {
     await novoPedido.save();
 
     if (req.io) {
-      // Não dispara "novoPedido" aqui: balcão com PIX ainda pendente não deve tocar notificação no desktop.
+      req.io.to(`restaurante-${restauranteId}`).emit("novoPedido", novoPedido);
       req.io.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", novoPedido);
     }
 
@@ -491,26 +333,9 @@ exports.adicionarItensBalcao = async (req, res) => {
     const totalRodada = itensNormalizados.reduce((acc, i) => acc + toNum(i.precoTotal), 0);
 
     pedido.itens = Array.isArray(pedido.itens) ? pedido.itens : [];
+    pedido.itens.push(...itensNormalizados);
 
-    // Proteção contra duplicidade: versões antigas do app abriam o pedido com itens
-    // e logo em seguida chamavam /itens com o mesmo carrinho. Nesse caso não soma de novo.
-    const deveSubstituir =
-      req.body?.substituirItens === true ||
-      req.body?.replaceItems === true ||
-      req.body?.atualizarItens === true ||
-      mesmosItensPedido(pedido.itens, itensNormalizados);
-
-    if (deveSubstituir) {
-      pedido.itens = itensNormalizados;
-      pedido.valorTotal = round2(totalRodada);
-      pedido.total = round2(totalRodada);
-      pedido.valorPago = round2(toNum(pedido.valorPago));
-      pedido.valorPendente = round2(Math.max(0, totalRodada - toNum(pedido.valorPago)));
-    } else {
-      pedido.itens.push(...itensNormalizados);
-      pedido.valorTotal = round2(Number(pedido.valorTotal || 0) + totalRodada);
-      pedido.total = pedido.valorTotal;
-    }
+    pedido.valorTotal = round2(Number(pedido.valorTotal || 0) + totalRodada);
 
     const { total, pago, pendente } = recalcPagamentoPedido(pedido);
     await pedido.save();
@@ -568,13 +393,6 @@ exports.registrarPagamentoBalcao = async (req, res) => {
     const recebidoPorId =
       recebidoPorRole === "garcom" ? (g.id || null) : (req.userId ? String(req.userId) : null);
 
-    if (recebidoPorRole === "garcom" && recebidoPorId) {
-      pedido.garcomId = pedido.garcomId || recebidoPorId;
-      pedido.garcomNome = pedido.garcomNome || g.nome || "Garçom";
-      pedido.recebidoPor = recebidoPorId;
-      pedido.recebidoPorNome = g.nome || pedido.garcomNome || "Garçom";
-    }
-
     pedido.pagamentos.push({
       metodo: m,
       valor: v,
@@ -585,7 +403,6 @@ exports.registrarPagamentoBalcao = async (req, res) => {
           ? new mongoose.Types.ObjectId(recebidoPorId)
           : null,
       recebidoPorRole,
-      recebidoPorNome: recebidoPorRole === "garcom" ? (g.nome || pedido.garcomNome || "Garçom") : null,
       obs: String(obs || "").trim(),
     });
 
@@ -677,13 +494,6 @@ exports.gerarPixBalcao = async (req, res) => {
     const recebidoPorId =
       recebidoPorRole === "garcom" ? (g.id || null) : (req.userId ? String(req.userId) : null);
 
-    if (recebidoPorRole === "garcom" && recebidoPorId) {
-      pedido.garcomId = pedido.garcomId || recebidoPorId;
-      pedido.garcomNome = pedido.garcomNome || g.nome || "Garçom";
-      pedido.recebidoPor = recebidoPorId;
-      pedido.recebidoPorNome = g.nome || pedido.garcomNome || "Garçom";
-    }
-
     pedido.pagamentos.push({
       metodo: "pix",
       valor: valorPix,
@@ -694,7 +504,6 @@ exports.gerarPixBalcao = async (req, res) => {
           ? new mongoose.Types.ObjectId(recebidoPorId)
           : null,
       recebidoPorRole,
-      recebidoPorNome: recebidoPorRole === "garcom" ? (g.nome || pedido.garcomNome || "Garçom") : null,
       mpPaymentId: pix?.paymentId ? String(pix.paymentId) : null,
       mpStatus: pix?.status || "pending",
       pixQrCode: pix?.qrCode || "",
@@ -801,21 +610,6 @@ exports.statusPixBalcao = async (req, res) => {
     // se quitou, fecha o pedido balcão automaticamente
     if (pendente <= 0 && total > 0) {
       const out = await fecharPedidoGenerico({ req, pedido });
-      await notificarPedidoNovoSePago(req, pedido);
-
-      const numeroConfirmacao = String(alvo.whatsappPixNumero || pedido.telefoneCliente || "").replace(/\D/g, "");
-      if (numeroConfirmacao && estaConectado(String(pedido.restaurante))) {
-        await enviarMensagem(
-          String(pedido.restaurante),
-          numeroConfirmacao,
-          `✅ *Pagamento confirmado!*
-
-Seu pedido de balcão foi confirmado e já foi enviado para produção.
-
-🧾 *Total:* ${formatBRL(total)}`
-        ).catch(() => {});
-      }
-
       return res.json({
         ok: true,
         paid: true,
@@ -963,55 +757,23 @@ exports.enviarPixWhatsappBalcao = async (req, res) => {
       });
     }
 
-    const itensBody = deduplicarItensResumoWhats(extrairItensResumoBody(req.body));
-
-    // Quando o app envia o carrinho no body, ele é a fonte mais confiável para o WhatsApp.
-    // Isso evita mostrar item duplicado caso alguma versão antiga tenha somado o mesmo carrinho no pedido.
-    const itensResumo = itensBody.length ? itensBody : deduplicarItensResumoWhats(Array.isArray(pedido.itens) ? pedido.itens : []);
-    const totalResumo = itensBody.length ? totalItensBalcao(itensBody) : 0;
-
-    if (itensBody.length) {
-      pedido.itens = itensBody;
-      pedido.valorTotal = totalResumo;
-      pedido.total = totalResumo;
-      pedido.valorPendente = round2(Math.max(0, totalResumo - toNum(pedido.valorPago)));
-    }
-
     const { total, pago, pendente } = recalcPagamentoPedido(pedido);
     await pedido.save().catch(() => {});
 
-    const nomeCliente = pedido?.nomeCliente || req.body?.nomeCliente || req.body?.cliente || "Cliente";
+    const nomeCliente = pedido?.nomeCliente || "Cliente";
     const qrBase64 = String(alvo.pixQrCodeBase64 || "").trim();
-
-    const pedidoParaResumo = {
-      ...(typeof pedido.toObject === "function" ? pedido.toObject() : pedido),
-      itens: itensResumo,
-      valorTotal: totalResumo || total,
-      total: totalResumo || total,
-    };
-    const resumoItens = montarResumoItensPedido(pedidoParaResumo);
-
-    const totalMensagem = totalResumo || total || valorPix;
-    const pendenteMensagem = itensBody.length ? valorPix : pendente;
 
     const resumo = [
       "📲 *PAGAMENTO VIA PIX*",
       `👤 *Cliente:* ${nomeCliente}`,
       "",
-      resumoItens,
-      "",
-      `💰 *Valor do PIX:* ${formatBRL(valorPix)}`,
-      `🧾 *Total:* ${formatBRL(totalMensagem || 0)}`,
-      `✅ *Pago:* ${formatBRL(pago || 0)}`,
-      `⏳ *Pendente:* ${formatBRL(pendenteMensagem || 0)}`,
+      `💰 *Valor do PIX:* R$ ${Number(valorPix).toFixed(2)}`,
+      `🧾 *Total:* R$ ${Number(total || 0).toFixed(2)}`,
+      `✅ *Pago:* R$ ${Number(pago || 0).toFixed(2)}`,
+      `⏳ *Pendente:* R$ ${Number(pendente || 0).toFixed(2)}`,
       "",
       "Abra o app do banco e escaneie o QR ✅",
     ].join("\n");
-
-    alvo.whatsappPixNumero = numeroFinal;
-    alvo.whatsappPixEnviadoEm = new Date();
-    pedido.telefoneCliente = pedido.telefoneCliente || numeroFinal;
-    await pedido.save().catch(() => {});
 
     if (qrBase64) await enviarMensagemMidia(restauranteId, numeroFinal, qrBase64, resumo);
     else await enviarMensagem(restauranteId, numeroFinal, resumo);
