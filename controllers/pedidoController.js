@@ -35,6 +35,25 @@ function canReuseBalcaoPedido(pedido) {
   return st === "aguardando_pagamento" && pend > 0.00001;
 }
 
+async function gerarProximoNumeroBalcao(restauranteId) {
+  // Sequência BK única para balcão no Desktop e no app Garçom.
+  // Não depende do último criadoEm, porque registros antigos/legados podem vir fora de ordem.
+  const pedidos = await Pedido.find({
+    restaurante: restauranteId,
+    numeroPedido: { $regex: "^BK" },
+  })
+    .select("numeroPedido")
+    .lean();
+
+  const regex = /^BK(\d+)$/i;
+  const maior = (Array.isArray(pedidos) ? pedidos : []).reduce((max, p) => {
+    const n = Number(String(p?.numeroPedido || "").match(regex)?.[1] || 0);
+    return Number.isFinite(n) && n > max ? n : max;
+  }, 0);
+
+  return `BK${String(maior + 1).padStart(5, "0")}`;
+}
+
 function sumPagamentosConfirmados(pedido) {
   const arr = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
   return round2(
@@ -451,12 +470,16 @@ const criarPedido = async (req, res) => {
       };
 
       const prefixo = prefixos[origem] || "BT";
-      const regex = new RegExp(`${prefixo}(\\d+)`);
 
-      const ultimo = await Pedido.findOne({ origem, restaurante }).sort({ criadoEm: -1 });
-      const ultimoNumero = ultimo?.numeroPedido?.match(regex)?.[1] || "0";
-      const novoNumero = String(Number(ultimoNumero) + 1).padStart(5, "0");
-      novoNumeroPedido = `${prefixo}${novoNumero}`;
+      if (prefixo === "BK") {
+        novoNumeroPedido = await gerarProximoNumeroBalcao(restaurante);
+      } else {
+        const regex = new RegExp(`${prefixo}(\\d+)`);
+        const ultimo = await Pedido.findOne({ origem, restaurante }).sort({ criadoEm: -1 });
+        const ultimoNumero = ultimo?.numeroPedido?.match(regex)?.[1] || "0";
+        const novoNumero = String(Number(ultimoNumero) + 1).padStart(5, "0");
+        novoNumeroPedido = `${prefixo}${novoNumero}`;
+      }
     }
 
     // =========================
@@ -1838,9 +1861,18 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
     let pedido = null;
 
     if (pedidoId && mongoose.Types.ObjectId.isValid(String(pedidoId))) {
-      pedido = await Pedido.findById(pedidoId);
-      if (pedido && String(pedido.restaurante) !== String(restaurante)) {
+      const pedidoInformado = await Pedido.findById(pedidoId);
+      if (pedidoInformado && String(pedidoInformado.restaurante) !== String(restaurante)) {
         return res.status(403).json({ message: "Pedido não pertence a este restaurante." });
+      }
+
+      // Segurança: o front pode manter o último pedido em memória.
+      // Só atualiza/reaproveita se ainda for uma comanda de balcão aberta e pendente.
+      // Se já foi pago/enviado para produção, cria um novo BK automaticamente.
+      if (canReuseBalcaoPedido(pedidoInformado)) {
+        pedido = pedidoInformado;
+      } else {
+        pedido = null;
       }
     }
 
@@ -1865,14 +1897,10 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
     }
 
     if (!pedido) {
-      const prefixo = "BK";
-      const regex = new RegExp(`${prefixo}(\\d+)`);
-      const ultimo = await Pedido.findOne({ origem: "balcao", restaurante }).sort({ criadoEm: -1 });
-      const ultimoNumero = ultimo?.numeroPedido?.match(regex)?.[1] || "0";
-      const novoNumero = String(Number(ultimoNumero) + 1).padStart(5, "0");
+      const novoNumeroPedido = await gerarProximoNumeroBalcao(restaurante);
 
       const novoPedido = new Pedido({
-        numeroPedido: `${prefixo}${novoNumero}`,
+        numeroPedido: novoNumeroPedido,
         nomeCliente,
         telefoneCliente: telefoneNormalizado,
         enderecoCliente,

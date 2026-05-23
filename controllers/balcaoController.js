@@ -392,19 +392,24 @@ exports.listarPedidosBalcaoAbertos = async (req, res) => {
    ABRIR PEDIDO (balcão)
 ========================= */
 async function gerarProximoNumeroBalcao(restauranteId) {
+  // Sequência única para TODOS os pedidos de balcão do restaurante,
+  // independente se nasceu no Desktop ou no app Garçom.
   const prefixo = "BK";
-  const regex = new RegExp(`^${prefixo}(\\d+)$`);
+  const regex = /^BK(\d+)$/i;
 
-  const ultimo = await Pedido.findOne({
+  const pedidos = await Pedido.find({
     restaurante: restauranteId,
-    numeroPedido: { $regex: `^${prefixo}` },
+    numeroPedido: { $regex: "^BK" },
   })
-    .sort({ criadoEm: -1, createdAt: -1 })
     .select("numeroPedido")
     .lean();
 
-  const atual = String(ultimo?.numeroPedido || "").match(regex)?.[1] || "0";
-  return `${prefixo}${String(Number(atual) + 1).padStart(5, "0")}`;
+  const maior = (Array.isArray(pedidos) ? pedidos : []).reduce((max, p) => {
+    const n = Number(String(p?.numeroPedido || "").match(regex)?.[1] || 0);
+    return Number.isFinite(n) && n > max ? n : max;
+  }, 0);
+
+  return `${prefixo}${String(maior + 1).padStart(5, "0")}`;
 }
 
 exports.abrirPedidoBalcao = async (req, res) => {
