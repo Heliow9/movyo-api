@@ -8,6 +8,17 @@ const OAuthState = require("../models/OAuthState");
 const { trocarCodePorToken } = require("../services/mercadoPagoOAuthService");
 
 // -------------------- helpers --------------------
+
+function boolLike(v) {
+  return v === true || v === 1 || String(v || "").trim().toLowerCase() === "true";
+}
+
+function getMercadoPagoInfo(restaurante) {
+  const mp = restaurante && restaurante.mercadoPago && typeof restaurante.mercadoPago === "object" ? restaurante.mercadoPago : {};
+  const accessToken = mp.accessToken || mp.token || mp.access_token || null;
+  const conectado = boolLike(mp.conectado) || !!accessToken;
+  return { conectado, accessToken, mp };
+}
 function base64UrlEncode(buffer) {
   return buffer
     .toString("base64")
@@ -244,9 +255,10 @@ exports.statusById = async (req, res) => {
     const restaurante = await Restaurante.findById(restauranteId).select("mercadoPago");
     if (!restaurante) return res.status(404).json({ error: "Restaurante não encontrado." });
 
-    const mp = restaurante.mercadoPago || {};
+    const { conectado, accessToken, mp } = getMercadoPagoInfo(restaurante);
     return res.json({
-      conectado: !!mp.conectado,
+      conectado,
+      hasAccessToken: !!accessToken,
       userId: mp.userId || null,
       tokenExpiraEm: mp.tokenExpiraEm || null,
       ultimoOAuthEm: mp.ultimoOAuthEm || null,

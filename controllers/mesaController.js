@@ -11,6 +11,17 @@ const { criarPagamentoPix, consultarPagamento } = require("../services/mercadoPa
 // controllers/mesaController.js (no topo)
 const { enviarMensagem, enviarMensagemMidia, estaConectado } = require("../utils/bot");
 
+function boolLike(v) {
+  return v === true || v === 1 || String(v || "").trim().toLowerCase() === "true";
+}
+
+function getMercadoPagoInfo(restaurante) {
+  const mp = restaurante && restaurante.mercadoPago && typeof restaurante.mercadoPago === "object" ? restaurante.mercadoPago : {};
+  const accessToken = mp.accessToken || mp.token || mp.access_token || null;
+  const conectado = boolLike(mp.conectado) || !!accessToken;
+  return { conectado, accessToken, mp };
+}
+
 function normalizarNumeroMesa(valor) {
   return String(valor ?? "").trim().replace(/\s+/g, " ");
 }
@@ -896,8 +907,7 @@ exports.gerarPixMesaPainel = async (req, res) => {
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("nome mercadoPago telefone");
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const conectado = !!restaurante?.mercadoPago?.conectado;
-    const accessToken = restaurante?.mercadoPago?.accessToken;
+    const { conectado, accessToken } = getMercadoPagoInfo(restaurante);
 
     if (!conectado || !accessToken) {
       return res.status(400).json({
@@ -997,7 +1007,7 @@ exports.statusPixMesaPainel = async (req, res) => {
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
 
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("mercadoPago");
-    const accessToken = restaurante?.mercadoPago?.accessToken;
+    const { accessToken } = getMercadoPagoInfo(restaurante);
 
     if (!accessToken) {
       return res.status(400).json({ message: "Restaurante não conectado ao Mercado Pago." });
@@ -1190,8 +1200,7 @@ exports.gerarPixMesaApp = async (req, res) => {
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("nome mercadoPago telefone");
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
-    const conectado = !!restaurante?.mercadoPago?.conectado;
-    const accessToken = restaurante?.mercadoPago?.accessToken;
+    const { conectado, accessToken } = getMercadoPagoInfo(restaurante);
 
     if (!conectado || !accessToken) {
       return res.status(400).json({
@@ -1291,7 +1300,7 @@ exports.statusPixMesaApp = async (req, res) => {
     }
 
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("mercadoPago");
-    const accessToken = restaurante?.mercadoPago?.accessToken;
+    const { accessToken } = getMercadoPagoInfo(restaurante);
 
     if (!accessToken) {
       return res.status(400).json({
