@@ -19,6 +19,26 @@ function round2(v) {
   return Math.round((Number(v || 0) + Number.EPSILON) * 100) / 100;
 }
 
+function normalizarMetodoPagamentoBalcao(metodo = "") {
+  const raw = String(metodo || "").trim();
+  const n = raw
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "");
+
+  if (n === "dinheiro") return { metodo: "dinheiro", forma: "dinheiro" };
+  if (n === "cartao" || n === "card") return { metodo: "cartao", forma: "cartao" };
+  if (["c.credito", "ccredito", "cartao_credito", "cartaocredito", "credito"].includes(n)) {
+    return { metodo: "c.credito", forma: "C.Crédito" };
+  }
+  if (["c.debito", "cdebito", "cartao_debito", "cartaodebito", "debito"].includes(n)) {
+    return { metodo: "c.debito", forma: "C.Debito" };
+  }
+
+  return null;
+}
+
 
 function normalizarItemBalcao(i = {}) {
   const produto = i.produto && typeof i.produto === "object" ? i.produto : {};
@@ -558,10 +578,11 @@ exports.registrarPagamentoBalcao = async (req, res) => {
     const { pedidoId } = req.params;
     const { metodo, valor, obs } = req.body;
 
-    const m = String(metodo || "").toLowerCase();
-    if (!["dinheiro", "cartao"].includes(m)) {
-      return res.status(400).json({ message: "Método inválido. Use dinheiro ou cartao." });
+    const pagamentoNormalizado = normalizarMetodoPagamentoBalcao(metodo || req.body?.formaPagamento || req.body?.formadePagamento);
+    if (!pagamentoNormalizado) {
+      return res.status(400).json({ message: "Método inválido. Use dinheiro, cartao, C.Crédito ou C.Debito." });
     }
+    const m = pagamentoNormalizado.metodo;
 
     const v = round2(toNum(valor));
     if (!Number.isFinite(v) || v <= 0) {
@@ -623,7 +644,11 @@ exports.registrarPagamentoBalcao = async (req, res) => {
     );
 
     if (metodosConfirmados.size > 1) pedido.formadePagamento = "misto";
-    else if (metodosConfirmados.size === 1) pedido.formadePagamento = [...metodosConfirmados][0];
+    else if (metodosConfirmados.size === 1) {
+      const unico = [...metodosConfirmados][0];
+      pedido.formadePagamento = normalizarMetodoPagamentoBalcao(unico)?.forma || unico;
+    }
+    pedido.formaPagamento = pedido.formadePagamento;
 
     // se quitou, já fecha o pedido balcão
     if (pendente <= 0 && total > 0) {
