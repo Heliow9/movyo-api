@@ -1,0 +1,13 @@
+const express = require('express');
+const router = express.Router();
+const c = require('../controllers/caixaController');
+router.get('/:restauranteId/operadores', c.listarOperadores);
+router.post('/:restauranteId/operadores', c.salvarOperador);
+router.put('/:restauranteId/operadores/:operadorId', c.salvarOperador);
+router.patch('/:restauranteId/operadores/:operadorId/status', c.alternarOperador);
+router.get('/:restauranteId/atual', c.caixaAtual);
+router.post('/:restauranteId/abrir', c.abrirCaixa);
+router.post('/:restauranteId/movimento', c.movimentarCaixa);
+router.post('/:restauranteId/fechar', c.fecharCaixa);
+router.get('/:restauranteId/relatorios', c.relatorios);
+module.exports = router;

@@ -18,6 +18,7 @@ router.put("/:id/ativar", controller.ativarProduto);
 router.put("/:id/desativar", controller.desativarProduto);
 
 router.put("/:id/destaque", controller.setProdutoDestaque);
+router.put("/:id/vitrine", controller.setProdutoAtivoVitrine);
 
 // ✅ NOVO: imprime na cozinha
 router.put("/:id/imprime-cozinha", controller.setProdutoImprimeCozinha);

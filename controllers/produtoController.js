@@ -46,6 +46,14 @@ function normalizeProdutoBody(body = {}, { partial = false } = {}) {
   delete normalized.emDestaque;
   delete normalized.isDestaque;
 
+  // ✅ Produto ativo na vitrine/cardápio público.
+  // Produtos antigos devem ser tratados como true; novos podem vir true/false pelo switch.
+  const rawAtivoVitrine = normalized.ativoVitrine ?? normalized.vitrineAtiva ?? normalized.ativoNaVitrine;
+  const ativoVitrine = toBool(rawAtivoVitrine, partial ? undefined : true);
+  if (ativoVitrine !== undefined) normalized.ativoVitrine = ativoVitrine;
+  delete normalized.vitrineAtiva;
+  delete normalized.ativoNaVitrine;
+
   const rawPreco = normalized.precoBase ?? normalized.preco;
   if (rawPreco !== undefined && rawPreco !== null && rawPreco !== '') {
     const precoNumber = Number(String(rawPreco).replace(',', '.'));
@@ -63,6 +71,8 @@ function normalizeProdutoResponse(produto) {
   const preco = Number(plain.preco ?? plain.precoBase ?? 0);
   plain.preco = Number.isFinite(preco) ? preco : 0;
   plain.precoBase = Number.isFinite(preco) ? preco : 0;
+  // ✅ compatibilidade: produtos já cadastrados antes desse campo entram como ativos na vitrine.
+  if (plain.ativoVitrine === undefined || plain.ativoVitrine === null) plain.ativoVitrine = true;
   return plain;
 }
 
@@ -126,7 +136,17 @@ const getProdutosPorRestaurante = async (req, res) => {
       })
     );
 
-    const produtosNormalizados = normalizeProdutoListResponse(produtos).map((produto) => {
+    // ✅ proteção contra duplicação visual quando o banco/API retorna linhas repetidas.
+    const vistos = new Set();
+    const produtosUnicos = (produtos || []).filter((p) => {
+      const id = String(p?._id || p?.id || '');
+      if (!id) return true;
+      if (vistos.has(id)) return false;
+      vistos.add(id);
+      return true;
+    });
+
+    const produtosNormalizados = normalizeProdutoListResponse(produtosUnicos).map((produto) => {
       const categoriaId = String(
         produto?.categoria?._id ||
         produto?.categoria?.id ||
@@ -272,6 +292,7 @@ const duplicarProduto = async (req, res) => {
 
     // ✅ garante que o campo novo exista na cópia (caso doc antigo não tenha)
     if (copia.imprimeNaCozinha === undefined) copia.imprimeNaCozinha = true;
+    if (copia.ativoVitrine === undefined) copia.ativoVitrine = true;
 
     const novoProduto = await Produto.create(copia);
     res.status(201).json(normalizeProdutoResponse(novoProduto));
@@ -355,6 +376,38 @@ const setProdutoImprimeCozinha = async (req, res) => {
   }
 };
 
+
+/**
+ * ✅ Marcar/Desmarcar produto na vitrine/cardápio público
+ * PUT /api/produtos/:id/vitrine
+ * Body: { ativoVitrine: true/false }
+ */
+const setProdutoAtivoVitrine = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const produto = await Produto.findById(id);
+    if (!produto) return res.status(404).json({ erro: "Produto não encontrado." });
+
+    const ativoVitrine = toBool(
+      req.body?.ativoVitrine ?? req.body?.vitrineAtiva ?? req.body?.ativoNaVitrine,
+      undefined
+    );
+
+    if (ativoVitrine === undefined) {
+      return res.status(400).json({ erro: "Informe ativoVitrine (true/false)." });
+    }
+
+    produto.ativoVitrine = ativoVitrine;
+    await produto.save();
+
+    return res.json({ ok: true, ativoVitrine: produto.ativoVitrine, data: normalizeProdutoResponse(produto) });
+  } catch (err) {
+    console.error("Erro ao atualizar produto na vitrine:", err);
+    return res.status(500).json({ erro: "Erro ao atualizar status na vitrine." });
+  }
+};
+
 module.exports = {
   criarProduto,
   getProdutosPorRestaurante,
@@ -367,4 +420,5 @@ module.exports = {
   patchEstoqueOpcionais,
   setProdutoDestaque,
   setProdutoImprimeCozinha, // ✅ export novo
+  setProdutoAtivoVitrine,
 };

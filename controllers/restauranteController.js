@@ -469,10 +469,13 @@ module.exports = {
         ativa: true,
       }).sort({ ordem: 1 });
 
-      const produtos = await Produto.find({
+      const produtosBase = await Produto.find({
         restaurante: restaurante._id,
         ativo: true,
       });
+      // ✅ Vitrine pública só mostra produtos liberados na vitrine.
+      // Produtos antigos sem ativoVitrine continuam visíveis por compatibilidade.
+      const produtos = (produtosBase || []).filter((p) => p.ativoVitrine !== false);
 
       const produtosPorCategoria = categorias.map((categoria) => {
         const {
@@ -518,6 +521,7 @@ module.exports = {
 
             extras: p.extras || {},
             ativo: p.ativo,
+            ativoVitrine: p.ativoVitrine !== false,
 
             categoriaType: tipoCategoria,
             pizzaMultisabor: Boolean(pizzaMultisabor),
@@ -594,7 +598,8 @@ module.exports = {
         ativa: true,
       }).sort({ ordem: 1 });
 
-      const produtos = await Produto.find({ restaurante: restaurante._id, ativo: true });
+      const produtosBase = await Produto.find({ restaurante: restaurante._id, ativo: true });
+      const produtos = (produtosBase || []).filter((p) => p.ativoVitrine !== false);
 
       const produtosPorCategoria = categorias.map((categoria) => {
         const {
@@ -636,6 +641,7 @@ module.exports = {
 
             extras: p.extras || {},
             ativo: p.ativo,
+            ativoVitrine: p.ativoVitrine !== false,
 
             categoriaType: tipoCategoria,
             pizzaMultisabor: Boolean(pizzaMultisabor),
