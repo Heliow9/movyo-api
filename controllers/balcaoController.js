@@ -141,19 +141,29 @@ function deduplicarItensResumoWhats(itens = []) {
   return out;
 }
 
-function calcularTotalPedido(pedido) {
-  const vt = toNum(pedido?.valorTotal);
-  if (vt > 0) return round2(vt);
+function getDescontoPedido(pedido) {
+  const d = toNum(pedido?.descontoValor ?? pedido?.valorDesconto ?? pedido?.desconto ?? 0);
+  return round2(Math.max(0, d));
+}
 
+function calcularTotalBrutoPedido(pedido) {
   const itens = Array.isArray(pedido?.itens) ? pedido.itens : [];
-  const total = itens.reduce((acc, it) => {
+  const totalItens = itens.reduce((acc, it) => {
     const qtd = Math.max(1, Number(it?.quantidade || 1));
     const unit = toNum(it?.precoUnitario);
     const tot = toNum(it?.precoTotal);
     return acc + (tot > 0 ? tot : unit * qtd);
   }, 0);
 
-  return round2(total);
+  const brutoItens = round2(totalItens + toNum(pedido?.taxaEntrega));
+  if (brutoItens > 0) return brutoItens;
+  return round2(toNum(pedido?.totalBruto) || toNum(pedido?.valorTotal) || toNum(pedido?.total));
+}
+
+function calcularTotalPedido(pedido) {
+  const bruto = calcularTotalBrutoPedido(pedido);
+  const desconto = Math.min(getDescontoPedido(pedido), bruto);
+  return round2(Math.max(0, bruto - desconto));
 }
 
 function isPaidStatus(st) {
@@ -318,7 +328,13 @@ function sumPagamentosConfirmados(pedido) {
 }
 
 function recalcPagamentoPedido(pedido) {
-  const total = calcularTotalPedido(pedido);
+  const bruto = calcularTotalBrutoPedido(pedido);
+  const desconto = Math.min(getDescontoPedido(pedido), bruto);
+  const total = round2(Math.max(0, bruto - desconto));
+
+  pedido.totalBruto = bruto;
+  pedido.descontoValor = desconto;
+  pedido.valorDesconto = desconto;
 
   let pago = sumPagamentosConfirmados(pedido);
 
@@ -441,7 +457,9 @@ exports.abrirPedidoBalcao = async (req, res) => {
     }
 
     const itensIniciais = normalizarItensBalcao(itens);
-    const totalInicial = round2(itensIniciais.reduce((acc, i) => acc + toNum(i.precoTotal), 0));
+    const totalBrutoInicial = round2(itensIniciais.reduce((acc, i) => acc + toNum(i.precoTotal), 0));
+    const descontoInicial = Math.min(round2(Math.max(0, toNum(req.body?.descontoValor ?? req.body?.valorDesconto ?? req.body?.desconto ?? 0))), totalBrutoInicial);
+    const totalInicial = round2(Math.max(0, totalBrutoInicial - descontoInicial));
 
     const numeroPedido = await gerarProximoNumeroBalcao(restauranteId);
 
@@ -452,6 +470,9 @@ exports.abrirPedidoBalcao = async (req, res) => {
       nomeCliente: nomeCliente || "Cliente balcão",
       telefoneCliente: telefoneCliente || "",
       itens: itensIniciais,
+      totalBruto: totalBrutoInicial,
+      descontoValor: descontoInicial,
+      valorDesconto: descontoInicial,
       valorTotal: totalInicial,
       total: totalInicial,
       origem: "balcao",
@@ -606,6 +627,17 @@ exports.registrarPagamentoBalcao = async (req, res) => {
       pedido.valorPendente = totalItensBody;
     }
 
+    const descontoBody = req.body?.descontoValor ?? req.body?.valorDesconto ?? req.body?.desconto;
+    if (descontoBody !== undefined && descontoBody !== null && String(descontoBody).trim() !== "") {
+      const brutoAtual = calcularTotalBrutoPedido(pedido);
+      const desconto = Math.min(round2(Math.max(0, toNum(descontoBody))), brutoAtual);
+      pedido.descontoValor = desconto;
+      pedido.valorDesconto = desconto;
+      pedido.totalBruto = brutoAtual;
+      pedido.valorTotal = round2(Math.max(0, brutoAtual - desconto));
+      pedido.total = pedido.valorTotal;
+    }
+
     pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
 
     const g = getGarcomFromReq(req);
@@ -683,6 +715,17 @@ exports.gerarPixBalcao = async (req, res) => {
         : await Pedido.findById(pedidoId);
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    const descontoBody = req.body?.descontoValor ?? req.body?.valorDesconto ?? req.body?.desconto;
+    if (descontoBody !== undefined && descontoBody !== null && String(descontoBody).trim() !== "") {
+      const brutoAtual = calcularTotalBrutoPedido(pedido);
+      const desconto = Math.min(round2(Math.max(0, toNum(descontoBody))), brutoAtual);
+      pedido.descontoValor = desconto;
+      pedido.valorDesconto = desconto;
+      pedido.totalBruto = brutoAtual;
+      pedido.valorTotal = round2(Math.max(0, brutoAtual - desconto));
+      pedido.total = pedido.valorTotal;
+    }
 
     const { pendente: pendenteAntes, total } = recalcPagamentoPedido(pedido);
     await pedido.save().catch(() => {});
