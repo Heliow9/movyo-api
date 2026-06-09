@@ -2,7 +2,13 @@ const CaixaSessao = require('../models/CaixaSessao');
 const CaixaMovimento = require('../models/CaixaMovimento');
 
 const toNum = (v) => {
-  const n = Number(String(v ?? 0).replace(',', '.'));
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  let s = String(v ?? 0).trim();
+  if (!s) return 0;
+  s = s.replace(/\s/g, '').replace(/R\$|[^0-9,.-]/g, '');
+  if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (s.includes(',')) s = s.replace(',', '.');
+  const n = Number(s);
   return Number.isFinite(n) ? n : 0;
 };
 const round2 = (v) => Math.round((Number(v || 0) + Number.EPSILON) * 100) / 100;

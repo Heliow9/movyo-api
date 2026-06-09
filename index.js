@@ -96,6 +96,7 @@ app.use("/api/publico/mercadopago", mercadoPagoPublicoRoutes);
 app.use("/api/garcons", garcomRoutes);
 app.use("/api/estoque", require("./routes/estoqueRoutes"));
 app.use("/api/balcao", require("./routes/balcaoRoutes"));
+app.use("/api/caixa", require("./routes/caixaRoutes"));
 
 const imagensRoutes = require("./routes/imagens.routes");
 app.use("/api/imagens", imagensRoutes);

@@ -8,6 +8,15 @@ function restauranteIdFromReq(req) {
   return req.params.restauranteId || req.body.restauranteId || req.query.restauranteId || req.userId || req.restauranteId;
 }
 
+function operadorExigePin(operador) {
+  return !!String(operador?.pin || '').trim();
+}
+function pinConfere(operador, pinInformado) {
+  const pin = String(operador?.pin || '').trim();
+  if (!pin) return true;
+  return String(pinInformado || '').trim() === pin;
+}
+
 exports.listarOperadores = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
@@ -57,7 +66,7 @@ exports.caixaAtual = async (req, res) => {
 exports.abrirCaixa = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
-    const { operadorId, saldoInicial, observacaoAbertura } = req.body;
+    const { operadorId, saldoInicial, observacaoAbertura, pin } = req.body;
     const dataOperacional = validarDataISO(req.body.dataOperacional) || hojeLocalISO();
     if (!restauranteId) return res.status(400).json({ message: 'restauranteId é obrigatório.' });
     const aberto = await getCaixaAberto(restauranteId);
@@ -65,6 +74,9 @@ exports.abrirCaixa = async (req, res) => {
     const operador = await OperadorCaixa.findById(operadorId);
     if (!operador || String(operador.restauranteId) !== String(restauranteId) || operador.ativo === false) {
       return res.status(400).json({ message: 'Selecione um operador ativo para abrir o caixa.' });
+    }
+    if (operadorExigePin(operador) && !pinConfere(operador, pin)) {
+      return res.status(401).json({ message: 'PIN do operador inválido para abrir o caixa.', code: 'PIN_INVALIDO' });
     }
     const caixa = await CaixaSessao.create({
       restauranteId: String(restauranteId), operadorId: operador._id, operadorNome: operador.nome,
@@ -94,6 +106,10 @@ exports.fecharCaixa = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
     const caixa = await exigirCaixaAberto(restauranteId);
+    const operador = await OperadorCaixa.findById(caixa.operadorId);
+    if (operadorExigePin(operador) && !pinConfere(operador, req.body.pin)) {
+      return res.status(401).json({ message: 'PIN do operador inválido para fechar o caixa.', code: 'PIN_INVALIDO' });
+    }
     const doc = await recalcularCaixa(caixa._id);
     doc.status = 'fechado';
     doc.fechadoEm = new Date();
