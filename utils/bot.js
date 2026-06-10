@@ -69,6 +69,8 @@ const BOT_RESTART_REQUIRED_DELAY_MS = Number(process.env.BOT_RESTART_REQUIRED_DE
 const BOT_MAX_RECONNECT_ATTEMPTS = Number(process.env.BOT_MAX_RECONNECT_ATTEMPTS || 50);
 const BOT_KEEP_ALIVE_MS = Number(process.env.BOT_KEEP_ALIVE_MS || 20_000);
 const BOT_CONNECT_TIMEOUT_SOCKET_MS = Number(process.env.BOT_CONNECT_TIMEOUT_SOCKET_MS || 60_000);
+const CARDAPIO_BASE_URL = String(process.env.CARDAPIO_BASE_URL || process.env.VITRINE_BASE_URL || "https://app.movyo.delivery").trim().replace(/\/+$/, "");
+const BOT_RESPONDER_GRUPOS = normalizeBoolean(process.env.BOT_RESPONDER_GRUPOS, false);
 
 // Watchdog de conexão por restaurante
 const connectionWatchdogs = {};
@@ -455,8 +457,44 @@ function extrairNomeCliente(sock, remoteJid, msg) {
 }
 
 function getCardapioUrl(restaurante) {
-  const slug = restaurante?.slugIdentificador || "";
-  return slug ? `https://app.movyo.delivery/p/${slug}` : "";
+  const slug = String(restaurante?.slugIdentificador || "").trim().replace(/^\/+|\/+$/g, "");
+  return slug ? `${CARDAPIO_BASE_URL}/p/${encodeURIComponent(slug)}` : `${CARDAPIO_BASE_URL}/p/`;
+}
+
+function deveIgnorarMensagem(remoteJid) {
+  const jid = String(remoteJid || "");
+  if (!jid) return true;
+  if (jid.endsWith("@broadcast")) return true;
+  if (jid.endsWith("@g.us") && !BOT_RESPONDER_GRUPOS) return true;
+  if (jid === "status@broadcast") return true;
+  return false;
+}
+
+function isPedidoCardapio(t) {
+  const s = normalizeText(t);
+  return (
+    s === "cardapio" ||
+    s === "menu" ||
+    s.includes("manda o cardapio") ||
+    s.includes("envia o cardapio") ||
+    s.includes("ver cardapio") ||
+    s.includes("link do cardapio") ||
+    s.includes("fazer pedido") ||
+    s.includes("pedido online")
+  );
+}
+
+function isPerguntaHorario(t) {
+  const s = normalizeText(t);
+  return (
+    s.includes("horario") ||
+    s.includes("funcionamento") ||
+    s.includes("ta aberto") ||
+    s.includes("esta aberto") ||
+    s.includes("aberto agora") ||
+    s.includes("fecha que horas") ||
+    s.includes("abre que horas")
+  );
 }
 
 /* =========================================================
@@ -1058,7 +1096,7 @@ function tratarMensagemSaudacao(sock) {
       if (msg.key?.fromMe) return;
 
       const remote = msg.key?.remoteJid || "";
-      if (remote.endsWith("@broadcast")) return;
+      if (deveIgnorarMensagem(remote)) return;
 
       const restauranteId = sock.restauranteId;
       const restaurante = await getRestaurante(restauranteId);
@@ -1143,7 +1181,7 @@ function tratarPerguntasInteligentes(sock) {
       if (msg.key?.fromMe) return;
 
       const remote = msg.key?.remoteJid || "";
-      if (remote.endsWith("@broadcast")) return;
+      if (deveIgnorarMensagem(remote)) return;
 
       const restauranteId = sock.restauranteId;
       const restaurante = await getRestaurante(restauranteId);
@@ -1176,6 +1214,31 @@ function tratarPerguntasInteligentes(sock) {
       const key = `${restauranteId}:${remote}`;
       const last = ultimoQna.get(key) || 0;
       if (now() - last < QNA_SPAM_MS) return;
+
+      // ✅ Pedido direto de cardápio/link
+      if (isPedidoCardapio(texto)) {
+        await typingDelay(sock, remote, 900);
+        await sock.sendMessage(remote, {
+          text: `🌐 Aqui está o cardápio para fazer seu pedido:
+${url}`,
+        });
+        ultimoQna.set(key, now());
+        trimCache(ultimoQna);
+        return;
+      }
+
+      // ✅ Pergunta sobre horário/funcionamento
+      if (isPerguntaHorario(texto)) {
+        await typingDelay(sock, remote, 900);
+        await sock.sendMessage(remote, {
+          text: `${stAt.texto}
+
+🌐 Cardápio: ${url}`,
+        });
+        ultimoQna.set(key, now());
+        trimCache(ultimoQna);
+        return;
+      }
 
       // ✅ Destaques
       if (isPerguntaDestaques(texto)) {

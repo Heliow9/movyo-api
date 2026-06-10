@@ -2,6 +2,28 @@
 const Frete = require("../models/Frete");
 const Restaurante = require("../models/Restaurante");
 
+function toMoneyNumber(value) {
+  const n = Number(String(value ?? "").replace(",", "."));
+  return Number.isFinite(n) ? Math.max(0, Number(n.toFixed(2))) : 0;
+}
+
+function normalizarFaixasRaio(faixas = []) {
+  return (Array.isArray(faixas) ? faixas : [])
+    .map((f) => ({
+      ate: Number(String(f?.ate ?? f?.raio ?? f?.km ?? "").replace(",", ".")),
+      valor: toMoneyNumber(f?.valor ?? f?.preco ?? f?.taxa),
+    }))
+    .filter((f) => Number.isFinite(f.ate) && f.ate > 0)
+    .sort((a, b) => a.ate - b.ate);
+}
+
+function normalizarAreas(areas = []) {
+  return (Array.isArray(areas) ? areas : []).map((area) => ({
+    ...area,
+    valor: toMoneyNumber(area?.valor),
+  }));
+}
+
 // Salvar configurações de frete (tanto por área quanto por raio)
 // MESMA rota usada pelos dois componentes:
 // - FretePorRaio  => envia { faixasRaio, tipo: 'raio' }
@@ -17,11 +39,11 @@ exports.salvarAreas = async (req, res) => {
       // 👉 Só atualiza o que veio no body (não zera o resto!)
 
       if (Array.isArray(areas)) {
-        frete.areas = areas;
+        frete.areas = normalizarAreas(areas);
       }
 
       if (Array.isArray(faixasRaio)) {
-        frete.faixasRaio = faixasRaio;
+        frete.faixasRaio = normalizarFaixasRaio(faixasRaio);
       }
 
       if (tipo === "raio" || tipo === "area") {
@@ -34,15 +56,15 @@ exports.salvarAreas = async (req, res) => {
       frete = new Frete({
         restaurante: restauranteId,
         tipo: (tipo === "raio" || tipo === "area") ? tipo : "raio",
-        faixasRaio: Array.isArray(faixasRaio) ? faixasRaio : [],
-        areas: Array.isArray(areas) ? areas : [],
+        faixasRaio: Array.isArray(faixasRaio) ? normalizarFaixasRaio(faixasRaio) : [],
+        areas: Array.isArray(areas) ? normalizarAreas(areas) : [],
       });
       await frete.save();
     }
 
     return res
       .status(200)
-      .json({ success: true, message: "Frete salvo com sucesso." });
+      .json({ success: true, message: "Frete salvo com sucesso.", frete });
   } catch (err) {
     console.error("Erro ao salvar frete:", err);
     return res

@@ -67,6 +67,28 @@ function normalizeConfiguracoesPayload(clean) {
 
 
 // helper: calcula flags públicas consistentes
+
+function normalizeSlugIdentificador(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+async function ensureSlugDisponivel(slug, restauranteIdAtual) {
+  if (!slug) return;
+  const existente = await Restaurante.findOne({ slugIdentificador: slug });
+  if (existente && String(existente._id || existente.id) !== String(restauranteIdAtual)) {
+    const err = new Error("Este slug já está em uso por outro restaurante.");
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
 function buildPublicPaymentFlags(restaurante) {
   const mpConectado = !!restaurante?.mercadoPago?.conectado;
   const pagamentoCartaoAtivo = !!restaurante?.pagamentoCartaoAtivo && mpConectado;
@@ -79,12 +101,15 @@ module.exports = {
   // POST /api/restaurantes/register
   async register(req, res) {
     try {
-      const { nome, email, senha, cnpj, localizacao, contaBancaria } = req.body;
+      const { nome, email, senha, cnpj, localizacao, contaBancaria, slugIdentificador } = req.body;
 
       const restauranteExistente = await Restaurante.findOne({ email });
       if (restauranteExistente) {
         return res.status(400).json({ mensagem: "Email já cadastrado." });
       }
+
+      const slugNormalizado = normalizeSlugIdentificador(slugIdentificador || nome);
+      await ensureSlugDisponivel(slugNormalizado, null);
 
       const senhaHash = await bcrypt.hash(senha, 10);
       // const recipient_id = await criarRecipient({ nome, cnpj, contaBancaria });
@@ -94,6 +119,7 @@ module.exports = {
         email,
         senha: senhaHash,
         cnpj,
+        slugIdentificador: slugNormalizado,
         localizacao,
         // recipient_id,
       });
@@ -403,6 +429,14 @@ module.exports = {
       let dadosAtualizados = sanitizeConfiguracoesPayload(req.body);
       dadosAtualizados = normalizeConfiguracoesPayload(dadosAtualizados);
 
+      if (Object.prototype.hasOwnProperty.call(dadosAtualizados, "slugIdentificador")) {
+        dadosAtualizados.slugIdentificador = normalizeSlugIdentificador(dadosAtualizados.slugIdentificador);
+        if (!dadosAtualizados.slugIdentificador) {
+          return res.status(400).json({ mensagem: "Informe um slug válido para a vitrine." });
+        }
+        await ensureSlugDisponivel(dadosAtualizados.slugIdentificador, restauranteId);
+      }
+
       // ✅ Regra: só permite ativar cartão se MP estiver conectado
       if (Object.prototype.hasOwnProperty.call(dadosAtualizados, "pagamentoCartaoAtivo")) {
         const rest = await Restaurante.findById(restauranteId).select("mercadoPago.conectado");
@@ -429,7 +463,7 @@ module.exports = {
       });
     } catch (error) {
       console.error(error);
-      return res.status(500).json({ mensagem: "Erro ao atualizar configurações." });
+      return res.status(error.statusCode || 500).json({ mensagem: error.message || "Erro ao atualizar configurações." });
     }
   },
 
