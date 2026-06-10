@@ -14,6 +14,8 @@ const pino = require("pino");
 const Restaurante = require("../models/Restaurante");
 const Produto = require("../models/Produto");
 const CategoriaProduto = require("../models/CategoriaProduto");
+const Pedido = require("../models/Pedido");
+const { criarPagamentoPix } = require("../services/mercadoPagoPixService");
 
 // ✅ NOVO: horários de atendimento (horariosFuncionamento)
 const { statusAtendimento } = require("./atendimento");
@@ -56,6 +58,10 @@ const QNA_SPAM_MS = 1200;
 // ✅ NOVO: evita spam de "estamos fechados"
 const ultimoFechadoAviso = new Map(); // `${restauranteId}:${jid}` -> ts
 const FECHADO_COOLDOWN_MS = 10 * 60 * 1000; // 10 min
+
+// Repetir último pedido pelo WhatsApp
+const reorderIntent = new Map(); // `${restauranteId}:${jid}` -> { pedidoId, ts }
+const REORDER_INTENT_TTL_MS = 10 * 60 * 1000;
 
 // Dedup por msgId
 const handledMsgIds = new Map(); // msgId -> ts
@@ -473,6 +479,10 @@ function extrairTexto(msg) {
   return (
     msg.message.conversation ||
     msg.message.extendedTextMessage?.text ||
+    msg.message.buttonsResponseMessage?.selectedDisplayText ||
+    msg.message.buttonsResponseMessage?.selectedButtonId ||
+    msg.message.templateButtonReplyMessage?.selectedDisplayText ||
+    msg.message.templateButtonReplyMessage?.selectedId ||
     msg.message.imageMessage?.caption ||
     msg.message.videoMessage?.caption ||
     ""
@@ -667,6 +677,16 @@ const STOPWORDS = new Set([
   "este",
   "esta",
   "temai",
+  "qual",
+  "quais",
+  "ultimo",
+  "último",
+  "pedido",
+  "novamente",
+  "refazer",
+  "repetir",
+  "outro",
+  "mais",
 ]);
 
 function normalizeText(s) {
@@ -677,6 +697,72 @@ function normalizeText(s) {
     .replace(/[^\w\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function compactText(s) {
+  return normalizeText(s).replace(/\s+/g, "");
+}
+
+function expandirTermosBusca(texto) {
+  const base = extractQueryTerm ? extractQueryTerm(texto) : normalizeText(texto);
+  const norm = normalizeText(base || texto);
+  const termos = new Set([norm]);
+  const compact = compactText(norm);
+  if (compact) termos.add(compact);
+
+  const mapa = [
+    [/coca|cocacola|coca cola|coca-cola/, ["coca", "coca cola", "coca-cola", "cocacola", "refrigerante coca"]],
+    [/guarana|guaraná/, ["guarana", "guaraná", "refri guarana", "refrigerante guarana"]],
+    [/hamburg|hamburguer|hambúrguer|burger|burguer/, ["hamburguer", "hambúrguer", "burger", "burguer", "lanche"]],
+    [/parmegiana|parmegiana|permegiana|parmeggiana/, ["parmegiana", "permegiana", "parmeggiana"]],
+    [/refri|refrigerante|bebida/, ["refrigerante", "refri", "bebida"]],
+  ];
+  for (const [re, vals] of mapa) {
+    if (re.test(norm) || re.test(compact)) vals.forEach((v) => termos.add(normalizeText(v)));
+  }
+  return [...termos].filter(Boolean);
+}
+
+function levenshtein(a, b) {
+  a = compactText(a); b = compactText(b);
+  if (!a || !b) return Math.max(a.length, b.length);
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function scoreProdutoBusca(produto, texto) {
+  const termos = expandirTermosBusca(texto);
+  const nome = normalizeText(produto?.nome || "");
+  const desc = normalizeText(produto?.descricao || "");
+  const nomeCompact = compactText(nome);
+  const hay = `${nome} ${desc} ${nomeCompact}`;
+  let score = 0;
+  for (const termo of termos) {
+    const t = normalizeText(termo);
+    const tc = compactText(t);
+    if (!t) continue;
+    if (nome === t) score += 100;
+    if (nome.includes(t)) score += 60;
+    if (nomeCompact.includes(tc)) score += 55;
+    if (hay.includes(t)) score += 35;
+    for (const token of t.split(" ").filter(Boolean)) {
+      if (nome.includes(token) || desc.includes(token)) score += 8;
+    }
+    const dist = levenshtein(nome, t);
+    if (dist <= 2 && Math.min(nomeCompact.length, tc.length) >= 5) score += 45 - dist * 8;
+  }
+  if (produto?.destaque) score += 3;
+  return score;
 }
 
 function extractQueryTerm(texto) {
@@ -783,6 +869,9 @@ async function findProdutoPorTexto(restauranteId, queryText) {
 
   if (doc2) return { produto: doc2, matched: q, matchType: "produto" };
 
+  const fuzzy = await listarProdutosPorTermo(restauranteId, queryText, 1);
+  if (fuzzy?.[0]) return { produto: fuzzy[0], matched: q, matchType: "produto" };
+
   return null;
 }
 
@@ -834,19 +923,46 @@ async function listarProdutosDaCategoria(restauranteId, categoriaId, limite = 8)
 async function listarProdutosPorTermo(restauranteId, texto, limite = 8) {
   const q = extractQueryTerm(texto);
   if (!q) return [];
-  const regs = buildTokenRegex(q);
-  if (!regs?.length) return [];
+
+  const termos = expandirTermosBusca(texto);
+  const regs = termos.flatMap((t) => buildTokenRegex(t) || []);
   const orClauses = regs.flatMap((re) => [{ nome: re }, { descricao: re }]);
-  return Produto.find({
-    restaurante: restauranteId,
-    ativo: true,
-    ativoVitrine: { $ne: false },
-    disponivel: { $ne: false },
-    $or: orClauses,
-  })
-    .sort({ destaque: -1, ordem: 1, nome: 1 })
-    .limit(limite)
-    .lean();
+
+  let candidatos = [];
+  if (orClauses.length) {
+    candidatos = await Produto.find({
+      restaurante: restauranteId,
+      ativo: true,
+      ativoVitrine: { $ne: false },
+      disponivel: { $ne: false },
+      $or: orClauses,
+    })
+      .sort({ destaque: -1, ordem: 1, nome: 1 })
+      .limit(30)
+      .lean();
+  }
+
+  // Fallback fuzzy: cobre coca-cola/cocacola, parmegiana/permegiana e pequenos erros de digitação.
+  if (candidatos.length < 2) {
+    const todos = await Produto.find({
+      restaurante: restauranteId,
+      ativo: true,
+      ativoVitrine: { $ne: false },
+      disponivel: { $ne: false },
+    })
+      .sort({ destaque: -1, ordem: 1, nome: 1 })
+      .limit(250)
+      .lean();
+    const ids = new Set(candidatos.map((p) => String(p._id)));
+    for (const p of todos) if (!ids.has(String(p._id))) candidatos.push(p);
+  }
+
+  return candidatos
+    .map((p) => ({ p, score: scoreProdutoBusca(p, texto) }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || String(a.p.nome || '').localeCompare(String(b.p.nome || '')))
+    .slice(0, limite)
+    .map((x) => x.p);
 }
 
 async function findPorSabor(restauranteId, saborText) {
@@ -879,6 +995,167 @@ async function findPorSabor(restauranteId, saborText) {
   }
 
   return { produto: p, matched: saborMatch || q, matchType: "sabor" };
+}
+
+
+/* =========================================================
+   REFAZER ÚLTIMO PEDIDO PELO BOT
+========================================================= */
+function isPerguntaUltimoPedido(t) {
+  const s = normalizeText(t);
+  return (
+    s.includes("ultimo pedido") ||
+    s.includes("último pedido") ||
+    s.includes("meu pedido anterior") ||
+    s.includes("pedido anterior") ||
+    s.includes("refazer pedido") ||
+    s.includes("repetir pedido") ||
+    s.includes("pedir de novo") ||
+    s.includes("pedir novamente")
+  );
+}
+
+function isConfirmacaoSim(t) {
+  const s = normalizeText(t);
+  return ["sim", "s", "quero", "pode", "refazer", "repetir", "pedir", "pedir de novo", "1"].includes(s) || s.includes("sim pode") || s.includes("quero refazer");
+}
+
+function isConfirmacaoNao(t) {
+  const s = normalizeText(t);
+  return ["nao", "não", "n", "cancelar", "cancela", "2"].includes(s) || s.includes("nao quero") || s.includes("não quero");
+}
+
+function getTelefoneFromJid(jid) {
+  return String(jid || "").split("@")[0].replace(/\D/g, "");
+}
+
+function resumoItensPedido(itens = [], limite = 8) {
+  const arr = Array.isArray(itens) ? itens : [];
+  const linhas = arr.slice(0, limite).map((it) => {
+    const qtd = Number(it?.quantidade ?? it?.quantity ?? 1) || 1;
+    const nome = it?.nome || it?.title || it?.produtoNome || "Item";
+    return `• ${qtd}x ${nome}`;
+  });
+  if (arr.length > limite) linhas.push(`• +${arr.length - limite} item(ns)`);
+  return linhas.join("\n");
+}
+
+async function buscarUltimoPedidoCliente(restauranteId, remoteJid) {
+  const tel = getTelefoneFromJid(remoteJid);
+  if (!tel) return null;
+  const ultimos = await Pedido.find({
+    restaurante: restauranteId,
+    telefoneCliente: { $regex: `${tel.slice(-8)}$` },
+    status: { $nin: ["cancelado", "cancelada"] },
+    itens: { $ne: [] },
+  })
+    .sort({ criadoEm: -1, createdAt: -1, _id: -1 })
+    .limit(5)
+    .lean();
+  return ultimos?.[0] || null;
+}
+
+async function enviarPerguntaRefazerPedido(sock, remote, msg, restaurante, pedido) {
+  const total = Number(pedido?.valorTotal ?? pedido?.total ?? 0);
+  const texto =
+    `Encontrei seu último pedido 😍\n\n` +
+    `${resumoItensPedido(pedido?.itens)}\n\n` +
+    (total ? `💰 Total anterior: *${formatBRL(total)}*\n\n` : "") +
+    `Deseja refazer esse pedido agora?`;
+
+  try {
+    await sock.sendMessage(remote, {
+      text: texto,
+      footer: restaurante?.nome || "Movyo Delivery",
+      buttons: [
+        { buttonId: "REORDER_YES", buttonText: { displayText: "✅ Sim, refazer" }, type: 1 },
+        { buttonId: "REORDER_NO", buttonText: { displayText: "❌ Não" }, type: 1 },
+      ],
+      headerType: 1,
+    });
+  } catch {
+    await sock.sendMessage(remote, { text: `${texto}\n\nResponda *SIM* para refazer ou *NÃO* para cancelar.` });
+  }
+}
+
+function clonarItensPedido(itens = []) {
+  return (Array.isArray(itens) ? itens : []).map((it) => ({ ...it }));
+}
+
+async function refazerPedidoComPix({ sock, restauranteId, restaurante, remote, pedidoAnterior }) {
+  const total = Number(pedidoAnterior?.valorTotal ?? pedidoAnterior?.total ?? 0);
+  const taxaEntrega = Number(pedidoAnterior?.taxaEntrega || 0);
+  const itens = clonarItensPedido(pedidoAnterior?.itens);
+  if (!itens.length || !Number.isFinite(total) || total <= 0) {
+    await sock.sendMessage(remote, { text: "Não consegui refazer esse pedido automaticamente. Abre o cardápio e monta novamente por aqui: " + getCardapioUrl(restaurante) });
+    return;
+  }
+
+  const mp = safeJson(restaurante?.mercadoPago, restaurante?.mercadoPago || {});
+  if (!mp?.conectado || !mp?.accessToken) {
+    await sock.sendMessage(remote, { text: "Consigo refazer seu pedido, mas o pagamento online não está disponível agora. Acesse o cardápio: " + getCardapioUrl(restaurante) });
+    return;
+  }
+
+  const numeroPedido = `BT${Date.now().toString().slice(-6)}`;
+  const novo = await Pedido.create({
+    numeroPedido,
+    restaurante: restauranteId,
+    nomeCliente: pedidoAnterior.nomeCliente || "Cliente WhatsApp",
+    telefoneCliente: getTelefoneFromJid(remote),
+    enderecoCliente: pedidoAnterior.enderecoCliente || "",
+    itens,
+    total,
+    valorTotal: total,
+    taxaEntrega,
+    formaPagamento: "pix",
+    formadePagamento: "pix",
+    status: "aguardando_pagamento",
+    statusPagamento: "pendente",
+    origem: "bot",
+    observacao: "Pedido refeito automaticamente pelo bot a partir do último pedido do cliente.",
+    criadoEm: new Date(),
+    valorPago: 0,
+    valorPendente: total,
+    pagamentos: [],
+  });
+
+  const pix = await criarPagamentoPix({
+    accessToken: mp.accessToken,
+    pedidoId: novo._id,
+    valorTotal: total,
+    nomeCliente: novo.nomeCliente,
+    telefoneCliente: novo.telefoneCliente,
+    restauranteId,
+    itens,
+    description: `Pedido ${numeroPedido} - ${restaurante?.nome || "Movyo"}`,
+  });
+
+  novo.mpPaymentId = pix.paymentId;
+  novo.statusPagamento = pix.status || "pending";
+  novo.qrCode = pix.qrCode || "";
+  novo.qrCodeBase64 = pix.qrCodeBase64 || "";
+  novo.pixCopiaECola = pix.qrCode || "";
+  await novo.save();
+
+  await sock.sendMessage(remote, {
+    text:
+      `Perfeito! Recriei seu pedido como *${numeroPedido}* 🧾\n\n` +
+      `${resumoItensPedido(itens)}\n\n` +
+      `💰 Total: *${formatBRL(total)}*\n\n` +
+      `Agora é só pagar o Pix abaixo. Assim que confirmar, o pedido segue para o restaurante. ❤️`,
+  });
+
+  await enviarEmPartes({
+    restauranteId,
+    jid: remote,
+    parts: [
+      pix.qrCodeBase64 ? { type: "image", base64: pix.qrCodeBase64, caption: "📲 *PIX para pagamento*" } : null,
+      pix.qrCode ? { type: "text", text: pix.qrCode } : null,
+      { type: "text", text: "⚠️ Após pagar, aguarde a confirmação automática." },
+    ].filter(Boolean),
+    gapMs: DEFAULT_SEND_GAP_MS,
+  });
 }
 
 /* =========================================================
@@ -1300,6 +1577,58 @@ function tratarPerguntasInteligentes(sock) {
 
       const url = getCardapioUrl(restaurante);
 
+      // ✅ Botões/respostas para refazer último pedido
+      const reorderKey = `${restauranteId}:${remote}`;
+      const btnId = msg?.message?.buttonsResponseMessage?.selectedButtonId || msg?.message?.templateButtonReplyMessage?.selectedId || "";
+      const intent = reorderIntent.get(reorderKey);
+      if (intent && now() - intent.ts > REORDER_INTENT_TTL_MS) reorderIntent.delete(reorderKey);
+      const activeIntent = reorderIntent.get(reorderKey);
+
+      if (activeIntent && (btnId === "REORDER_NO" || isConfirmacaoNao(texto))) {
+        reorderIntent.delete(reorderKey);
+        await reagirAntesDeResponder(sock, msg, texto || "não");
+        await sock.sendMessage(remote, { text: `Tudo bem 😊
+Quando quiser, é só acessar o cardápio: ${url}` });
+        ultimoQna.set(reorderKey, now());
+        trimCache(ultimoQna);
+        return;
+      }
+
+      if (activeIntent && (btnId === "REORDER_YES" || isConfirmacaoSim(texto))) {
+        reorderIntent.delete(reorderKey);
+        await reagirAntesDeResponder(sock, msg, texto || "sim");
+        await typingDelay(sock, remote, 1200);
+        const pedidoAnterior = await Pedido.findById(activeIntent.pedidoId).lean();
+        if (!pedidoAnterior) {
+          await sock.sendMessage(remote, { text: `Não encontrei mais esse pedido anterior. 😕
+Mas você pode fazer um novo por aqui: ${url}` });
+          return;
+        }
+        await refazerPedidoComPix({ sock, restauranteId, restaurante, remote, pedidoAnterior });
+        ultimoQna.set(reorderKey, now());
+        trimCache(ultimoQna);
+        return;
+      }
+
+      if (isPerguntaUltimoPedido(texto)) {
+        await reagirAntesDeResponder(sock, msg, texto);
+        await typingDelay(sock, remote, 1200);
+        const pedidoAnterior = await buscarUltimoPedidoCliente(restauranteId, remote);
+        if (!pedidoAnterior) {
+          await sock.sendMessage(remote, { text: `Ainda não encontrei pedido anterior seu por aqui 😄
+Mas você pode fazer o primeiro agora pelo cardápio: ${url}` });
+          ultimoQna.set(reorderKey, now());
+          trimCache(ultimoQna);
+          return;
+        }
+        reorderIntent.set(reorderKey, { pedidoId: String(pedidoAnterior._id), ts: now() });
+        trimCache(reorderIntent);
+        await enviarPerguntaRefazerPedido(sock, remote, msg, restaurante, pedidoAnterior);
+        ultimoQna.set(reorderKey, now());
+        trimCache(ultimoQna);
+        return;
+      }
+
       // ✅ NOVO: se estiver fechado, responde status (com cooldown) e encerra aqui
       const stAt = getAtendimentoStatus(restaurante);
       if (!stAt.aberto) {
@@ -1470,8 +1799,9 @@ ${url}`,
         const termo = extractFlavorCandidate(texto) || extractQueryTerm(texto) || "esse item";
         await sock.sendMessage(remote, {
           text:
-            `😕 Não encontrei *${termo}* cadastrado agora.\n\n` +
-            (url ? `🌐 Dá uma olhada no cardápio: ${url}` : "Me diga o que você procura que eu tento te ajudar 🙂"),
+            `Ainda não achei uma opção chamada *${termo}* no cardápio 😕\n\n` +
+            `Pode ser que esteja cadastrado com outro nome. Me manda uma palavra parecida, tipo *coca*, *guaraná*, *hambúrguer* ou *parmegiana*, que eu procuro melhor pra você.\n\n` +
+            (url ? `🌐 Cardápio completo: ${url}` : ""),
         });
         ultimoQna.set(key, now());
         trimCache(ultimoQna);
