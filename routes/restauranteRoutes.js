@@ -44,6 +44,9 @@ router.get("/publico/:id", restauranteController.publicoById);
 // horario (✅ precisa vir ANTES do /:slug)
 router.get("/horario/:id", restauranteController.horarioPublico);
 
+// dados leves para prévia WhatsApp/OpenGraph
+router.get("/og/:slug", rateLimitPublico({ prefix: "og-restaurante", max: 120 }), restauranteController.ogRestaurante);
+
 // pagamento cartão
 router.patch("/pagamento-cartao", authRestaurante, restauranteController.togglePagamentoCartao);
 

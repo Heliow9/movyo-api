@@ -467,6 +467,66 @@ module.exports = {
     }
   },
 
+
+
+  // GET /api/restaurantes/og/:slug
+  // Dados leves para prévia do WhatsApp/OpenGraph da vitrine pública.
+  async ogRestaurante(req, res) {
+    try {
+      const { slug } = req.params;
+      const slugLimpo = String(slug || "").trim().replace(/^\/+|\/+$/g, "");
+      if (!slugLimpo) {
+        return res.status(400).json({ erro: "Slug inválido." });
+      }
+
+      let restaurante = await Restaurante.findOne({
+        $or: [
+          { slugIdentificador: slugLimpo },
+          { logoSlug: slugLimpo },
+          { _id: slugLimpo },
+          { id: slugLimpo },
+        ],
+      });
+
+      if (!restaurante) {
+        restaurante = await Restaurante.findOne({
+          $or: [
+            { slugIdentificador: { $regex: `^${slugLimpo}$`, $options: "i" } },
+            { logoSlug: { $regex: `^${slugLimpo}$`, $options: "i" } },
+          ],
+        });
+      }
+
+      if (!restaurante) {
+        return res.status(404).json({ erro: "Restaurante não encontrado.", slug: slugLimpo });
+      }
+
+      const nome = String(restaurante.nome || "Restaurante").trim();
+      const bairro = String(restaurante.enderecoBairro || "").trim();
+      const cidade = String(restaurante.enderecoCidade || "").trim();
+      const local = [bairro, cidade].filter(Boolean).join(" • ");
+      const descricao = local
+        ? `${local} — Peça online pelo cardápio digital.`
+        : `Peça online pelo cardápio digital do ${nome}.`;
+
+      return res.json({
+        restaurante: {
+          _id: restaurante._id,
+          nome,
+          slugIdentificador: restaurante.slugIdentificador || slugLimpo,
+          logoUrl: restaurante.logoUrl || "",
+          logoSlug: restaurante.logoSlug || "",
+          enderecoBairro: restaurante.enderecoBairro || "",
+          enderecoCidade: restaurante.enderecoCidade || "",
+          descricao,
+        },
+      });
+    } catch (err) {
+      console.error("Erro ao buscar OG do restaurante:", err);
+      return res.status(500).json({ erro: "Erro interno." });
+    }
+  },
+
   // GET /api/restaurantes/:slug
   async restauranteSlug(req, res) {
     try {
