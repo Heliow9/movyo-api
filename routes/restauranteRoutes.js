@@ -3,6 +3,7 @@ const router = express.Router();
 
 const restauranteController = require("../controllers/restauranteController");
 const authRestaurante = require("../middlewares/authRestaurante");
+const rateLimitPublico = require("../middlewares/rateLimitPublico");
 
 const {
   criarPedido,
@@ -47,7 +48,7 @@ router.get("/horario/:id", restauranteController.horarioPublico);
 router.patch("/pagamento-cartao", authRestaurante, restauranteController.togglePagamentoCartao);
 
 // pedido publico
-router.post("/pedido", criarPedido);
+router.post("/pedido", rateLimitPublico({ prefix: "checkout-restaurantes", max: 25 }), criarPedido);
 
 // cliente
 router.get("/cliente/:telefone", buscarClientePorTelefone);

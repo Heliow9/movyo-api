@@ -17,12 +17,26 @@ const { syncAllModels } = require("./lib/mysqlModelFactory");
 
 const mercadoPagoPublicoRoutes = require("./routes/mercadoPagoPublicoRoutes");
 const garcomRoutes = require("./routes/garcomRoutes");
+const rateLimitPublico = require("./middlewares/rateLimitPublico");
+
+// Middlewares de segurança HTTP sem novas dependências.
+// Mantém compatibilidade com app/mobile e restringe navegador por CORS quando configurado.
+const allowedOrigins = String(process.env.CORS_ORIGINS || "https://app.movyo.delivery,https://movyo.delivery,http://localhost:5173,http://localhost:3000")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 const app = express();
 const server = http.createServer(app);
 
 const io = socketIo(server, {
-  cors: { origin: "*", methods: ["GET", "POST", "PUT", "DELETE"] },
+  cors: {
+    origin(origin, cb) {
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(null, false);
+    },
+    methods: ["GET", "POST", "PUT", "DELETE"],
+  },
 });
 
 /**
@@ -37,9 +51,30 @@ app.use((req, res, next) => {
   next();
 });
 
-// Middlewares
-app.use(cors());
-app.use(express.json());
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  if (process.env.NODE_ENV === "production") {
+    res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+  }
+  next();
+});
+
+app.use(cors({
+  origin(origin, cb) {
+    // Permite chamadas server-to-server/app sem Origin e browsers liberados.
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error("Origem não permitida pelo CORS."));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-requested-with"],
+  credentials: false,
+}));
+
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "1mb" }));
 
 // ✅ DEV/PERF: mostra no terminal qualquer rota que demorar mais de 1s.
 // Ajuda a detectar gargalos sem poluir requests rápidas.
@@ -81,7 +116,7 @@ app.use("/api/produto-extras", require("./routes/produtoExtrasRoutes"));
 app.use("/api/frete", require("./routes/freteRoutes"));
 app.use("/api/mesas", require("./routes/mesaRoutes"));
 app.use("/api/clientes", require("./routes/clienteRoutes"));
-app.use("/publico", require("./routes/pedidoPublicoRoutes"));
+app.use("/publico", rateLimitPublico({ prefix: "publico" }), require("./routes/pedidoPublicoRoutes"));
 app.use("/api/pagarme", require("./routes/pagarmeRoutes"));
 app.use("/api/entregadores-online", require("./routes/entregadorOnlineRoutes"));
 app.use("/api/mercadopago", require("./routes/mercadoPagoRoutes"));
@@ -91,8 +126,8 @@ app.use("/api", require("./routes/mercadoPagoWebhookRoutes"));
 app.use("/api/pedidos", require("./routes/pedidosRoutes")(io));
 app.use("/api/entregadores", require("./routes/entregadorRoutes")(io));
 
-app.use("/api/publico", require("./routes/publicoRoutes"));
-app.use("/api/publico/mercadopago", mercadoPagoPublicoRoutes);
+app.use("/api/publico", rateLimitPublico({ prefix: "api-publico" }), require("./routes/publicoRoutes"));
+app.use("/api/publico/mercadopago", rateLimitPublico({ prefix: "mp-publico", max: 60 }), mercadoPagoPublicoRoutes);
 app.use("/api/garcons", garcomRoutes);
 app.use("/api/estoque", require("./routes/estoqueRoutes"));
 app.use("/api/balcao", require("./routes/balcaoRoutes"));

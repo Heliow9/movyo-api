@@ -8,6 +8,7 @@ const Cliente = require("../models/Cliente");
 const Restaurante = require("../models/Restaurante");
 const Mesa = require("../models/mesaModel");
 const Produto = require("../models/Produto");
+const Frete = require("../models/Frete");
 
 const { enviarMensagem } = require("../utils/bot");
 
@@ -283,6 +284,207 @@ function normalizeFormaPagamento(fpRaw) {
   return { fp, isPix, isCard };
 }
 
+
+function normalizeText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sanitizePublicString(value, max = 255) {
+  return String(value || "")
+    .replace(/[<>]/g, "")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function getItemProdutoId(item = {}) {
+  const candidates = [item.produtoId, item.produto, item.productId, item.idProduto, item._id, item.id];
+  for (const candidate of candidates) {
+    const id = String(candidate || "").trim();
+    if (id && mongoose.Types.ObjectId.isValid(id)) return id;
+  }
+  return "";
+}
+
+function getSelectedOptions(item = {}) {
+  const buckets = [
+    item.extras,
+    item.adicionais,
+    item.complementos,
+    item.sabores,
+    item.bordas,
+    item.opcionais,
+    item.opcoes,
+  ];
+  return buckets.flatMap((v) => (Array.isArray(v) ? v : [])).filter(Boolean);
+}
+
+function getProductOptionCatalog(produto = {}) {
+  const buckets = [produto.extras, produto.adicionais, produto.complementos, produto.sabores, produto.bordas];
+  return buckets.flatMap((v) => (Array.isArray(v) ? v : [])).filter(Boolean);
+}
+
+function matchOptionPrice(selected = {}, catalog = []) {
+  const selectedId = String(selected._id || selected.id || selected.opcaoId || selected.adicionalId || selected.complementoId || "");
+  const selectedName = normalizeText(selected.nome || selected.name || selected.titulo || selected.title || "");
+  const found = catalog.find((opt) => {
+    const optId = String(opt._id || opt.id || opt.opcaoId || opt.adicionalId || opt.complementoId || "");
+    const optName = normalizeText(opt.nome || opt.name || opt.titulo || opt.title || "");
+    return (selectedId && optId && selectedId === optId) || (selectedName && optName && selectedName === optName);
+  });
+  return found ? round2(found.preco ?? found.valor ?? found.price ?? 0) : 0;
+}
+
+async function recalcularItensPublicos({ itens = [], restauranteId }) {
+  const entrada = Array.isArray(itens) ? itens : [];
+  if (!entrada.length) {
+    const err = new Error("Adicione ao menos um item ao pedido.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const ids = [...new Set(entrada.map(getItemProdutoId).filter(Boolean))];
+  const produtos = new Map();
+  for (const id of ids) {
+    const produto = await Produto.findById(id).lean();
+    if (produto) produtos.set(String(produto._id || produto.id), produto);
+  }
+
+  let totalItens = 0;
+  const itensSeguros = [];
+
+  for (const item of entrada) {
+    const produtoId = getItemProdutoId(item);
+    const produto = produtoId ? produtos.get(produtoId) : null;
+    if (!produto) {
+      const err = new Error("Um dos produtos do carrinho não foi encontrado.");
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (String(produto.restaurante || "") !== String(restauranteId || "")) {
+      const err = new Error("Produto não pertence ao restaurante informado.");
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (produto.ativo === false || produto.ativoVitrine === false || produto.disponivel === false) {
+      const err = new Error(`Produto indisponível: ${produto.nome || "item"}.`);
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const quantidade = Math.max(1, Math.min(99, Number(item.quantidade || item.qtd || 1) || 1));
+    let precoUnitario = round2(produto.preco || 0);
+    const catalog = getProductOptionCatalog(produto);
+    for (const selected of getSelectedOptions(item)) {
+      precoUnitario = round2(precoUnitario + matchOptionPrice(selected, catalog));
+    }
+
+    const precoTotal = round2(precoUnitario * quantidade);
+    totalItens = round2(totalItens + precoTotal);
+
+    itensSeguros.push({
+      ...item,
+      produtoId: String(produto._id || produto.id),
+      produto: String(produto._id || produto.id),
+      nome: produto.nome,
+      descricao: produto.descricao || item.descricao || "",
+      quantidade,
+      precoUnitario,
+      preco: precoUnitario,
+      valorUnitario: precoUnitario,
+      subtotal: precoTotal,
+      precoTotal,
+      total: precoTotal,
+      valorTotal: precoTotal,
+    });
+  }
+
+  return { itensSeguros, totalItens: round2(totalItens) };
+}
+
+function haversineKm(aLat, aLng, bLat, bLng) {
+  const toRad = (v) => (Number(v) * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const lat1 = toRad(aLat);
+  const lat2 = toRad(bLat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function getLatLngFromRestaurante(restaurante = {}) {
+  const loc = restaurante.localizacao || {};
+  const lat = Number(loc.latitude ?? loc.lat ?? restaurante.latitude ?? restaurante.lat);
+  const lng = Number(loc.longitude ?? loc.lng ?? loc.lon ?? restaurante.longitude ?? restaurante.lng ?? restaurante.lon);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  return null;
+}
+
+function findAreaFrete(areas = [], bairroRaw = "") {
+  const bairro = normalizeText(bairroRaw);
+  if (!bairro) return null;
+  return (Array.isArray(areas) ? areas : []).find((area) => {
+    const nomes = [area.nome, area.bairro, area.area, ...(Array.isArray(area.bairros) ? area.bairros : [])];
+    return nomes.some((n) => normalizeText(n) === bairro);
+  }) || null;
+}
+
+async function validarFretePublico({ restauranteDoc, restauranteId, origem, enderecoCliente, residenciaBairro, latitudeCliente, longitudeCliente, taxaEntregaPayload }) {
+  const origemNormalizada = String(origem || "").toLowerCase();
+  const isBalcao = isOrigemBalcao(origemNormalizada);
+  const retirada = ["retirada", "balcao", "balcão"].some((v) => String(enderecoCliente || "").toLowerCase().includes(v));
+  if (isBalcao || retirada) return { taxaEntrega: 0, entregaDisponivel: true, distanciaKm: null };
+
+  const frete = await Frete.findOne({ restaurante: restauranteId }).lean();
+  if (!frete || frete.ativo === false) {
+    return { taxaEntrega: round2(taxaEntregaPayload || 0), entregaDisponivel: true, distanciaKm: null, aviso: "Frete sem configuração ativa; mantida compatibilidade." };
+  }
+
+  const areas = Array.isArray(frete.areas) ? frete.areas : [];
+  const area = findAreaFrete(areas, residenciaBairro);
+  if (area) {
+    return { taxaEntrega: round2(area.valor ?? area.taxa ?? area.preco ?? 0), entregaDisponivel: true, distanciaKm: null, area: area.nome || area.bairro };
+  }
+
+  const loja = getLatLngFromRestaurante(restauranteDoc);
+  const lat = Number(latitudeCliente);
+  const lng = Number(longitudeCliente);
+  const faixas = (Array.isArray(frete.faixasRaio) ? frete.faixasRaio : [])
+    .map((f) => ({ ate: Number(f.ate ?? f.raio ?? f.km), valor: round2(f.valor ?? f.taxa ?? f.preco ?? 0) }))
+    .filter((f) => Number.isFinite(f.ate) && f.ate > 0)
+    .sort((a, b) => a.ate - b.ate);
+
+  if (loja && Number.isFinite(lat) && Number.isFinite(lng) && faixas.length) {
+    const distanciaKm = round2(haversineKm(loja.lat, loja.lng, lat, lng));
+    const faixa = faixas.find((f) => distanciaKm <= f.ate);
+    if (faixa) return { taxaEntrega: faixa.valor, entregaDisponivel: true, distanciaKm };
+
+    const err = new Error("Não temos entrega disponível para este endereço.");
+    err.statusCode = 422;
+    err.securityReason = "FORA_AREA_ENTREGA";
+    throw err;
+  }
+
+  if (areas.length || faixas.length || frete.raioKm) {
+    const err = new Error("Não foi possível validar a entrega para este endereço. Confira o bairro/localização e tente novamente.");
+    err.statusCode = 422;
+    err.securityReason = "ENTREGA_NAO_VALIDADA";
+    throw err;
+  }
+
+  return { taxaEntrega: round2(frete.taxaFixa ?? taxaEntregaPayload ?? 0), entregaDisponivel: true, distanciaKm: null };
+}
+
 function formaPagamentoRelatorio(fpRaw) {
   const { fp, isPix, isCard } = normalizeFormaPagamento(fpRaw);
   if (isPix) return "pix";
@@ -381,6 +583,7 @@ const criarPedido = async (req, res) => {
     longitudeCliente,
     clienteEmail,
     mpCard,
+    taxaEntrega,
   } = req.body;
 
   const origem = (req.body.origem || "balcao").toLowerCase();
@@ -400,7 +603,7 @@ const criarPedido = async (req, res) => {
     const mpConectado =
       !!restauranteDoc.mercadoPago?.conectado && !!restauranteDoc.mercadoPago?.accessToken;
 
-    const totalNumber = Number(String(valorTotal).replace(",", "."));
+    let totalNumber = Number(String(valorTotal).replace(",", "."));
     if (!Number.isFinite(totalNumber) || totalNumber <= 0) {
       return res.status(400).json({ message: "valorTotal inválido." });
     }
@@ -495,20 +698,51 @@ const criarPedido = async (req, res) => {
       ? "aguardando_pagamento"
       : "em_producao";
 
-    const itensSeed = seedCozinhaOnItens(Array.isArray(itens) ? itens : []);
+    let itensSeed = seedCozinhaOnItens(Array.isArray(itens) ? itens : []);
+    let taxaEntregaSegura = round2(taxaEntrega || req.body.taxaEntrega || 0);
+
+    // Segurança crítica da vitrine: para pedidos públicos, o backend não confia no total/preços do navegador.
+    // Balcão/desktop permanece no fluxo antigo para não quebrar operação interna.
+    if (!isBalcao) {
+      const freteValidado = await validarFretePublico({
+        restauranteDoc,
+        restauranteId: restaurante,
+        origem,
+        enderecoCliente: sanitizePublicString(enderecoCliente, 500),
+        residenciaBairro: sanitizePublicString(residenciaBairro, 120),
+        latitudeCliente,
+        longitudeCliente,
+        taxaEntregaPayload: taxaEntregaSegura,
+      });
+
+      const calculado = await recalcularItensPublicos({ itens, restauranteId: restaurante });
+      itensSeed = seedCozinhaOnItens(calculado.itensSeguros);
+      taxaEntregaSegura = round2(freteValidado.taxaEntrega || 0);
+      totalNumber = round2(calculado.totalItens + taxaEntregaSegura);
+
+      if (!Number.isFinite(totalNumber) || totalNumber <= 0) {
+        return res.status(400).json({ message: "Total do pedido inválido após validação." });
+      }
+
+      if (freteValidado?.securityReason) {
+        console.warn("[checkout-security]", freteValidado.securityReason, { restaurante, telefone: telefoneNormalizado });
+      }
+    }
 
     const novoPedido = new Pedido({
       numeroPedido: novoNumeroPedido,
-      nomeCliente,
+      nomeCliente: sanitizePublicString(nomeCliente, 120),
       telefoneCliente: telefoneNormalizado,
-      enderecoCliente,
-      residenciaNumero,
-      residenciaComplemento,
-      residenciaReferencia,
-      residenciaBairro,
-      residenciaCep,
+      enderecoCliente: sanitizePublicString(enderecoCliente, 500),
+      residenciaNumero: sanitizePublicString(residenciaNumero, 40),
+      residenciaComplemento: sanitizePublicString(residenciaComplemento, 120),
+      residenciaReferencia: sanitizePublicString(residenciaReferencia, 180),
+      residenciaBairro: sanitizePublicString(residenciaBairro, 120),
+      residenciaCep: sanitizePublicString(residenciaCep, 20),
       itens: itensSeed,
       valorTotal: round2(totalNumber),
+      total: round2(totalNumber),
+      taxaEntrega: taxaEntregaSegura,
 
       // ✅ balcão (e geral) inicia SEM PAGAMENTO
       valorPago: 0,
@@ -517,7 +751,7 @@ const criarPedido = async (req, res) => {
       formadePagamento: formaRelatorio,
       formaPagamento: formaRelatorio,
       statusPagamento: isPix || isCard || isBalcao ? "pendente" : "pago",
-      descricaoPedido,
+      descricaoPedido: sanitizePublicString(descricaoPedido, 800),
       restaurante,
       entregador: entregadorObjectId,
       latitudeCliente,
@@ -828,6 +1062,16 @@ const criarPedido = async (req, res) => {
     req.io?.to(`restaurante-${restaurante}`).emit("novoPedido", novoPedido);
     return res.status(201).json({ _id: novoPedido._id });
   } catch (error) {
+    const statusCode = Number(error?.statusCode || error?.status || 500);
+    if (statusCode >= 400 && statusCode < 500) {
+      console.warn("[checkout-security] Pedido recusado:", error?.securityReason || error?.message);
+      return res.status(statusCode).json({
+        ok: false,
+        code: error?.securityReason || "CHECKOUT_VALIDATION_ERROR",
+        message: error.message || "Pedido recusado por validação de segurança.",
+      });
+    }
+
     console.error("Erro ao criar pedido:", error);
     return res.status(500).json({
       message: "Erro ao criar pedido",
