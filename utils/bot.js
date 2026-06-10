@@ -13,6 +13,7 @@ const pino = require("pino");
 
 const Restaurante = require("../models/Restaurante");
 const Produto = require("../models/Produto");
+const CategoriaProduto = require("../models/CategoriaProduto");
 
 // ✅ NOVO: horários de atendimento (horariosFuncionamento)
 const { statusAtendimento } = require("./atendimento");
@@ -372,6 +373,37 @@ function formatBRL(v) {
   const n = Number(v || 0);
   return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
+
+function escapeRegex(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getProdutoPreco(produto) {
+  return produto?.precoBase ?? produto?.preco ?? produto?.valor ?? produto?.precoVenda ?? 0;
+}
+
+function buildProdutoLinha(p) {
+  const preco = getProdutoPreco(p);
+  return `• ${p.nome}${preco ? ` — ${formatBRL(preco)}` : ''}`;
+}
+
+function escolherReacao(texto) {
+  const s = normalizeText(texto);
+  if (s.includes('hamburg') || s.includes('burguer') || s.includes('burger')) return '🍔';
+  if (s.includes('pizza') || s.includes('sabor')) return '🍕';
+  if (s.includes('guarana') || s.includes('refri') || s.includes('coca') || s.includes('bebida') || s.includes('suco')) return '🥤';
+  if (s.includes('promo') || s.includes('oferta')) return '🔥';
+  if (s.includes('cardapio') || s.includes('menu')) return '❤️';
+  if (s.includes('horario') || s.includes('aberto') || s.includes('fecha')) return '🕒';
+  return '❤️';
+}
+
+async function reagirAntesDeResponder(sock, msg, texto) {
+  try {
+    await sock.sendMessage(msg.key.remoteJid, { react: { text: escolherReacao(texto), key: msg.key } });
+  } catch {}
+}
+
 
 /* =========================================================
    FILA POR RESTAURANTE
@@ -733,6 +765,8 @@ async function findProdutoPorTexto(restauranteId, queryText) {
   const doc = await Produto.findOne({
     restaurante: restauranteId,
     ativo: true,
+    ativoVitrine: { $ne: false },
+    disponivel: { $ne: false },
     $and: andClauses,
   }).lean();
 
@@ -742,12 +776,77 @@ async function findProdutoPorTexto(restauranteId, queryText) {
   const doc2 = await Produto.findOne({
     restaurante: restauranteId,
     ativo: true,
+    ativoVitrine: { $ne: false },
+    disponivel: { $ne: false },
     $or: orClauses,
   }).lean();
 
   if (doc2) return { produto: doc2, matched: q, matchType: "produto" };
 
   return null;
+}
+
+
+async function findCategoriaPorTexto(restauranteId, texto) {
+  const q = extractQueryTerm(texto);
+  if (!q) return null;
+
+  const regs = buildTokenRegex(q);
+  if (!regs?.length) return null;
+
+  const categorias = await CategoriaProduto.find({
+    restaurante: restauranteId,
+    ativa: { $ne: false },
+  }).lean();
+
+  const scored = [];
+  for (const cat of categorias || []) {
+    const nomeNorm = normalizeText(cat?.nome || '');
+    if (!nomeNorm) continue;
+    let score = 0;
+    for (const re of regs) {
+      if (re.test(nomeNorm)) score += 2;
+    }
+    if (nomeNorm.includes(q)) score += 5;
+    // sinônimos comuns de vitrine
+    if ((q.includes('hamburg') || q.includes('burguer') || q.includes('burger')) && nomeNorm.includes('hamburg')) score += 6;
+    if ((q.includes('bebida') || q.includes('refri') || q.includes('refrigerante') || q.includes('guarana')) && (nomeNorm.includes('bebida') || nomeNorm.includes('refrigerante'))) score += 6;
+    if (score > 0) scored.push({ categoria: cat, score });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0] || null;
+}
+
+async function listarProdutosDaCategoria(restauranteId, categoriaId, limite = 8) {
+  return Produto.find({
+    restaurante: restauranteId,
+    categoria: categoriaId,
+    ativo: true,
+    ativoVitrine: { $ne: false },
+    disponivel: { $ne: false },
+  })
+    .sort({ destaque: -1, ordem: 1, nome: 1 })
+    .limit(limite)
+    .lean();
+}
+
+async function listarProdutosPorTermo(restauranteId, texto, limite = 8) {
+  const q = extractQueryTerm(texto);
+  if (!q) return [];
+  const regs = buildTokenRegex(q);
+  if (!regs?.length) return [];
+  const orClauses = regs.flatMap((re) => [{ nome: re }, { descricao: re }]);
+  return Produto.find({
+    restaurante: restauranteId,
+    ativo: true,
+    ativoVitrine: { $ne: false },
+    disponivel: { $ne: false },
+    $or: orClauses,
+  })
+    .sort({ destaque: -1, ordem: 1, nome: 1 })
+    .limit(limite)
+    .lean();
 }
 
 async function findPorSabor(restauranteId, saborText) {
@@ -763,6 +862,8 @@ async function findPorSabor(restauranteId, saborText) {
   const p = await Produto.findOne({
     restaurante: restauranteId,
     ativo: true,
+    ativoVitrine: { $ne: false },
+    disponivel: { $ne: false },
     $or: orSabores,
   }).lean();
 
@@ -1203,6 +1304,7 @@ function tratarPerguntasInteligentes(sock) {
       const stAt = getAtendimentoStatus(restaurante);
       if (!stAt.aberto) {
         if (podeAvisarFechado(restauranteId, remote)) {
+          await reagirAntesDeResponder(sock, msg, texto);
           await sock.sendMessage(remote, {
             text: `${stAt.texto}${url ? `\n\n🌐 Cardápio: ${url}` : ""}`,
           });
@@ -1217,6 +1319,7 @@ function tratarPerguntasInteligentes(sock) {
 
       // ✅ Pedido direto de cardápio/link
       if (isPedidoCardapio(texto)) {
+        await reagirAntesDeResponder(sock, msg, texto);
         await typingDelay(sock, remote, 900);
         await sock.sendMessage(remote, {
           text: `🌐 Aqui está o cardápio para fazer seu pedido:
@@ -1229,6 +1332,7 @@ ${url}`,
 
       // ✅ Pergunta sobre horário/funcionamento
       if (isPerguntaHorario(texto)) {
+        await reagirAntesDeResponder(sock, msg, texto);
         await typingDelay(sock, remote, 900);
         await sock.sendMessage(remote, {
           text: `${stAt.texto}
@@ -1242,6 +1346,7 @@ ${url}`,
 
       // ✅ Destaques
       if (isPerguntaDestaques(texto)) {
+        await reagirAntesDeResponder(sock, msg, texto);
         await typingDelay(sock, remote, 1200);
 
         const itens = await Produto.find({
@@ -1261,7 +1366,7 @@ ${url}`,
           });
         } else {
           const linhas = itens.map(
-            (p) => `• ${p.nome}${p.precoBase ? ` — a partir de ${formatBRL(p.precoBase)}` : ""}`
+            (p) => `• ${p.nome}${getProdutoPreco(p) ? ` — ${formatBRL(getProdutoPreco(p))}` : ""}`
           );
           await sock.sendMessage(remote, {
             text: `⭐ *Destaques de hoje:*\n${linhas.join("\n")}\n\n${url ? `🌐 Cardápio: ${url}` : ""}`,
@@ -1275,6 +1380,7 @@ ${url}`,
 
       // ✅ Promoções
       if (isPerguntaPromos(texto)) {
+        await reagirAntesDeResponder(sock, msg, texto);
         await typingDelay(sock, remote, 1200);
 
         const promoRegex = /promo|oferta|combo|desconto|especial/i;
@@ -1295,7 +1401,7 @@ ${url}`,
           });
         } else {
           const linhas = itens.map(
-            (p) => `• ${p.nome}${p.precoBase ? ` — a partir de ${formatBRL(p.precoBase)}` : ""}`
+            (p) => `• ${p.nome}${getProdutoPreco(p) ? ` — ${formatBRL(getProdutoPreco(p))}` : ""}`
           );
           await sock.sendMessage(remote, {
             text: `🎁 *Promoções/Ofertas que encontrei:*\n${linhas.join("\n")}\n\n${url ? `🌐 Cardápio: ${url}` : ""}`,
@@ -1310,9 +1416,43 @@ ${url}`,
       // ✅ Disponibilidade (tem X?)
       if (!parecePerguntaDeDisponibilidade(texto)) return;
 
+      await reagirAntesDeResponder(sock, msg, texto);
+
       const modoPizza = isPerguntaPizzaOuSabor(texto);
 
       await typingDelay(sock, remote, 1200);
+
+      // 0) Se o cliente perguntou por uma categoria, lista os principais itens dela.
+      const categoriaMatch = await findCategoriaPorTexto(restauranteId, texto);
+      if (categoriaMatch?.categoria?._id) {
+        const itensCat = await listarProdutosDaCategoria(restauranteId, categoriaMatch.categoria._id, 10);
+        if (itensCat.length) {
+          await sock.sendMessage(remote, {
+            text:
+              `Sim! Temos opções em *${categoriaMatch.categoria.nome}* 😍\n\n` +
+              `${itensCat.map(buildProdutoLinha).join("\n")}\n\n` +
+              (url ? `🌐 Cardápio: ${url}` : ""),
+          });
+          ultimoQna.set(key, now());
+          trimCache(ultimoQna);
+          return;
+        }
+      }
+
+      // 0.5) Se perguntou por tipo/termo como guaraná, coca, suco etc, lista até 8 produtos encontrados.
+      const itensPorTermo = await listarProdutosPorTermo(restauranteId, texto, 8);
+      if (itensPorTermo.length > 1) {
+        const termo = extractQueryTerm(texto) || 'esse item';
+        await sock.sendMessage(remote, {
+          text:
+            `Encontrei essas opções relacionadas a *${termo}* 😍\n\n` +
+            `${itensPorTermo.map(buildProdutoLinha).join("\n")}\n\n` +
+            (url ? `🌐 Cardápio: ${url}` : ""),
+        });
+        ultimoQna.set(key, now());
+        trimCache(ultimoQna);
+        return;
+      }
 
       // 1) Se for pizza/sabor OU se for "E de X?" => tenta sabor primeiro
       let found = null;
@@ -1353,7 +1493,7 @@ ${url}`,
         return;
       }
 
-      const precoTxt = produto.precoBase ? `💰 *A partir de* ${formatBRL(produto.precoBase)}` : "";
+      const precoTxt = getProdutoPreco(produto) ? `💰 *A partir de* ${formatBRL(getProdutoPreco(produto))}` : "";
       const produtoTxt =
         found.matchType === "sabor"
           ? `📌 *Produto:* ${produto.nome}\n🍕 *Sabor:* ${found.matched}`

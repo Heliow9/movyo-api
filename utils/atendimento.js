@@ -1,7 +1,8 @@
 // utils/atendimento.js
-// ✅ calcula se a loja está aberta AGORA baseado em horariosFuncionamento
-// ✅ suporta: dia fechado, horários faltando, e horário que cruza meia-noite (ex 18:00 -> 02:00)
-// ✅ retorna também próximo horário de abertura e horário de fechamento quando aberto
+// Calcula status de atendimento usando horariosFuncionamento no fuso do restaurante.
+// Suporta dia fechado, horário faltando e horário que cruza meia-noite.
+
+const DEFAULT_TIMEZONE = process.env.BOT_TIMEZONE || process.env.TZ || 'America/Recife';
 
 function parseHHMM(str) {
   if (!str || typeof str !== "string") return null;
@@ -18,100 +19,135 @@ function pad2(n) {
 }
 
 function fmtMin(min) {
-  const hh = Math.floor(min / 60) % 24;
-  const mm = min % 60;
+  const hh = Math.floor(Number(min || 0) / 60) % 24;
+  const mm = Number(min || 0) % 60;
   return `${pad2(hh)}:${pad2(mm)}`;
 }
 
 const dias = ["domingo", "segunda", "terca", "quarta", "quinta", "sexta", "sabado"];
+const diasLabel = {
+  domingo: "domingo",
+  segunda: "segunda",
+  terca: "terça",
+  quarta: "quarta",
+  quinta: "quinta",
+  sexta: "sexta",
+  sabado: "sábado",
+};
 
-function getDiaKey(date) {
-  return dias[date.getDay()];
+function getLocalParts(date = new Date(), timezone = DEFAULT_TIMEZONE) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(date);
+
+    const get = (type) => parts.find((p) => p.type === type)?.value;
+    const weekday = String(get('weekday') || '').toLowerCase();
+    const weekMap = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+    let hour = Number(get('hour') || 0);
+    const minute = Number(get('minute') || 0);
+    if (hour === 24) hour = 0;
+
+    return {
+      dayIndex: weekMap[weekday.slice(0, 3)] ?? date.getDay(),
+      minutesNow: hour * 60 + minute,
+      timezone,
+    };
+  } catch {
+    return {
+      dayIndex: date.getDay(),
+      minutesNow: date.getHours() * 60 + date.getMinutes(),
+      timezone: 'server',
+    };
+  }
+}
+
+function getDiaKeyByIndex(idx) {
+  return dias[((Number(idx) % 7) + 7) % 7];
+}
+
+function normalizeHorarios(horariosFuncionamento) {
+  if (!horariosFuncionamento) return null;
+  if (typeof horariosFuncionamento === 'string') {
+    try { return JSON.parse(horariosFuncionamento); } catch { return null; }
+  }
+  return horariosFuncionamento;
 }
 
 function getConfigDia(horariosFuncionamento, diaKey) {
-  if (!horariosFuncionamento) return null;
-  const cfg = horariosFuncionamento[diaKey];
-  if (!cfg) return null;
+  const horarios = normalizeHorarios(horariosFuncionamento);
+  if (!horarios) return null;
+
+  // Aceita chaves antigas/variações para não quebrar dados já salvos.
+  const aliases = {
+    domingo: ['domingo', 'Domingo', 'sunday', 'sun', '0'],
+    segunda: ['segunda', 'Segunda', 'segunda-feira', 'monday', 'mon', '1'],
+    terca: ['terca', 'terça', 'Terça', 'Terca', 'terça-feira', 'terca-feira', 'tuesday', 'tue', '2'],
+    quarta: ['quarta', 'Quarta', 'quarta-feira', 'wednesday', 'wed', '3'],
+    quinta: ['quinta', 'Quinta', 'quinta-feira', 'thursday', 'thu', '4'],
+    sexta: ['sexta', 'Sexta', 'sexta-feira', 'friday', 'fri', '5'],
+    sabado: ['sabado', 'sábado', 'Sábado', 'Sabado', 'saturday', 'sat', '6'],
+  };
+
+  let cfg = null;
+  for (const key of aliases[diaKey] || [diaKey]) {
+    if (horarios[key]) { cfg = horarios[key]; break; }
+  }
+  if (!cfg || typeof cfg !== 'object') return null;
+
+  const fechado = cfg.fechado === true || cfg.fechado === 1 || String(cfg.fechado).toLowerCase() === 'true';
   return {
-    abre: parseHHMM(cfg.abre),
-    fecha: parseHHMM(cfg.fecha),
-    fechado: !!cfg.fechado,
+    abre: parseHHMM(cfg.abre || cfg.abertura || cfg.inicio || cfg.horaInicio),
+    fecha: parseHHMM(cfg.fecha || cfg.fechamento || cfg.fim || cfg.horaFim),
+    fechado,
   };
 }
 
-// Retorna { aberto: bool, fechaMin: number|null }
-// Considera o dia atual E o “spill” do dia anterior (quando fecha após meia-noite)
-function isAbertoAgora(horariosFuncionamento, now = new Date()) {
-  const diaKey = getDiaKey(now);
+function isAbertoAgora(horariosFuncionamento, now = new Date(), timezone = DEFAULT_TIMEZONE) {
+  const local = getLocalParts(now, timezone);
+  const diaKey = getDiaKeyByIndex(local.dayIndex);
   const cfgHoje = getConfigDia(horariosFuncionamento, diaKey);
+  const minutesNow = local.minutesNow;
 
-  const minutesNow = now.getHours() * 60 + now.getMinutes();
-
-  // 1) Caso esteja aberto por conta do dia ANTERIOR cruzando meia-noite
-  const ontem = new Date(now);
-  ontem.setDate(now.getDate() - 1);
-  const diaOntemKey = getDiaKey(ontem);
+  const diaOntemKey = getDiaKeyByIndex(local.dayIndex - 1);
   const cfgOntem = getConfigDia(horariosFuncionamento, diaOntemKey);
 
-  if (cfgOntem && !cfgOntem.fechado && cfgOntem.abre != null && cfgOntem.fecha != null) {
-    // cruza meia-noite se fecha < abre
-    if (cfgOntem.fecha < cfgOntem.abre) {
-      // ex: abre 18:00 (1080), fecha 02:00 (120)
-      // então está aberto se agora < fecha (no começo do dia seguinte)
-      if (minutesNow < cfgOntem.fecha) {
-        return { aberto: true, fechaMin: cfgOntem.fecha, vindoDe: diaOntemKey, cruzaMeiaNoite: true };
-      }
+  if (cfgOntem && !cfgOntem.fechado && cfgOntem.abre != null && cfgOntem.fecha != null && cfgOntem.fecha < cfgOntem.abre) {
+    if (minutesNow < cfgOntem.fecha) {
+      return { aberto: true, fechaMin: cfgOntem.fecha, vindoDe: diaOntemKey, cruzaMeiaNoite: true, timezone: local.timezone };
     }
   }
 
-  // 2) Verifica o dia atual normal
-  if (!cfgHoje || cfgHoje.fechado) return { aberto: false, fechaMin: null };
+  if (!cfgHoje || cfgHoje.fechado) return { aberto: false, fechaMin: null, timezone: local.timezone };
+  if (cfgHoje.abre == null || cfgHoje.fecha == null) return { aberto: false, fechaMin: null, motivo: 'horario_indefinido', timezone: local.timezone };
+  if (cfgHoje.fecha === cfgHoje.abre) return { aberto: false, fechaMin: null, motivo: 'abre_igual_fecha', timezone: local.timezone };
 
-  if (cfgHoje.abre == null || cfgHoje.fecha == null) {
-    // Sem horário definido: trata como fechado (mais seguro)
-    return { aberto: false, fechaMin: null, motivo: "horario_indefinido" };
-  }
-
-  if (cfgHoje.fecha === cfgHoje.abre) {
-    // mesmo horário = ambíguo; trata como fechado
-    return { aberto: false, fechaMin: null, motivo: "abre_igual_fecha" };
-  }
-
-  // Cruza meia-noite?
   if (cfgHoje.fecha < cfgHoje.abre) {
-    // aberto se >= abre OU < fecha
     const aberto = minutesNow >= cfgHoje.abre || minutesNow < cfgHoje.fecha;
-    return { aberto, fechaMin: cfgHoje.fecha, vindoDe: diaKey, cruzaMeiaNoite: true };
+    return { aberto, fechaMin: cfgHoje.fecha, vindoDe: diaKey, cruzaMeiaNoite: true, timezone: local.timezone };
   }
 
-  // Normal: abre <= now < fecha
   const aberto = minutesNow >= cfgHoje.abre && minutesNow < cfgHoje.fecha;
-  return { aberto, fechaMin: cfgHoje.fecha, vindoDe: diaKey, cruzaMeiaNoite: false };
+  return { aberto, fechaMin: cfgHoje.fecha, vindoDe: diaKey, cruzaMeiaNoite: false, timezone: local.timezone };
 }
 
-// Próxima abertura (até 7 dias)
-function proximaAbertura(horariosFuncionamento, now = new Date()) {
-  const minutesNow = now.getHours() * 60 + now.getMinutes();
+function proximaAbertura(horariosFuncionamento, now = new Date(), timezone = DEFAULT_TIMEZONE) {
+  const local = getLocalParts(now, timezone);
+  const minutesNow = local.minutesNow;
 
   for (let i = 0; i < 7; i++) {
-    const d = new Date(now);
-    d.setDate(now.getDate() + i);
-    const diaKey = getDiaKey(d);
+    const diaKey = getDiaKeyByIndex(local.dayIndex + i);
     const cfg = getConfigDia(horariosFuncionamento, diaKey);
-
     if (!cfg || cfg.fechado || cfg.abre == null || cfg.fecha == null) continue;
 
-    // Se for hoje, só serve se a abertura ainda não passou (ou se cruza meia-noite e estamos antes de abrir)
     if (i === 0) {
-      // se cruza meia-noite, "abre" é sempre hoje em minutos
-      if (minutesNow < cfg.abre) {
-        return { emDias: i, diaKey, abreMin: cfg.abre, fechaMin: cfg.fecha };
-      }
-      // se já passou do abre, então "próxima abertura" é amanhã (não retorna hoje)
+      if (minutesNow < cfg.abre) return { emDias: i, diaKey, abreMin: cfg.abre, fechaMin: cfg.fecha };
       continue;
     }
-
     return { emDias: i, diaKey, abreMin: cfg.abre, fechaMin: cfg.fecha };
   }
 
@@ -120,46 +156,30 @@ function proximaAbertura(horariosFuncionamento, now = new Date()) {
 
 function statusAtendimento(restaurante, now = new Date()) {
   const horarios = restaurante?.horariosFuncionamento;
-  const s = isAbertoAgora(horarios, now);
+  const timezone = restaurante?.timezone || restaurante?.fusoHorario || restaurante?.config?.timezone || DEFAULT_TIMEZONE;
+  const s = isAbertoAgora(horarios, now, timezone);
 
   if (s.aberto) {
     return {
       aberto: true,
       texto: `✅ Estamos abertos agora. Fechamos às ${fmtMin(s.fechaMin)}.`,
       fechaAs: s.fechaMin != null ? fmtMin(s.fechaMin) : null,
+      timezone: s.timezone,
     };
   }
 
-  const prox = proximaAbertura(horarios, now);
+  const prox = proximaAbertura(horarios, now, timezone);
   if (!prox) {
-    return {
-      aberto: false,
-      texto: `⛔ Estamos fechados no momento.`,
-      proximaAbertura: null,
-    };
+    return { aberto: false, texto: `⛔ Estamos fechados no momento.`, proximaAbertura: null, timezone: s.timezone };
   }
 
-  const diaLabel = {
-    domingo: "domingo",
-    segunda: "segunda",
-    terca: "terça",
-    quarta: "quarta",
-    quinta: "quinta",
-    sexta: "sexta",
-    sabado: "sábado",
-  }[prox.diaKey] || prox.diaKey;
-
-  const quando = prox.emDias === 0 ? "hoje" : (prox.emDias === 1 ? "amanhã" : `na ${diaLabel}`);
-
+  const quando = prox.emDias === 0 ? "hoje" : (prox.emDias === 1 ? "amanhã" : `na ${diasLabel[prox.diaKey] || prox.diaKey}`);
   return {
     aberto: false,
     texto: `⛔ Estamos fechados agora. Abrimos ${quando} às ${fmtMin(prox.abreMin)}.`,
     proximaAbertura: { dia: prox.diaKey, abreAs: fmtMin(prox.abreMin) },
+    timezone: s.timezone,
   };
 }
 
-module.exports = {
-  statusAtendimento,
-  isAbertoAgora,
-  proximaAbertura,
-};
+module.exports = { statusAtendimento, isAbertoAgora, proximaAbertura };
