@@ -60,6 +60,9 @@ function parseLocalDateInput(v, endOfDay=false){
 }
 function parseDate(v){ return parseLocalDateInput(v, false); }
 function normalizePlano(v){ return String(v || 'free').trim().toLowerCase(); }
+function isPlanoFree(plano){ return normalizePlano(plano) === 'free'; }
+function prazoPlanoDias(plano, fallback=30){ return isPlanoFree(plano) ? 7 : Number(fallback || 30); }
+function statusPadraoPlano(plano, informado){ return informado || (isPlanoFree(plano) ? 'teste' : 'ativo'); }
 
 function addDays(date, days){ const d = new Date(date || Date.now()); d.setDate(d.getDate() + Number(days || 0)); return d; }
 function startOfDayValue(v){ const d = parseLocalDateInput(v, false) || new Date(); d.setHours(0,0,0,0); return d; }
@@ -263,6 +266,9 @@ module.exports = {
     try{
       const senha = req.body.senha || 'movyo123';
       const senhaHash = await bcrypt.hash(String(senha), 10);
+      const planoNormalizado = normalizePlano(req.body.plano || 'free');
+      const inicioPlano = parseDate(req.body.dataInicioPlano) || new Date();
+      const fimPlano = parseDate(req.body.dataFimPlano) || (isPlanoFree(planoNormalizado) ? addDays(inicioPlano, 7) : null);
       const payload = {
         nome: req.body.nome,
         email: String(req.body.email || '').trim().toLowerCase(),
@@ -272,10 +278,10 @@ module.exports = {
         slugIdentificador: String(req.body.slugIdentificador || req.body.slug || req.body.nome || '').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,''),
         enderecoCidade: req.body.enderecoCidade || req.body.cidade || '',
         enderecoBairro: req.body.enderecoBairro || req.body.bairro || '',
-        plano: normalizePlano(req.body.plano || 'free'),
-        statusAssinatura: req.body.statusAssinatura || 'ativo',
-        dataInicioPlano: parseDate(req.body.dataInicioPlano),
-        dataFimPlano: parseDate(req.body.dataFimPlano),
+        plano: planoNormalizado,
+        statusAssinatura: statusPadraoPlano(planoNormalizado, req.body.statusAssinatura),
+        dataInicioPlano: inicioPlano,
+        dataFimPlano: fimPlano,
         observacaoPlano: req.body.observacaoPlano || '',
         ativo: req.body.ativo !== false,
         emailCobranca: String(req.body.emailCobranca || req.body.email_cobranca || req.body.email || '').trim().toLowerCase(),
@@ -296,6 +302,12 @@ module.exports = {
       if(update.plano) update.plano = normalizePlano(update.plano);
       if(update.dataInicioPlano) update.dataInicioPlano = parseDate(update.dataInicioPlano);
       if(update.dataFimPlano) update.dataFimPlano = parseDate(update.dataFimPlano);
+      if(update.plano && isPlanoFree(update.plano)){
+        const inicioFree = update.dataInicioPlano || new Date();
+        update.statusAssinatura = statusPadraoPlano(update.plano, update.statusAssinatura);
+        update.dataInicioPlano = inicioFree;
+        update.dataFimPlano = update.dataFimPlano || addDays(inicioFree, 7);
+      }
       const exigeLogout = ['plano','statusAssinatura','dataInicioPlano','dataFimPlano','ativo'].some(k => Object.prototype.hasOwnProperty.call(update,k));
       await Restaurante.findByIdAndUpdate(id, exigeLogout ? { $set:update, $inc:{ sessaoVersao:1 } } : { $set:update });
       res.json(publicRestaurante(await Restaurante.findById(id).lean()));
@@ -311,8 +323,8 @@ module.exports = {
   async liberarPlano(req,res){
     const plano = normalizePlano(req.body.plano || 'starter-mobile');
     const inicio = parseDate(req.body.dataInicioPlano) || new Date();
-    const fim = parseDate(req.body.dataFimPlano) || addDays(inicio, Number(req.body.dias || 30));
-    await Restaurante.findByIdAndUpdate(req.params.id, { $set:{ plano, statusAssinatura:req.body.statusAssinatura || 'ativo', dataInicioPlano:inicio, dataFimPlano:fim, ativo:true, observacaoPlano:req.body.observacaoPlano || '' }, $inc:{ sessaoVersao:1 } });
+    const fim = parseDate(req.body.dataFimPlano) || addDays(inicio, prazoPlanoDias(plano, req.body.dias || 30));
+    await Restaurante.findByIdAndUpdate(req.params.id, { $set:{ plano, statusAssinatura:statusPadraoPlano(plano, req.body.statusAssinatura), dataInicioPlano:inicio, dataFimPlano:fim, ativo:true, observacaoPlano:req.body.observacaoPlano || '' }, $inc:{ sessaoVersao:1 } });
     res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean()));
   },
   async overview(req,res){
