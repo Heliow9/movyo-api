@@ -1,5 +1,19 @@
 const CategoriaProduto = require('../models/CategoriaProduto');
 const Produto = require('../models/Produto');
+const { queryWithRetry } = require('../lib/mysqlRetry');
+
+
+function parseJsonSafe(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+function boolFromDb(value, fallback = false) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  return ['1','true','sim','yes'].includes(String(value).toLowerCase());
+}
 
 /**
  * 🔒 Função de blindagem de dados da categoria
@@ -100,15 +114,40 @@ const createCategoria = async (req, res) => {
 // =========================
 const listarCategoriasPorRestaurante = async (req, res) => {
   try {
-    const categorias = await CategoriaProduto
-      .find({ restaurante: req.params.restauranteId })
-      .sort({ ordem: 1 });
+    const restauranteId = req.params.restauranteId;
+    if (!restauranteId) return res.status(400).json({ error: 'restauranteId é obrigatório' });
+
+    const [rows] = await queryWithRetry(
+      `SELECT * FROM categorias_produto WHERE restaurante = ? ORDER BY COALESCE(ordem, 0), nome`,
+      [String(restauranteId)],
+      { label: 'categorias.porRestaurante' }
+    );
+
+    const categorias = (rows || []).map((c) => ({
+      ...c,
+      _id: c.id,
+      id: c.id,
+      ativa: boolFromDb(c.ativa, true),
+      permiteSabores: boolFromDb(c.permiteSabores, false),
+      permiteBordas: boolFromDb(c.permiteBordas, false),
+      permiteAdicionais: boolFromDb(c.permiteAdicionais, false),
+      permiteComplementos: boolFromDb(c.permiteComplementos, false),
+      pizzaMultisabor: boolFromDb(c.pizzaMultisabor, false),
+      tiposExtras: parseJsonSafe(c.tiposExtras, []),
+      saboresDisponiveis: parseJsonSafe(c.saboresDisponiveis, []),
+      bordasDisponiveis: parseJsonSafe(c.bordasDisponiveis, []),
+      adicionaisDisponiveis: parseJsonSafe(c.adicionaisDisponiveis, []),
+      complementosDisponiveis: parseJsonSafe(c.complementosDisponiveis, []),
+      maxSabores: Number(c.maxSabores || 1),
+      ordem: Number(c.ordem || 0),
+    }));
 
     res.status(200).json(categorias);
   } catch (err) {
     res.status(500).json({
       error: "Erro ao listar categorias",
-      details: err.message
+      details: err.message,
+      code: err.code,
     });
   }
 };

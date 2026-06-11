@@ -4,10 +4,12 @@ const crypto = require("crypto");
 
 const Mesa = require("../models/mesaModel");
 const { pool } = require("../db/mysql");
+const { queryWithRetry } = require("../lib/mysqlRetry");
 const Pedido = require("../models/Pedido");
 const Restaurante = require("../models/Restaurante");
 
 const { criarPagamentoPix, consultarPagamento } = require("../services/mercadoPagoPixService");
+const { exigirCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa, normalizeFormaPagamento } = require("../services/caixaService");
 // controllers/mesaController.js (no topo)
 const { enviarMensagem, enviarMensagemMidia, estaConectado } = require("../utils/bot");
 
@@ -20,6 +22,77 @@ function getMercadoPagoInfo(restaurante) {
   const accessToken = mp.accessToken || mp.token || mp.access_token || null;
   const conectado = boolLike(mp.conectado) || !!accessToken;
   return { conectado, accessToken, mp };
+}
+
+
+/* =========================================================
+   HELPERS DE PERFORMANCE - MOVYO HUB / APP GARÇOM
+========================================================= */
+const resumoHomeCache = new Map();
+const RESUMO_HOME_CACHE_MS = Number(process.env.MOVYO_HUB_RESUMO_CACHE_MS || 3000);
+
+function parseJsonSafe(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function rowToPedidoLean(row = {}) {
+  const pedido = { ...row };
+  pedido._id = row.id;
+  pedido.id = row.id;
+  pedido.valorTotal = Number(row.total ?? row.valorTotal ?? 0) || 0;
+  pedido.total = Number(row.total ?? row.valorTotal ?? 0) || 0;
+  pedido.valorPago = Number(row.valorPago ?? 0) || 0;
+  pedido.valorPendente = Number(row.valorPendente ?? 0) || 0;
+  pedido.formadePagamento = row.formaPagamento || row.formadePagamento || "";
+  pedido.formaPagamento = row.formaPagamento || row.formadePagamento || "";
+  pedido.itens = parseJsonSafe(row.itens, []);
+  pedido.pagamentos = parseJsonSafe(row.pagamentos, []);
+  pedido.pagamento = parseJsonSafe(row.pagamento, null);
+  return pedido;
+}
+
+function hojeSqlLocal() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const ymd = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return { inicio: `${ymd} 00:00:00`, fim: `${ymd} 23:59:59`, ymd };
+}
+
+function mesaRowToLean(row = {}) {
+  return {
+    ...row,
+    _id: row.id,
+    id: row.id,
+    ultimaPermanenciaSegundos: Number(row.ultimaPermanenciaSegundos || 0),
+    sessaoExpiraEm: row.sessaoExpiraEm || null,
+    sessaoInicialExpiraEm: row.sessaoInicialExpiraEm || null,
+    ocupadaDesde: row.ocupadaDesde || null,
+    ultimaFechadaEm: row.ultimaFechadaEm || null,
+  };
+}
+
+
+async function registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId }) {
+  if (!pedido || !caixa) return [];
+  pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
+  const criados = [];
+
+  for (const pagamento of pedido.pagamentos) {
+    const status = String(pagamento?.status || '').toLowerCase();
+    if (!['confirmado', 'pago', 'approved', 'aprovado'].includes(status)) continue;
+    if (pagamento.caixaMovimentoId) continue;
+
+    const mov = await registrarMovimentoVenda({ pedido, pagamento, caixa, restauranteId });
+    if (mov?._id) {
+      pagamento.caixaMovimentoId = mov._id;
+      pagamento.caixaSessaoId = caixa._id || caixa.id;
+      criados.push(mov);
+    }
+  }
+
+  return criados;
 }
 
 function normalizarNumeroMesa(valor) {
@@ -298,6 +371,29 @@ async function finalizarVendaPix({ req, mesa, pedido, statusPagamento }) {
   pedido.valorTotal = calcularTotalPedido(pedido);
   pedido.valorPago = pedido.valorTotal;
   pedido.valorPendente = 0;
+
+  const caixa = await exigirCaixaAberto(mesa.restauranteId);
+  await vincularPedidoAoCaixa(pedido, caixa);
+
+  pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
+  const pixJaRegistrado = pedido.pagamentos.some((p) =>
+    String(p?.metodo || "").toLowerCase() === "pix" &&
+    (String(p?.mpPaymentId || "") === String(pedido.mpPaymentId || "") || p?.caixaMovimentoId)
+  );
+  if (!pixJaRegistrado) {
+    pedido.pagamentos.push({
+      metodo: "pix",
+      valor: pedido.valorTotal,
+      status: "confirmado",
+      recebidoEm: agora,
+      mpPaymentId: pedido.mpPaymentId || null,
+      mpStatus: statusPagamento || "approved",
+      recebidoPorRole: req.role === "garcom" ? "garcom" : "restaurante",
+    });
+  }
+
+  await registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId: mesa.restauranteId });
+  await recalcularCaixa(caixa._id || caixa.id);
 
   if (!pedido.pagoEm) pedido.pagoEm = agora;
   if (!pedido.fechadoEm) pedido.fechadoEm = agora;
@@ -651,6 +747,8 @@ exports.abrirMesaPainel = async (req, res) => {
 
     if (!mesa) return res.status(404).json({ message: "Mesa não encontrada" });
 
+    const caixa = await exigirCaixaAberto(mesa.restauranteId);
+
     if (mesa.status === "ocupada" && mesa.pedidoAtualId) {
       const pedido = await Pedido.findById(mesa.pedidoAtualId);
       if (pedido) {
@@ -681,6 +779,8 @@ exports.abrirMesaPainel = async (req, res) => {
         novoPedido.garcomNome = g.nome;
       }
     }
+
+    await vincularPedidoAoCaixa(novoPedido, caixa);
 
     await novoPedido.save();
 
@@ -803,8 +903,8 @@ exports.registrarPagamentoMesaPainel = async (req, res) => {
     const { metodo, valor, obs } = req.body;
 
     const m = String(metodo || "").toLowerCase();
-    if (!["dinheiro", "cartao"].includes(m)) {
-      return res.status(400).json({ message: "Método inválido. Use dinheiro ou cartao." });
+    if (!["dinheiro", "cartao", "credito", "debito", "c.credito", "c.debito", "C.Crédito", "C.Debito"].map(x => String(x).toLowerCase()).includes(m)) {
+      return res.status(400).json({ message: "Método inválido. Use dinheiro, cartão, crédito ou débito." });
     }
 
     const v = round2(toNum(valor));
@@ -822,6 +922,9 @@ exports.registrarPagamentoMesaPainel = async (req, res) => {
 
     const pedido = await Pedido.findById(mesa.pedidoAtualId);
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
+
+    const caixa = await exigirCaixaAberto(mesa.restauranteId);
+    await vincularPedidoAoCaixa(pedido, caixa);
 
     pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
 
@@ -843,6 +946,8 @@ exports.registrarPagamentoMesaPainel = async (req, res) => {
     });
 
     const { total, pago, pendente } = recalcPagamentoPedido(pedido);
+    await registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId: mesa.restauranteId });
+    await recalcularCaixa(caixa._id || caixa.id);
 
     const metodosConfirmados = new Set(
       (pedido.pagamentos || [])
@@ -854,6 +959,8 @@ exports.registrarPagamentoMesaPainel = async (req, res) => {
     else if (metodosConfirmados.size === 1) pedido.formadePagamento = [...metodosConfirmados][0];
 
     if (pendente <= 0 && total > 0) {
+      await registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId: mesa.restauranteId });
+      await recalcularCaixa(caixa._id || caixa.id);
       await liberarMesaGenerico({ req, mesa, pedido });
       return res.json({ ok: true, fechado: true, mesa, pedido, total, pago, pendente: 0 });
     }
@@ -892,6 +999,9 @@ exports.gerarPixMesaPainel = async (req, res) => {
 
     const pedido = await Pedido.findById(mesa.pedidoAtualId);
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
+
+    const caixa = await exigirCaixaAberto(mesa.restauranteId);
+    await vincularPedidoAoCaixa(pedido, caixa);
 
     const { pendente: pendenteAntes, total } = recalcPagamentoPedido(pedido);
     await pedido.save().catch(() => {});
@@ -1006,6 +1116,9 @@ exports.statusPixMesaPainel = async (req, res) => {
     const pedido = await Pedido.findById(mesa.pedidoAtualId);
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
 
+    const caixa = await exigirCaixaAberto(mesa.restauranteId);
+    await vincularPedidoAoCaixa(pedido, caixa);
+
     const restaurante = await Restaurante.findById(mesa.restauranteId).select("mercadoPago");
     const { accessToken } = getMercadoPagoInfo(restaurante);
 
@@ -1056,6 +1169,8 @@ exports.statusPixMesaPainel = async (req, res) => {
     const { total, pago, pendente } = recalcPagamentoPedido(pedido);
 
     if (pendente <= 0 && total > 0) {
+      await registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId: mesa.restauranteId });
+      await recalcularCaixa(caixa._id || caixa.id);
       await liberarMesaGenerico({ req, mesa, pedido });
       return res.json({
         ok: true,
@@ -1116,6 +1231,9 @@ exports.fecharMesaPainel = async (req, res) => {
     const pedido = await Pedido.findById(mesa.pedidoAtualId);
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
 
+    const caixa = await exigirCaixaAberto(mesa.restauranteId);
+    await vincularPedidoAoCaixa(pedido, caixa);
+
     const { total, pago, pendente } = recalcPagamentoPedido(pedido);
 
     if (pendente > 0) {
@@ -1128,6 +1246,9 @@ exports.fecharMesaPainel = async (req, res) => {
         pedido,
       });
     }
+
+    await registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId: mesa.restauranteId });
+    await recalcularCaixa(caixa._id || caixa.id);
 
     await liberarMesaGenerico({ req, mesa, pedido });
 
@@ -1154,8 +1275,13 @@ exports.listarMesasApp = async (req, res) => {
     const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
     if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
 
-    const mesas = await Mesa.find({ restauranteId }).sort({ numero: 1 });
-    return res.json(mesas);
+    // Performance: usa SQL direto com WHERE restauranteId. O adapter Mongoose/MySQL
+    // fazia SELECT * em mesas e filtrava em memória.
+    const [rows] = await queryWithRetry(
+      `SELECT * FROM mesas WHERE restauranteId = ? ORDER BY CAST(numero AS UNSIGNED), numero`,
+      [String(restauranteId)]
+    );
+    return res.json(rows.map(mesaRowToLean));
   } catch (error) {
     return res.status(500).json({ message: "Erro ao listar mesas (app).", error: error.message });
   }
@@ -1187,6 +1313,9 @@ exports.gerarPixMesaApp = async (req, res) => {
 
     const pedido = await Pedido.findById(mesa.pedidoAtualId);
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
+
+    const caixa = await exigirCaixaAberto(mesa.restauranteId);
+    await vincularPedidoAoCaixa(pedido, caixa);
 
     const g = getGarcomFromReq(req);
     let changed = false;
@@ -1383,38 +1512,51 @@ exports.resumoHomeApp = async (req, res) => {
 
     if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
 
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    const end = new Date();
-    end.setHours(23, 59, 59, 999);
+    // Cache curto para segurar rajadas do Hub quando a Home remonta/atualiza várias vezes.
+    // Mantém atualização praticamente em tempo real, mas evita 5 consultas iguais simultâneas.
+    const cacheKey = `${restauranteId}:${garcomId || "all"}`;
+    const cached = resumoHomeCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < RESUMO_HOME_CACHE_MS) {
+      return res.json({ ...cached.data, cache: true });
+    }
+
+    const { inicio, fim, ymd } = hojeSqlLocal();
 
     const norm = (v) => String(v || "").trim().toLowerCase();
-    const toDate = (v) => {
-      const d = v ? new Date(v) : null;
-      return d && !Number.isNaN(d.getTime()) ? d : null;
-    };
     const sameId = (a, b) => a && b && String(a) === String(b);
     const valorPedido = (p) => Number(p?.valorTotal ?? p?.total ?? p?.valor ?? 0) || 0;
 
     const STATUS_AGUARDANDO_PAGAMENTO = new Set(["aguardando_pagamento", "pagamento_pendente", "pending_payment"]);
     const STATUS_FINALIZADOS = new Set(["entregue", "finalizado", "cancelado", "cancelado_cliente", "cancelado_restaurante"]);
     const STATUS_ATIVOS = new Set([
-      "pendente",
-      "novo",
-      "em_aberto",
-      "aberto",
-      "aguardando_resposta",
-      "aceito",
-      "recebido",
-      "em_preparo",
-      "preparando",
-      "producao",
-      "em_producao",
-      "pronto",
-      "em_entrega",
-      "em_rota",
+      "pendente", "novo", "em_aberto", "aberto", "aguardando_resposta", "aceito", "recebido",
+      "em_preparo", "preparando", "producao", "em_producao", "pronto", "em_entrega", "em_rota",
     ]);
-    const STATUS_MESA_ABERTA = new Set(["ocupada", "aberta", "em_aberto", "aberto"]);
+    const STATUS_MESA_ABERTA = new Set(["ocupada", "ocupado", "aberta", "aberto", "em_aberto"]);
+
+    const [mesasRows, pedidosRows] = await Promise.all([
+      queryWithRetry(
+        `SELECT id, numero, status, pedidoAtualId, ocupadaDesde
+           FROM mesas
+          WHERE restauranteId = ?`,
+        [String(restauranteId)]
+      ).then(([rows]) => rows),
+      queryWithRetry(
+        `SELECT id, numeroPedido, restaurante, mesaId, mesaNumero, nomeCliente, itens, total,
+                formaPagamento, status, statusPagamento, origem, pagamentos, valorPago, valorPendente,
+                garcomId, garcomNome, recebidoPor, recebidoPorNome, fechadoPor, fechadoPorNome,
+                criadoPor, criadoPorNome, criadoEm, pagoEm, entregueEm, canceladoEm, created_at
+           FROM pedidos
+          WHERE restaurante = ?
+            AND criadoEm >= ? AND criadoEm <= ?
+          ORDER BY criadoEm DESC, created_at DESC
+          LIMIT 600`,
+        [String(restauranteId), inicio, fim]
+      ).then(([rows]) => rows),
+    ]);
+
+    const todosPedidos = pedidosRows.map(rowToPedidoLean);
+    const pedidosPorId = new Map(todosPedidos.map((p) => [String(p?._id || p?.id || ""), p]));
 
     const isAguardandoPagamento = (pedido) =>
       STATUS_AGUARDANDO_PAGAMENTO.has(norm(pedido?.status)) ||
@@ -1429,40 +1571,15 @@ exports.resumoHomeApp = async (req, res) => {
       return STATUS_ATIVOS.has(st) || (!st && !isFinalizado(pedido));
     };
 
-    const isHoje = (pedido) => {
-      const dt = toDate(pedido?.pagoEm || pedido?.createdAt || pedido?.criadoEm || pedido?.data);
-      return !!dt && dt >= start && dt <= end;
-    };
-
-    const pertenceAoGarcom = (pedido) => {
-      if (!garcomId) return false;
-      return (
-        sameId(pedido?.garcomId, garcomId) ||
-        sameId(pedido?.fechadoPor, garcomId) ||
-        sameId(pedido?.recebidoPor, garcomId) ||
-        sameId(pedido?.criadoPor, garcomId)
-      );
-    };
-
-    const [mesasRaw, todosPedidosRaw] = await Promise.all([
-      Mesa.find({ restauranteId }).lean(),
-      Pedido.find({ restaurante: restauranteId }).lean(),
-    ]);
-
-    const todosPedidos = Array.isArray(todosPedidosRaw) ? todosPedidosRaw : [];
-    const pedidosPorId = new Map(todosPedidos.map((p) => [String(p?._id || p?.id || ""), p]));
-
-    // Mesa aberta real: conta mesa marcada como aberta/ocupada. Se tiver pedidoAtualId, ele precisa estar ativo.
-    const mesasAbertas = (Array.isArray(mesasRaw) ? mesasRaw : []).filter((mesa) => {
+    const mesasAbertas = (Array.isArray(mesasRows) ? mesasRows : []).filter((mesa) => {
       if (!STATUS_MESA_ABERTA.has(norm(mesa?.status))) return false;
       const pedidoId = mesa?.pedidoAtualId ? String(mesa.pedidoAtualId) : "";
       if (!pedidoId) return true;
       const pedido = pedidosPorId.get(pedidoId);
-      return !pedido || isAtivoOperacional(pedido);
+      return !pedido || !isFinalizado(pedido);
     }).length;
 
-    // Pendente operacional = ainda precisa de ação: pendente/produção/pronto/entrega, mas nunca aguardando pagamento.
-    const pedidosOperacionaisHoje = todosPedidos.filter((pedido) => isHoje(pedido) && isAtivoOperacional(pedido));
+    const pedidosOperacionaisHoje = todosPedidos.filter(isAtivoOperacional);
     const pedidosPendentes = pedidosOperacionaisHoje.length;
 
     const isPago = (pedido) => {
@@ -1482,63 +1599,38 @@ exports.resumoHomeApp = async (req, res) => {
 
     const atribuirGarcomPedido = (pedido) => {
       const pag = pagamentoConfirmadoGarcom(pedido);
-      const idRaw =
-        pedido?.garcomId ||
-        pedido?.fechadoPor ||
-        pedido?.recebidoPor ||
-        pedido?.criadoPor ||
-        pag?.recebidoPor ||
-        pag?.garcomId ||
-        null;
-
-      const nomeRaw =
-        pedido?.garcomNome ||
-        pedido?.fechadoPorNome ||
-        pedido?.recebidoPorNome ||
-        pedido?.criadoPorNome ||
-        pag?.recebidoPorNome ||
-        pag?.garcomNome ||
-        null;
+      const idRaw = pedido?.garcomId || pedido?.fechadoPor || pedido?.recebidoPor || pedido?.criadoPor || pag?.recebidoPor || pag?.garcomId || null;
+      const nomeRaw = pedido?.garcomNome || pedido?.fechadoPorNome || pedido?.recebidoPorNome || pedido?.criadoPorNome || pag?.recebidoPorNome || pag?.garcomNome || null;
 
       let id = idRaw ? String(idRaw) : null;
       let nome = nomeRaw || null;
 
-      // Compatibilidade para pedidos antigos criados antes de salvar garcomId:
-      // quando a Home é aberta pelo próprio garçom e o pedido não tem responsável,
-      // atribui ao usuário logado em vez de criar o grupo falso "Garçom".
       if (!id && garcomId && ["balcao", "mesa", "garcom"].includes(norm(pedido?.origem))) {
         id = garcomId;
         nome = garcomNomeReq;
       }
-
       if (sameId(id, garcomId)) nome = garcomNomeReq || nome;
       if (!id && nome) id = `nome:${String(nome).trim().toLowerCase()}`;
-
       return id ? { id, nome: nome || (sameId(id, garcomId) ? garcomNomeReq : "Sem garçom") } : null;
     };
 
     const pedidosHojeGarcom = todosPedidos.filter((pedido) => {
-      if (!isHoje(pedido)) return false;
       const atrib = atribuirGarcomPedido(pedido);
       return atrib && sameId(atrib.id, garcomId);
     });
     const pedidosPagosHojeGarcom = pedidosHojeGarcom.filter(isPago);
-
     const vendasHojeGarcom = pedidosPagosHojeGarcom.reduce((acc, p) => acc + valorPedido(p), 0);
 
     const rankingMap = new Map();
-    todosPedidos
-      .filter((pedido) => isHoje(pedido))
-      .filter(isPago)
-      .forEach((pedido) => {
-        const atrib = atribuirGarcomPedido(pedido);
-        if (!atrib) return;
-        const atual = rankingMap.get(atrib.id) || { id: atrib.id, nome: atrib.nome, pedidos: 0, total: 0 };
-        atual.nome = sameId(atrib.id, garcomId) ? garcomNomeReq : (atrib.nome || atual.nome);
-        atual.pedidos += 1;
-        atual.total += valorPedido(pedido);
-        rankingMap.set(atrib.id, atual);
-      });
+    todosPedidos.filter(isPago).forEach((pedido) => {
+      const atrib = atribuirGarcomPedido(pedido);
+      if (!atrib) return;
+      const atual = rankingMap.get(atrib.id) || { id: atrib.id, nome: atrib.nome, pedidos: 0, total: 0 };
+      atual.nome = sameId(atrib.id, garcomId) ? garcomNomeReq : (atrib.nome || atual.nome);
+      atual.pedidos += 1;
+      atual.total += valorPedido(pedido);
+      rankingMap.set(atrib.id, atual);
+    });
 
     if (garcomId && !rankingMap.has(garcomId)) {
       rankingMap.set(garcomId, { id: garcomId, nome: garcomNomeReq, pedidos: pedidosPagosHojeGarcom.length, total: vendasHojeGarcom });
@@ -1548,7 +1640,7 @@ exports.resumoHomeApp = async (req, res) => {
       .sort((a, b) => Number(b.total || 0) - Number(a.total || 0))
       .slice(0, 5);
 
-    return res.json({
+    const data = {
       mesasAbertas,
       mesasOcupadas: mesasAbertas,
       pedidosPendentes,
@@ -1559,9 +1651,12 @@ exports.resumoHomeApp = async (req, res) => {
       filtros: {
         pedidosAtivos: Array.from(STATUS_ATIVOS),
         ignorados: Array.from(STATUS_AGUARDANDO_PAGAMENTO),
-        hoje: { inicio: start.toISOString(), fim: end.toISOString() },
+        hoje: { inicio, fim, data: ymd },
       },
-    });
+    };
+
+    resumoHomeCache.set(cacheKey, { ts: Date.now(), data });
+    return res.json(data);
   } catch (error) {
     return res.status(500).json({
       message: "Erro ao gerar resumo da home",

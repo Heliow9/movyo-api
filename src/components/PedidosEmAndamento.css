@@ -1,0 +1,16 @@
+.pedidos-lateral {
+    width: 250px;
+    background-color: #f5f5f5;
+    padding: 1rem;
+    overflow-y: auto;
+    border-right: 1px solid #ddd;
+  }
+  
+  .pedido-card {
+    background: #fff;
+    border: 1px solid #ccc;
+    margin-bottom: 10px;
+    padding: 10px;
+    border-radius: 8px;
+  }
+  

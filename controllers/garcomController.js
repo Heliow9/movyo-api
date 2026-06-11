@@ -3,6 +3,7 @@ const Restaurante = require("../models/Restaurante");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { createObjectId } = require("../lib/objectId");
+const { queryWithRetry } = require("../lib/mysqlRetry");
 
 const DEFAULT_PERMISSOES = {
   verPedidos: true,
@@ -15,6 +16,11 @@ const DEFAULT_PERMISSOES = {
 };
 
 const normalizarTel = (tel) => (tel ? String(tel).replace(/\D/g, "") : null);
+const parseJsonSafe = (value, fallback) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+};
 
 const ensureGarconsArray = (restaurante) => {
   if (!Array.isArray(restaurante.garcons)) restaurante.garcons = [];
@@ -56,6 +62,9 @@ const safeGarcom = (garcomDoc) => {
   return safe;
 };
 
+const listarGarconsCache = new Map();
+const LISTAR_GARCONS_CACHE_MS = Number(process.env.LISTAR_GARCONS_CACHE_MS || 5000);
+
 exports.listarGarcons = async (req, res) => {
   try {
     const restauranteId = getRestauranteId(req);
@@ -63,12 +72,24 @@ exports.listarGarcons = async (req, res) => {
       return res.status(401).json({ message: "Restaurante não autenticado." });
     }
 
-    const doc = await Restaurante.findById(restauranteId).select("garcons");
-    if (!doc) return res.status(404).json({ message: "Restaurante não encontrado." });
+    const cacheKey = String(restauranteId);
+    const cached = listarGarconsCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < LISTAR_GARCONS_CACHE_MS) {
+      return res.json(cached.data);
+    }
 
-    return res.json((doc.garcons || []).map(safeGarcom));
+    const [rows] = await queryWithRetry(
+      `SELECT garcons FROM restaurantes WHERE id = ? LIMIT 1`,
+      [String(restauranteId)],
+      { label: 'garcons.listar' }
+    );
+    if (!rows?.length) return res.status(404).json({ message: "Restaurante não encontrado." });
+
+    const data = (parseJsonSafe(rows[0].garcons, []) || []).map(safeGarcom);
+    listarGarconsCache.set(cacheKey, { ts: Date.now(), data });
+    return res.json(data);
   } catch (err) {
-    return res.status(500).json({ message: "Erro ao listar garçons.", error: err.message });
+    return res.status(500).json({ message: "Erro ao listar garçons.", error: err.message, code: err.code });
   }
 };
 
@@ -337,10 +358,21 @@ exports.loginGarcom = async (req, res) => {
       if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
     }
 
-    // (Opcional) trava restaurante desativado/bloqueado
-    if (restaurante?.ativo === false || restaurante?.bloqueado === true) {
+    // Trava restaurante por motivo correto: bloqueio real separado de licença vencida.
+    const hojeLogin = new Date(); hojeLogin.setHours(0,0,0,0);
+    const fimPlanoLogin = restaurante?.dataFimPlano ? new Date(restaurante.dataFimPlano) : null;
+    const licencaVencidaLogin = fimPlanoLogin && !isNaN(fimPlanoLogin.getTime()) && fimPlanoLogin < hojeLogin;
+
+    if (licencaVencidaLogin) {
       return res.status(403).json({
-        message: "Restaurante desativado/bloqueado. Fale com o suporte.",
+        message: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
+        code: "LICENCA_VENCIDA",
+      });
+    }
+
+    if (restaurante?.ativo === false || restaurante?.bloqueado === true || String(restaurante?.statusAssinatura || '').toLowerCase() === 'bloqueado') {
+      return res.status(403).json({
+        message: "Restaurante bloqueado/desativado. Fale com o suporte.",
         code: "RESTAURANTE_BLOQUEADO",
       });
     }
@@ -379,6 +411,7 @@ exports.loginGarcom = async (req, res) => {
         restauranteSlug: restaurante.slugIdentificador,
         garcomId: String(garcom._id),
         permissoes: garcom.permissoes || {},
+        sessaoVersao: Number(restaurante.sessaoVersao || 1),
       },
       process.env.JWT_SECRET,
       { expiresIn: "30d" }
@@ -390,6 +423,10 @@ exports.loginGarcom = async (req, res) => {
         _id: restaurante._id,
         nome: restaurante.nome,
         slugIdentificador: restaurante.slugIdentificador,
+        plano: restaurante.plano || 'free',
+        statusAssinatura: restaurante.statusAssinatura || 'ativo',
+        dataFimPlano: restaurante.dataFimPlano || null,
+        sessaoVersao: Number(restaurante.sessaoVersao || 1),
         mercadoPago: {
           // ✅ AGORA VEM CERTO
           conectado: !!restaurante.mercadoPago?.conectado,
@@ -426,6 +463,7 @@ exports.meApp = async (req, res) => {
         telefone: garcom.telefone,
         ativo: garcom.ativo !== false,
         permissoes: garcom.permissoes || {},
+        sessaoVersao: Number(restaurante.sessaoVersao || 1),
       },
       restaurante: {
         _id: String(restauranteId),

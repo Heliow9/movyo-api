@@ -1,5 +1,6 @@
 const CaixaSessao = require('../models/CaixaSessao');
 const CaixaMovimento = require('../models/CaixaMovimento');
+const { queryWithRetry } = require('../lib/mysqlRetry');
 
 const toNum = (v) => {
   if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
@@ -25,8 +26,18 @@ function normalizeFormaPagamento(v='') {
 }
 
 async function getCaixaAberto(restauranteId) {
-  const caixas = await CaixaSessao.find({ restauranteId: String(restauranteId), status: 'aberto' }).sort({ abertoEm: -1 }).limit(1).lean();
-  return Array.isArray(caixas) ? caixas[0] : caixas;
+  if (!restauranteId) return null;
+  const [rows] = await queryWithRetry(
+    `SELECT * FROM caixa_sessoes
+      WHERE restauranteId = ? AND status = 'aberto'
+      ORDER BY abertoEm DESC, created_at DESC, id DESC
+      LIMIT 1`,
+    [String(restauranteId)],
+    { label: 'caixa.getAberto' }
+  );
+  const row = rows?.[0];
+  if (!row) return null;
+  return { ...row, _id: row.id, id: row.id };
 }
 
 async function exigirCaixaAberto(restauranteId) {
@@ -78,13 +89,19 @@ async function registrarMovimentoVenda({ pedido, pagamento, caixa, restauranteId
   });
 }
 
-async function recalcularCaixa(caixaId) {
-  const caixa = await CaixaSessao.findById(caixaId);
-  if (!caixa) return null;
-  const movs = await CaixaMovimento.find({ caixaSessaoId: caixa._id }).lean();
+async function calcularTotaisCaixa(caixaId) {
+  const [rows] = await queryWithRetry(
+    `SELECT tipo, formaPagamento, COALESCE(SUM(valor), 0) AS total
+       FROM caixa_movimentos
+      WHERE caixaSessaoId = ?
+      GROUP BY tipo, formaPagamento`,
+    [String(caixaId)],
+    { label: 'caixa.calcularTotais' }
+  );
+
   const totals = { dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangria:0, suprimento:0, vendas:0 };
-  for (const m of movs || []) {
-    const val = round2(toNum(m.valor));
+  for (const m of rows || []) {
+    const val = round2(toNum(m.total));
     const tipo = String(m.tipo || '').toLowerCase();
     if (tipo === 'sangria') totals.sangria += val;
     else if (tipo === 'suprimento') totals.suprimento += val;
@@ -95,6 +112,11 @@ async function recalcularCaixa(caixaId) {
       else totals[f] += val;
     }
   }
+  return totals;
+}
+
+async function aplicarTotaisNoCaixa(caixa, totals) {
+  if (!caixa) return null;
   caixa.totalDinheiro = round2(totals.dinheiro);
   caixa.totalPix = round2(totals.pix);
   caixa.totalCredito = round2(totals.credito);
@@ -105,8 +127,24 @@ async function recalcularCaixa(caixaId) {
   caixa.totalSangrias = round2(totals.sangria);
   caixa.totalSuprimentos = round2(totals.suprimento);
   caixa.totalEsperadoDinheiro = round2(toNum(caixa.saldoInicial) + totals.dinheiro + totals.suprimento - totals.sangria);
+  return caixa;
+}
+
+async function recalcularCaixa(caixaId) {
+  const caixa = await CaixaSessao.findById(caixaId);
+  if (!caixa) return null;
+  const totals = await calcularTotaisCaixa(caixa._id || caixa.id || caixaId);
+  await aplicarTotaisNoCaixa(caixa, totals);
   await caixa.save();
   return caixa;
 }
 
-module.exports = { normalizeFormaPagamento, getCaixaAberto, exigirCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa, round2, toNum };
+async function montarCaixaComTotais(caixa) {
+  if (!caixa) return null;
+  const totals = await calcularTotaisCaixa(caixa._id || caixa.id);
+  const alvo = { ...(typeof caixa.toObject === 'function' ? caixa.toObject() : caixa) };
+  await aplicarTotaisNoCaixa(alvo, totals);
+  return alvo;
+}
+
+module.exports = { normalizeFormaPagamento, getCaixaAberto, exigirCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa, montarCaixaComTotais, calcularTotaisCaixa, round2, toNum };

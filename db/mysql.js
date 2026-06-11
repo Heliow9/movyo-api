@@ -7,7 +7,11 @@ const config = {
   password: process.env.MYSQL_PASSWORD || '',
   database: process.env.MYSQL_DATABASE || 'movyo',
   waitForConnections: true,
-  connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
+  connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 25),
+  maxIdle: Number(process.env.MYSQL_MAX_IDLE || 10),
+  idleTimeout: Number(process.env.MYSQL_IDLE_TIMEOUT || 60000),
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 0,
   queueLimit: 0,
   charset: 'utf8mb4',
 };

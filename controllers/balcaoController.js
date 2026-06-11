@@ -1,10 +1,12 @@
 // controllers/balcaoController.js
 const mongoose = require("../lib/mongoId");
+const { pool } = require("../db/mysql");
 
 const Pedido = require("../models/Pedido");
 const Restaurante = require("../models/Restaurante");
 
 const { criarPagamentoPix, consultarPagamento } = require("../services/mercadoPagoPixService");
+const { exigirCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
 const { enviarMensagem, enviarMensagemMidia, estaConectado } = require("../utils/bot");
 
 /* -----------------------
@@ -37,6 +39,28 @@ function normalizarMetodoPagamentoBalcao(metodo = "") {
   }
 
   return null;
+}
+
+
+async function registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId }) {
+  if (!pedido || !caixa) return [];
+  pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
+  const criados = [];
+
+  for (const pagamento of pedido.pagamentos) {
+    const status = String(pagamento?.status || '').toLowerCase();
+    if (!['confirmado', 'pago', 'approved', 'aprovado'].includes(status)) continue;
+    if (pagamento.caixaMovimentoId) continue;
+
+    const mov = await registrarMovimentoVenda({ pedido, pagamento, caixa, restauranteId });
+    if (mov?._id) {
+      pagamento.caixaMovimentoId = mov._id;
+      pagamento.caixaSessaoId = caixa._id || caixa.id;
+      criados.push(mov);
+    }
+  }
+
+  return criados;
 }
 
 
@@ -386,6 +410,8 @@ async function fecharPedidoGenerico({ req, pedido }) {
   }
 
   // garante pedido quitado em produção, não em Recebidos
+  const caixa = await exigirCaixaAberto(pedido.restaurante);
+  await vincularPedidoAoCaixa(pedido, caixa);
   const { total, pago, pendente } = recalcPagamentoPedido(pedido);
   if (pendente <= 0 && total > 0) {
     pedido.status = "em_producao";
@@ -393,10 +419,24 @@ async function fecharPedidoGenerico({ req, pedido }) {
     if (!pedido.pagoEm) pedido.pagoEm = agora;
   }
 
+  if (pendente <= 0 && total > 0) {
+    await registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId: pedido.restaurante });
+    await recalcularCaixa(caixa._id || caixa.id);
+  }
+
   await pedido.save();
 
   if (req.io) {
-    req.io.to(`restaurante-${String(pedido.restaurante)}`).emit("pedidoAtualizado", pedido);
+    const room = `restaurante-${String(pedido.restaurante)}`;
+    req.io.to(room).emit("pedidoAtualizado", pedido);
+
+    // Compatibilidade com o fluxo antigo do Movyo Garçom/Desktop:
+    // quando o balcão é quitado, o desktop precisa receber novoPedido
+    // para espelhar na produção/auto-print mesmo se ainda não tinha o pedido na lista local.
+    if (String(pedido.statusPagamento || "").toLowerCase() === "pago" || Number(pedido.valorPendente || 0) <= 0) {
+      req.io.to(room).emit("novoPedido", pedido);
+      req.io.to(room).emit("balcaoAtualizado", pedido);
+    }
   }
 
   return { pedido, total, pago, pendente };
@@ -427,41 +467,107 @@ exports.listarPedidosBalcaoAbertos = async (req, res) => {
 /* =========================
    ABRIR PEDIDO (balcão)
 ========================= */
-async function gerarProximoNumeroBalcao(restauranteId) {
-  // Sequência única para TODOS os pedidos de balcão do restaurante,
-  // independente se nasceu no Desktop ou no app Garçom.
+async function gerarProximoNumeroBalcao(restauranteId, debugLog = null) {
+  // PERFORMANCE CRÍTICA:
+  // A versão antiga fazia Pedido.find({ restaurante, numeroPedido: /^BK/ }) e o factory MySQL
+  // carregava a tabela inteira de pedidos em memória antes de filtrar. Em bases grandes isso
+  // passava de 15s e estourava timeout no Movyo Hub Garçom > Pedido Balcão.
   const prefixo = "BK";
-  const regex = /^BK(\d+)$/i;
+  const log = typeof debugLog === "function" ? debugLog : () => {};
 
-  const pedidos = await Pedido.find({
-    restaurante: restauranteId,
-    numeroPedido: { $regex: "^BK" },
-  })
-    .select("numeroPedido")
-    .lean();
+  if (!restauranteId) return `${prefixo}00001`;
 
-  const maior = (Array.isArray(pedidos) ? pedidos : []).reduce((max, p) => {
-    const n = Number(String(p?.numeroPedido || "").match(regex)?.[1] || 0);
-    return Number.isFinite(n) && n > max ? n : max;
-  }, 0);
+  try {
+    log("SQL gerarProximoNumeroBalcao:start", { restauranteId });
 
-  return `${prefixo}${String(maior + 1).padStart(5, "0")}`;
+    const [rows] = await pool.query(
+      `SELECT MAX(CAST(SUBSTRING(numeroPedido, 3) AS UNSIGNED)) AS maior
+         FROM pedidos
+        WHERE restaurante = ?
+          AND numeroPedido LIKE 'BK%'
+          AND numeroPedido REGEXP '^BK[0-9]+$'`,
+      [String(restauranteId)]
+    );
+
+    const maior = Number(rows?.[0]?.maior || 0);
+    const numero = `${prefixo}${String(maior + 1).padStart(5, "0")}`;
+
+    log("SQL gerarProximoNumeroBalcao:fim", { maior, numero });
+    return numero;
+  } catch (err) {
+    // Fallback seguro: se o MySQL antigo não aceitar REGEXP/CAST por algum motivo,
+    // ainda evita buscar a tabela inteira. Busca só os últimos candidatos do restaurante.
+    log("SQL gerarProximoNumeroBalcao:fallback", { erro: err?.message });
+
+    const [rows] = await pool.query(
+      `SELECT numeroPedido
+         FROM pedidos
+        WHERE restaurante = ?
+          AND numeroPedido LIKE 'BK%'
+        ORDER BY criadoEm DESC
+        LIMIT 300`,
+      [String(restauranteId)]
+    );
+
+    const regex = /^BK(\d+)$/i;
+    const maior = (Array.isArray(rows) ? rows : []).reduce((max, p) => {
+      const n = Number(String(p?.numeroPedido || "").match(regex)?.[1] || 0);
+      return Number.isFinite(n) && n > max ? n : max;
+    }, 0);
+
+    const numero = `${prefixo}${String(maior + 1).padStart(5, "0")}`;
+    log("SQL gerarProximoNumeroBalcao:fallback-fim", { maior, numero });
+    return numero;
+  }
 }
 
 exports.abrirPedidoBalcao = async (req, res) => {
+  const debugId = `BALCAO-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const startedAt = Date.now();
+  const log = (etapa, extra = {}) => {
+    try {
+      console.log(`[${debugId}] ${etapa} +${Date.now() - startedAt}ms`, JSON.stringify(extra));
+    } catch (_) {
+      console.log(`[${debugId}] ${etapa} +${Date.now() - startedAt}ms`);
+    }
+  };
+
   try {
     const { restauranteId, nomeCliente, telefoneCliente, itens } = req.body;
 
+    log("REQUEST RECEBIDA /abrirPedidoBalcao", {
+      path: req.originalUrl || req.url,
+      role: req.role,
+      userId: req.user?._id || req.user?.id || null,
+      restauranteIdBody: restauranteId,
+      itensLength: Array.isArray(itens) ? itens.length : 0,
+      total: req.body?.total,
+      metodo: req.body?.metodo || req.body?.formaPagamento || null,
+    });
+
     if (!restauranteId) {
+      log("ERRO restauranteId ausente");
       return res.status(400).json({ message: "Envie restauranteId." });
     }
 
+    log("INICIO exigirCaixaAberto");
+    const caixaInicio = Date.now();
+    const caixa = await exigirCaixaAberto(restauranteId);
+    log("FIM exigirCaixaAberto", { etapaMs: Date.now() - caixaInicio, caixaId: caixa?._id || caixa?.id || null });
+
+    log("INICIO normalizarItens");
     const itensIniciais = normalizarItensBalcao(itens);
     const totalBrutoInicial = round2(itensIniciais.reduce((acc, i) => acc + toNum(i.precoTotal), 0));
     const descontoInicial = Math.min(round2(Math.max(0, toNum(req.body?.descontoValor ?? req.body?.valorDesconto ?? req.body?.desconto ?? 0))), totalBrutoInicial);
     const totalInicial = round2(Math.max(0, totalBrutoInicial - descontoInicial));
+    log("FIM normalizarItens", { itens: itensIniciais.length, totalInicial });
 
-    const numeroPedido = await gerarProximoNumeroBalcao(restauranteId);
+    log("INICIO gerarProximoNumeroBalcao");
+    const numeroInicio = Date.now();
+    const numeroPedido = await gerarProximoNumeroBalcao(restauranteId, log);
+    log("FIM gerarProximoNumeroBalcao", { etapaMs: Date.now() - numeroInicio, numeroPedido });
+
+    const agoraPedido = new Date();
 
     const novoPedido = new Pedido({
       numeroPedido,
@@ -481,6 +587,8 @@ exports.abrirPedidoBalcao = async (req, res) => {
       pagamentos: [],
       valorPago: 0,
       valorPendente: totalInicial,
+      criadoEm: agoraPedido,
+      created_at: agoraPedido,
     });
 
     // se for garçom abrindo no balcão (caso use)
@@ -492,15 +600,25 @@ exports.abrirPedidoBalcao = async (req, res) => {
       }
     }
 
+    log("INICIO vincularPedidoAoCaixa");
+    const vincularInicio = Date.now();
+    await vincularPedidoAoCaixa(novoPedido, caixa);
+    log("FIM vincularPedidoAoCaixa", { etapaMs: Date.now() - vincularInicio });
+
+    log("INICIO salvarPedido");
+    const salvarInicio = Date.now();
     await novoPedido.save();
+    log("FIM salvarPedido", { etapaMs: Date.now() - salvarInicio, pedidoId: novoPedido?._id || novoPedido?.id || null });
 
     if (req.io) {
       // Não dispara "novoPedido" aqui: balcão com PIX ainda pendente não deve tocar notificação no desktop.
       req.io.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", novoPedido);
     }
 
+    log("RESPOSTA ENVIADA", { status: 201, totalMs: Date.now() - startedAt });
     return res.status(201).json({ pedido: novoPedido });
   } catch (error) {
+    log("ERRO abrirPedidoBalcao", { message: error?.message, stack: error?.stack });
     return res.status(500).json({ message: "Erro ao abrir pedido balcão", error: error?.message });
   }
 };
@@ -617,6 +735,9 @@ exports.registrarPagamentoBalcao = async (req, res) => {
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
 
+    const caixa = await exigirCaixaAberto(pedido.restaurante || req.body?.restauranteId);
+    await vincularPedidoAoCaixa(pedido, caixa);
+
     // Compat: se o app do garçom mandar pagamento junto com itens, garante que nada seja impresso zerado/vazio.
     const itensBody = normalizarItensBalcao(req.body?.itens);
     if (itensBody.length && (!Array.isArray(pedido.itens) || pedido.itens.length === 0)) {
@@ -688,10 +809,14 @@ exports.registrarPagamentoBalcao = async (req, res) => {
       return res.json({ ok: true, fechado: true, ...out });
     }
 
+    await registrarPagamentosConfirmadosNoCaixa({ pedido, caixa, restauranteId: pedido.restaurante || req.body?.restauranteId });
+    await recalcularCaixa(caixa._id || caixa.id);
     await pedido.save();
 
     if (req.io) {
-      req.io.to(`restaurante-${String(pedido.restaurante)}`).emit("pedidoAtualizado", pedido);
+      const room = `restaurante-${String(pedido.restaurante)}`;
+      req.io.to(room).emit("pedidoAtualizado", pedido);
+      req.io.to(room).emit("balcaoAtualizado", pedido);
     }
 
     return res.json({ ok: true, fechado: false, pedido, total, pago, pendente });
@@ -715,6 +840,9 @@ exports.gerarPixBalcao = async (req, res) => {
         : await Pedido.findById(pedidoId);
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    const caixa = await exigirCaixaAberto(pedido.restaurante || req.body?.restauranteId);
+    await vincularPedidoAoCaixa(pedido, caixa);
 
     const descontoBody = req.body?.descontoValor ?? req.body?.valorDesconto ?? req.body?.desconto;
     if (descontoBody !== undefined && descontoBody !== null && String(descontoBody).trim() !== "") {
@@ -844,6 +972,9 @@ exports.statusPixBalcao = async (req, res) => {
         : await Pedido.findById(pedidoId);
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    const caixa = await exigirCaixaAberto(pedido.restaurante);
+    await vincularPedidoAoCaixa(pedido, caixa);
 
     const restaurante = await Restaurante.findById(pedido.restaurante).select("mercadoPago");
     const accessToken = restaurante?.mercadoPago?.accessToken;

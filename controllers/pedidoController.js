@@ -1,5 +1,7 @@
 // controllers/pedidoController.js
 const mongoose = require("../lib/mongoId");
+const { pool } = require("../db/mysql");
+const { queryWithRetry } = require("../lib/mysqlRetry");
 const crypto = require("crypto");
 const { MercadoPagoConfig, Payment } = require("mercadopago");
 
@@ -11,6 +13,47 @@ const Produto = require("../models/Produto");
 const Frete = require("../models/Frete");
 
 const { enviarMensagem } = require("../utils/bot");
+
+/* =========================================================
+   HELPERS DE PERFORMANCE - APP GARÇOM / HUB
+   Evita Pedido.find({ restaurante }) via adapter MySQL, que carrega
+   a tabela inteira em memória antes de filtrar.
+========================================================= */
+function parseJsonSafe(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function rowToPedidoLean(row = {}) {
+  const pedido = { ...row };
+  pedido._id = row.id;
+  pedido.id = row.id;
+  pedido.valorTotal = Number(row.total ?? row.valorTotal ?? 0) || 0;
+  pedido.total = Number(row.total ?? row.valorTotal ?? 0) || 0;
+  pedido.valorPago = Number(row.valorPago ?? 0) || 0;
+  pedido.valorPendente = Number(row.valorPendente ?? 0) || 0;
+  pedido.taxaEntrega = Number(row.taxaEntrega ?? 0) || 0;
+  pedido.descontoValor = Number(row.descontoValor ?? 0) || 0;
+  pedido.valorDesconto = Number(row.valorDesconto ?? 0) || 0;
+  pedido.totalBruto = Number(row.totalBruto ?? 0) || 0;
+  pedido.formadePagamento = row.formaPagamento || row.formadePagamento || "";
+  pedido.formaPagamento = row.formaPagamento || row.formadePagamento || "";
+  pedido.itens = parseJsonSafe(row.itens, []);
+  pedido.pagamentos = parseJsonSafe(row.pagamentos, []);
+  pedido.pagamento = parseJsonSafe(row.pagamento, null);
+  return pedido;
+}
+
+function dataInicioFimSql(dataInicio, dataFim) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const hoje = new Date();
+  const hojeStr = `${hoje.getFullYear()}-${pad(hoje.getMonth() + 1)}-${pad(hoje.getDate())}`;
+  const ini = dataInicio || hojeStr;
+  const fim = dataFim || ini;
+  return { inicio: `${ini} 00:00:00`, fim: `${fim} 23:59:59` };
+}
+
 
 /* =========================================================
    HELPERS (gerais + MP)
@@ -36,23 +79,58 @@ function canReuseBalcaoPedido(pedido) {
   return st === "aguardando_pagamento" && pend > 0.00001;
 }
 
-async function gerarProximoNumeroBalcao(restauranteId) {
-  // Sequência BK única para balcão no Desktop e no app Garçom.
-  // Não depende do último criadoEm, porque registros antigos/legados podem vir fora de ordem.
-  const pedidos = await Pedido.find({
-    restaurante: restauranteId,
-    numeroPedido: { $regex: "^BK" },
-  })
-    .select("numeroPedido")
-    .lean();
+async function gerarProximoNumeroBalcao(restauranteId, debugLog = null) {
+  // PERFORMANCE CRÍTICA:
+  // A versão antiga fazia Pedido.find({ restaurante, numeroPedido: /^BK/ }) e o factory MySQL
+  // carregava a tabela inteira de pedidos em memória antes de filtrar. Em bases grandes isso
+  // passava de 15s e estourava timeout no Movyo Hub Garçom > Pedido Balcão.
+  const prefixo = "BK";
+  const log = typeof debugLog === "function" ? debugLog : () => {};
 
-  const regex = /^BK(\d+)$/i;
-  const maior = (Array.isArray(pedidos) ? pedidos : []).reduce((max, p) => {
-    const n = Number(String(p?.numeroPedido || "").match(regex)?.[1] || 0);
-    return Number.isFinite(n) && n > max ? n : max;
-  }, 0);
+  if (!restauranteId) return `${prefixo}00001`;
 
-  return `BK${String(maior + 1).padStart(5, "0")}`;
+  try {
+    log("SQL gerarProximoNumeroBalcao:start", { restauranteId });
+
+    const [rows] = await pool.query(
+      `SELECT MAX(CAST(SUBSTRING(numeroPedido, 3) AS UNSIGNED)) AS maior
+         FROM pedidos
+        WHERE restaurante = ?
+          AND numeroPedido LIKE 'BK%'
+          AND numeroPedido REGEXP '^BK[0-9]+$'`,
+      [String(restauranteId)]
+    );
+
+    const maior = Number(rows?.[0]?.maior || 0);
+    const numero = `${prefixo}${String(maior + 1).padStart(5, "0")}`;
+
+    log("SQL gerarProximoNumeroBalcao:fim", { maior, numero });
+    return numero;
+  } catch (err) {
+    // Fallback seguro: se o MySQL antigo não aceitar REGEXP/CAST por algum motivo,
+    // ainda evita buscar a tabela inteira. Busca só os últimos candidatos do restaurante.
+    log("SQL gerarProximoNumeroBalcao:fallback", { erro: err?.message });
+
+    const [rows] = await pool.query(
+      `SELECT numeroPedido
+         FROM pedidos
+        WHERE restaurante = ?
+          AND numeroPedido LIKE 'BK%'
+        ORDER BY criadoEm DESC
+        LIMIT 300`,
+      [String(restauranteId)]
+    );
+
+    const regex = /^BK(\d+)$/i;
+    const maior = (Array.isArray(rows) ? rows : []).reduce((max, p) => {
+      const n = Number(String(p?.numeroPedido || "").match(regex)?.[1] || 0);
+      return Number.isFinite(n) && n > max ? n : max;
+    }, 0);
+
+    const numero = `${prefixo}${String(maior + 1).padStart(5, "0")}`;
+    log("SQL gerarProximoNumeroBalcao:fallback-fim", { maior, numero });
+    return numero;
+  }
 }
 
 function sumPagamentosConfirmados(pedido) {
@@ -1090,52 +1168,57 @@ const listarPedidosPorRestaurante = async (req, res) => {
     const { status, origem, somenteMesa, somenteBalcao, page = 1, limit = 200, dataInicio, dataFim } =
       req.query;
 
-    const query = { restaurante: restauranteId };
-    if (origem) query.origem = origem;
-
-    // O adapter MySQL do projeto não suporta bem $nin/$exists em todos os pontos.
-    // Por isso buscamos pelo restaurante e aplicamos os filtros de status em JS, garantindo
-    // que aguardando_pagamento não suma tudo da tela nem contamine a listagem padrão.
-    let pedidosBase = await Pedido.find(query).populate("entregador").sort({ createdAt: -1, criadoEm: -1 });
-    pedidosBase = Array.isArray(pedidosBase) ? pedidosBase : [];
-
-    const statusBloqueadosPadrao = new Set(["aguardando_pagamento", "pagamento_pendente"]);
-    const norm = (v) => String(v || "").trim().toLowerCase();
-
-    let pedidosFiltrados = pedidosBase.filter((pedido) => {
-      const st = norm(pedido?.status);
-      const stPag = norm(pedido?.statusPagamento);
-
-      if (status) {
-        if (st !== norm(status)) return false;
-      } else if (statusBloqueadosPadrao.has(st) || statusBloqueadosPadrao.has(stPag)) {
-        return false;
-      }
-
-      if (somenteMesa === "true" && !pedido?.mesaId) return false;
-      if (somenteBalcao === "true" && pedido?.mesaId) return false;
-
-      if (dataInicio || dataFim) {
-        // Usa horário local do servidor para bater com o "dia" exibido no app do garçom.
-        const inicio = dataInicio ? new Date(`${dataInicio}T00:00:00.000`) : null;
-        const fim = dataFim ? new Date(`${dataFim}T23:59:59.999`) : null;
-        const rawDate = pedido?.createdAt || pedido?.criadoEm;
-        const dt = rawDate ? new Date(rawDate) : null;
-        if (!dt || Number.isNaN(dt.getTime())) return false;
-        if (inicio && dt < inicio) return false;
-        if (fim && dt > fim) return false;
-      }
-
-      return true;
-    });
+    if (!restauranteId) {
+      return res.status(400).json({ message: "Restaurante é obrigatório." });
+    }
 
     const pageNum = Math.max(1, Number(page) || 1);
-    const limitNum = Math.min(500, Math.max(1, Number(limit) || 200));
-    const skip = (pageNum - 1) * limitNum;
-    const total = pedidosFiltrados.length;
-    const pedidos = pedidosFiltrados.slice(skip, skip + limitNum);
+    const limitNum = Math.min(300, Math.max(1, Number(limit) || 200));
+    const offset = (pageNum - 1) * limitNum;
+    const { inicio, fim } = dataInicioFimSql(dataInicio, dataFim);
 
-    res.json({ total, page: pageNum, limit: limitNum, pedidos });
+    const where = ["restaurante = ?"];
+    const params = [String(restauranteId)];
+
+    if (origem) {
+      where.push("origem = ?");
+      params.push(String(origem));
+    }
+
+    if (status) {
+      where.push("status = ?");
+      params.push(String(status));
+    } else {
+      where.push("(status IS NULL OR status NOT IN ('aguardando_pagamento','pagamento_pendente'))");
+      where.push("(statusPagamento IS NULL OR statusPagamento NOT IN ('aguardando_pagamento','pagamento_pendente'))");
+    }
+
+    if (somenteMesa === "true") where.push("mesaId IS NOT NULL AND mesaId <> ''");
+    if (somenteBalcao === "true") where.push("(mesaId IS NULL OR mesaId = '')");
+
+    if (dataInicio || dataFim) {
+      where.push("criadoEm >= ? AND criadoEm <= ?");
+      params.push(inicio, fim);
+    }
+
+    const whereSql = where.join(" AND ");
+
+    const [[countRow]] = await queryWithRetry(
+      `SELECT COUNT(*) AS total FROM pedidos WHERE ${whereSql}`,
+      params
+    );
+
+    const [rows] = await queryWithRetry(
+      `SELECT *
+         FROM pedidos
+        WHERE ${whereSql}
+        ORDER BY criadoEm DESC, created_at DESC, id DESC
+        LIMIT ? OFFSET ?`,
+      [...params, limitNum, offset]
+    );
+
+    const pedidos = rows.map(rowToPedidoLean);
+    return res.json({ total: Number(countRow?.total || 0), page: pageNum, limit: limitNum, pedidos });
   } catch (error) {
     console.error("Erro ao buscar pedidos:", error);
     res.status(500).json({
@@ -1613,6 +1696,151 @@ const listarPedidos = async (req, res) => {
     return listarPedidosPorRestaurante(req, res);
   } catch (err) {
     return res.status(500).json({ message: "Erro ao listar pedidos.", error: err.message });
+  }
+};
+
+
+/* =========================================================
+   GARÇOM APP: MARCAR PEDIDO DO BALCÃO COMO ENTREGUE
+========================================================= */
+const marcarPedidoEntregueApp = async (req, res) => {
+  try {
+    const { pedidoId } = req.params;
+    const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
+    if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
+
+    if (!mongoose.Types.ObjectId.isValid(String(pedidoId))) {
+      return res.status(400).json({ message: "pedidoId inválido." });
+    }
+
+    const pedido = await Pedido.findById(pedidoId);
+    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    if (String(pedido.restaurante) !== String(restauranteId)) {
+      return res.status(403).json({ message: "Pedido não pertence a este restaurante." });
+    }
+
+    const norm = (v) => String(v || "").trim().toLowerCase();
+    const pagamento = norm(pedido.formaPagamento || pedido.formadePagamento || pedido.metodoPagamento || pedido.pagamento?.metodo);
+    const isDinheiro = pagamento.includes("dinheiro") || pagamento.includes("cash") || norm(pedido.statusPagamento) === "pago_dinheiro";
+
+    if (!isDinheiro) {
+      return res.status(409).json({ message: "A entrega pelo app do garçom está liberada apenas para pagamento em dinheiro." });
+    }
+
+    const statusAtual = norm(pedido.status);
+    if (["cancelado", "entregue", "finalizado"].includes(statusAtual)) {
+      return res.json({ ok: true, message: "Pedido já está finalizado.", pedido });
+    }
+
+    const agora = new Date();
+    const total = Number(pedido.valorTotal ?? pedido.total ?? 0) || 0;
+
+    pedido.status = "entregue";
+    pedido.statusPagamento = pedido.statusPagamento || "pago";
+    pedido.entregueEm = pedido.entregueEm || agora;
+    pedido.fechadoEm = pedido.fechadoEm || agora;
+    pedido.pagoEm = pedido.pagoEm || agora;
+    pedido.valorPago = Number(pedido.valorPago || 0) > 0 ? pedido.valorPago : total;
+    pedido.valorPendente = 0;
+
+    const garcomId = req.user?.garcomId || req.user?.id || req.userId || null;
+    const garcomNome = req.user?.nome || req.user?.apelido || req.garcom?.nome || null;
+    if (garcomId && !pedido.recebidoPor) pedido.recebidoPor = String(garcomId);
+    if (garcomNome && !pedido.recebidoPorNome) pedido.recebidoPorNome = garcomNome;
+
+    const itens = Array.isArray(pedido.itens) ? pedido.itens : [];
+    for (const it of itens) {
+      if (!it || typeof it !== "object") continue;
+      it.cozinha = it.cozinha && typeof it.cozinha === "object" ? it.cozinha : {};
+      const stItem = norm(it.cozinha.status || it.status);
+      if (!["cancelado", "entregue_mesa", "entregue_cliente"].includes(stItem)) {
+        it.cozinha.status = "entregue_cliente";
+        it.cozinha.entregueEm = it.cozinha.entregueEm || agora;
+        it.cozinha.atualizadoEm = agora;
+      }
+    }
+
+    if (typeof pedido.markModified === "function") pedido.markModified("itens");
+    await pedido.save();
+    try { await Pedido.findByIdAndUpdate(pedido._id, { $set: { itens: pedido.itens, status: pedido.status, statusPagamento: pedido.statusPagamento, entregueEm: pedido.entregueEm, fechadoEm: pedido.fechadoEm, pagoEm: pedido.pagoEm, valorPago: pedido.valorPago, valorPendente: pedido.valorPendente } }); } catch (_) {}
+
+    req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+    req.io?.to(`restaurante-${pedido.restaurante}`).emit("cozinhaPedidoEntregue", { pedidoId: String(pedido._id), numeroPedido: pedido.numeroPedido });
+
+    return res.json({ ok: true, message: "Pedido marcado como entregue.", pedido });
+  } catch (error) {
+    console.error("Erro ao marcar pedido como entregue no app do garçom:", error);
+    return res.status(500).json({ message: "Erro ao marcar pedido como entregue.", error: error.message });
+  }
+};
+
+
+const marcarItemPedidoEntregueApp = async (req, res) => {
+  try {
+    const { pedidoId, itemIndex } = req.params;
+    const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
+    if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
+
+    if (!mongoose.Types.ObjectId.isValid(String(pedidoId))) {
+      return res.status(400).json({ message: "pedidoId inválido." });
+    }
+
+    const idx = Number(itemIndex);
+    if (!Number.isInteger(idx) || idx < 0) {
+      return res.status(400).json({ message: "itemIndex inválido." });
+    }
+
+    const pedido = await Pedido.findById(pedidoId);
+    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    if (String(pedido.restaurante) !== String(restauranteId)) {
+      return res.status(403).json({ message: "Pedido não pertence a este restaurante." });
+    }
+
+    const norm = (v) => String(v || "").trim().toLowerCase();
+    const pagamento = norm(pedido.formaPagamento || pedido.formadePagamento || pedido.metodoPagamento || pedido.pagamento?.metodo);
+    const isDinheiro = pagamento.includes("dinheiro") || pagamento.includes("cash") || norm(pedido.statusPagamento) === "pago_dinheiro";
+    if (!isDinheiro) return res.status(409).json({ message: "Entrega manual liberada apenas para pagamento em dinheiro." });
+
+    const itens = Array.isArray(pedido.itens) ? pedido.itens : [];
+    if (idx >= itens.length) return res.status(404).json({ message: "Item não encontrado." });
+
+    const agora = new Date();
+    const it = itens[idx];
+    it.cozinha = it.cozinha && typeof it.cozinha === "object" ? it.cozinha : {};
+    it.cozinha.status = "entregue_cliente";
+    it.cozinha.entregueEm = it.cozinha.entregueEm || agora;
+    it.cozinha.atualizadoEm = agora;
+
+    const normItemStatus = (item) => norm(item?.cozinha?.status || item?.status);
+    const todosEntregues = itens.every((item) => {
+      const st = normItemStatus(item);
+      return ["cancelado", "entregue_mesa", "entregue_cliente", "entregue"].includes(st);
+    });
+
+    if (todosEntregues) {
+      const total = Number(pedido.valorTotal ?? pedido.total ?? 0) || 0;
+      pedido.status = "entregue";
+      pedido.statusPagamento = pedido.statusPagamento || "pago";
+      pedido.entregueEm = pedido.entregueEm || agora;
+      pedido.fechadoEm = pedido.fechadoEm || agora;
+      pedido.pagoEm = pedido.pagoEm || agora;
+      pedido.valorPago = Number(pedido.valorPago || 0) > 0 ? pedido.valorPago : total;
+      pedido.valorPendente = 0;
+    }
+
+    if (typeof pedido.markModified === "function") pedido.markModified("itens");
+    await pedido.save();
+    try { await Pedido.findByIdAndUpdate(pedido._id, { $set: { itens: pedido.itens, status: pedido.status, statusPagamento: pedido.statusPagamento, entregueEm: pedido.entregueEm, fechadoEm: pedido.fechadoEm, pagoEm: pedido.pagoEm, valorPago: pedido.valorPago, valorPendente: pedido.valorPendente } }); } catch (_) {}
+
+    req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+    req.io?.to(`restaurante-${pedido.restaurante}`).emit("cozinhaItemAtualizado", { pedidoId: String(pedido._id), numeroPedido: pedido.numeroPedido, itemIndex: idx, status: "entregue_cliente" });
+
+    return res.json({ ok: true, message: "Item marcado como entregue.", pedido });
+  } catch (error) {
+    console.error("Erro ao marcar item como entregue no app do garçom:", error);
+    return res.status(500).json({ message: "Erro ao marcar item como entregue.", error: error.message });
   }
 };
 
@@ -2273,6 +2501,8 @@ module.exports = {
   listarPedidosAtivos,
   resumoDoDia,
   listarPedidos,
+  marcarPedidoEntregueApp,
+  marcarItemPedidoEntregueApp,
   cancelarPedido,
   cancelarItemPedido,
   criarOuAtualizarPedidoBalcao,

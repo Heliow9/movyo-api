@@ -16,10 +16,19 @@ const { criarRecipient } = require("../services/criarRecipientPagarme");
 const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
+const { queryWithRetry } = require("../lib/mysqlRetry");
+const perfilCache = new Map();
+
+function parseJsonSafe(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
 
 // Gerar token JWT
-const gerarToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+const gerarToken = (id, sessaoVersao = 1) => {
+  return jwt.sign({ id, sessaoVersao: Number(sessaoVersao || 1) }, process.env.JWT_SECRET, { expiresIn: "7d" });
 };
 
 // remove chaves que NÃO podem ser atualizadas por /configuracoes
@@ -121,10 +130,12 @@ module.exports = {
         cnpj,
         slugIdentificador: slugNormalizado,
         localizacao,
+        plano: "free",
+        statusAssinatura: "ativo",
         // recipient_id,
       });
 
-      const token = gerarToken(novoRestaurante._id);
+      const token = gerarToken(novoRestaurante._id, novoRestaurante.sessaoVersao || 1);
       return res.status(201).json({ token, restaurante: novoRestaurante });
     } catch (error) {
       console.error(error);
@@ -205,7 +216,25 @@ module.exports = {
         return res.status(401).json({ mensagem: "Senha incorreta." });
       }
 
-      const token = gerarToken(restaurante._id);
+      const hojeLogin = new Date(); hojeLogin.setHours(0,0,0,0);
+      const fimPlanoLogin = restaurante?.dataFimPlano ? new Date(restaurante.dataFimPlano) : null;
+      const licencaVencidaLogin = fimPlanoLogin && !isNaN(fimPlanoLogin.getTime()) && fimPlanoLogin < hojeLogin;
+
+      if (licencaVencidaLogin) {
+        return res.status(403).json({
+          mensagem: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
+          code: "LICENCA_VENCIDA",
+        });
+      }
+
+      if (restaurante?.ativo === false || restaurante?.bloqueado === true || String(restaurante?.statusAssinatura || '').toLowerCase() === 'bloqueado') {
+        return res.status(403).json({
+          mensagem: "Restaurante bloqueado/desativado. Fale com o suporte Movyo.",
+          code: "RESTAURANTE_BLOQUEADO",
+        });
+      }
+
+      const token = gerarToken(restaurante._id, restaurante.sessaoVersao || 1);
       return res.status(200).json({ token, restaurante });
     } catch (error) {
       console.error(error);
@@ -263,6 +292,7 @@ module.exports = {
     res.send(req.body);
   },
 
+
   // GET /api/restaurantes/me (autenticado)
   async perfil(req, res) {
     try {
@@ -272,16 +302,35 @@ module.exports = {
         return res.status(401).json({ mensagem: "Restaurante não autenticado." });
       }
 
-      const restaurante = await Restaurante.findById(restauranteId);
+      const cacheMs = Number(process.env.RESTAURANTE_ME_CACHE_MS || 5000);
+      const cached = perfilCache.get(restauranteId);
+      if (cached && Date.now() - cached.ts < cacheMs) return res.json({ ...cached.payload, cache: true });
+
+      const [rows] = await queryWithRetry(
+        `SELECT id, nome, email, cnpj, telefone, enderecoCep, enderecoRua, enderecoNumero,
+                enderecoBairro, enderecoCidade, enderecoEstado, logoUrl, logoSlug, slugIdentificador,
+                horariosFuncionamento, tempoMedioEntregaMin, maxPedidosPorEntregador, pedidosPorEntregador,
+                anotaaiStatus, anotaaiUrl, anotaaiIdentificador, anotaaiToken,
+                ifoodStatus, ifoodIdentificador, ifoodPrecisaConfirmacao, ifoodIgnorarPronto, ifood,
+                localizacao, statusBot, ativo, mensagensPersonalizadas, chavePix, recipient_id,
+                mercadoPago, pagamentoCartaoAtivo, taxaCartaoCreditoAvistaPercent, garcons,
+                plano, statusAssinatura, dataInicioPlano, dataFimPlano, observacaoPlano,
+                dataCadastro, created_at, updated_at
+           FROM restaurantes
+          WHERE id = ?
+          LIMIT 1`,
+        [restauranteId],
+        { label: 'restaurantes.me' }
+      );
+      const restaurante = rows?.[0];
       if (!restaurante) {
         return res.status(404).json({ mensagem: "Restaurante não encontrado." });
       }
 
-      // Resposta limpa para o front. Não devolve objeto estilo Mongoose, senha, helpers internos
-      // nem qualquer campo legado de MongoDB. A API segue usando MySQL.
+      const parse = parseJsonSafe;
       const payload = {
-        id: restaurante.id || restaurante._id,
-        _id: restaurante._id || restaurante.id, // compatibilidade com front/app já existente
+        id: restaurante.id,
+        _id: restaurante.id,
         nome: restaurante.nome || "",
         email: restaurante.email || "",
         cnpj: restaurante.cnpj || "",
@@ -295,39 +344,44 @@ module.exports = {
         logoUrl: restaurante.logoUrl || "",
         logoSlug: restaurante.logoSlug || "",
         slugIdentificador: restaurante.slugIdentificador || "",
-        horariosFuncionamento: restaurante.horariosFuncionamento || {},
+        horariosFuncionamento: parse(restaurante.horariosFuncionamento, {}),
         tempoMedioEntregaMin: restaurante.tempoMedioEntregaMin ?? 45,
         maxPedidosPorEntregador: restaurante.maxPedidosPorEntregador ?? restaurante.pedidosPorEntregador ?? 3,
         pedidosPorEntregador: restaurante.pedidosPorEntregador ?? restaurante.maxPedidosPorEntregador ?? 3,
-        anotaaiStatus: !!restaurante.anotaaiStatus,
+        anotaaiStatus: restaurante.anotaaiStatus === 1 || restaurante.anotaaiStatus === true,
         anotaaiUrl: restaurante.anotaaiUrl || "",
         anotaaiIdentificador: restaurante.anotaaiIdentificador || "",
         anotaaiToken: restaurante.anotaaiToken || "",
-        ifoodStatus: !!restaurante.ifoodStatus,
+        ifoodStatus: restaurante.ifoodStatus === 1 || restaurante.ifoodStatus === true,
         ifoodIdentificador: restaurante.ifoodIdentificador || "",
-        ifoodPrecisaConfirmacao: !!restaurante.ifoodPrecisaConfirmacao,
-        ifoodIgnorarPronto: !!restaurante.ifoodIgnorarPronto,
-        ifood: restaurante.ifood || {},
-        localizacao: restaurante.localizacao || null,
-        statusBot: restaurante.statusBot || {},
-        ativo: restaurante.ativo !== false,
-        mensagensPersonalizadas: restaurante.mensagensPersonalizadas || {},
+        ifoodPrecisaConfirmacao: restaurante.ifoodPrecisaConfirmacao === 1 || restaurante.ifoodPrecisaConfirmacao === true,
+        ifoodIgnorarPronto: restaurante.ifoodIgnorarPronto === 1 || restaurante.ifoodIgnorarPronto === true,
+        ifood: parse(restaurante.ifood, {}),
+        localizacao: parse(restaurante.localizacao, null),
+        statusBot: parse(restaurante.statusBot, {}),
+        ativo: restaurante.ativo !== 0 && restaurante.ativo !== false,
+        mensagensPersonalizadas: parse(restaurante.mensagensPersonalizadas, {}),
         chavePix: restaurante.chavePix || "",
         recipient_id: restaurante.recipient_id || "",
-        mercadoPago: restaurante.mercadoPago || {},
-        pagamentoCartaoAtivo: restaurante.pagamentoCartaoAtivo !== false,
+        mercadoPago: parse(restaurante.mercadoPago, {}),
+        pagamentoCartaoAtivo: restaurante.pagamentoCartaoAtivo !== 0 && restaurante.pagamentoCartaoAtivo !== false,
         taxaCartaoCreditoAvistaPercent: Number(restaurante.taxaCartaoCreditoAvistaPercent ?? 3.8),
-        garcons: Array.isArray(restaurante.garcons) ? restaurante.garcons : [],
-        plano: restaurante.plano || "anual",
-        dataCadastro: restaurante.dataCadastro || restaurante.createdAt || null,
-        createdAt: restaurante.createdAt || null,
-        updatedAt: restaurante.updatedAt || null,
+        garcons: parse(restaurante.garcons, []),
+        plano: restaurante.plano || "free",
+        statusAssinatura: restaurante.statusAssinatura || "ativo",
+        dataInicioPlano: restaurante.dataInicioPlano || null,
+        dataFimPlano: restaurante.dataFimPlano || null,
+        observacaoPlano: restaurante.observacaoPlano || "",
+        dataCadastro: restaurante.dataCadastro || restaurante.created_at || null,
+        createdAt: restaurante.created_at || null,
+        updatedAt: restaurante.updated_at || null,
       };
 
+      perfilCache.set(restauranteId, { ts: Date.now(), payload });
       return res.json(payload);
     } catch (error) {
       console.error("Erro em /api/restaurantes/me:", error);
-      return res.status(500).json({ mensagem: "Erro ao buscar restaurante.", erro: error.message });
+      return res.status(500).json({ mensagem: "Erro ao buscar restaurante.", erro: error.message, code: error.code });
     }
   },
 

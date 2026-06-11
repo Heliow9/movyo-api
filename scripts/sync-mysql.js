@@ -1,23 +1,34 @@
 require('dotenv').config();
-require('../models/Restaurante');
-require('../models/CategoriaProduto');
-require('../models/Produto');
-require('../models/Pedido');
-require('../models/Cliente');
-require('../models/Entregador');
-require('../models/EntregadorOnline');
-require('../models/mesaModel');
-require('../models/pedidoMesaModel');
-require('../models/Frete');
-require('../models/Insumo');
-require('../models/MovimentoEstoque');
-require('../models/Receita');
-require('../models/OAuthState');
-require('../models/ImagemFavorita');
-require('../models/Adicional');
-require('../models/Borda');
-require('../models/Complemento');
-require('../models/Sabor');
+const fs = require('fs');
+const path = require('path');
 const { testConnection } = require('../db/mysql');
 const { syncAllModels } = require('../lib/mysqlModelFactory');
-(async()=>{ await testConnection(); await syncAllModels(); console.log('✅ Tabelas MySQL sincronizadas coluna por coluna.'); process.exit(0); })().catch(e=>{ console.error(e); process.exit(1); });
+
+const modelsDir = path.resolve(__dirname, '../models');
+
+function loadAllModels() {
+  const ignored = new Set(['_defs.js']);
+  const files = fs
+    .readdirSync(modelsDir)
+    .filter((file) => file.endsWith('.js') && !ignored.has(file))
+    .sort();
+
+  for (const file of files) {
+    const fullPath = path.join(modelsDir, file);
+    require(fullPath);
+    console.log(`✅ Model carregado: ${file}`);
+  }
+
+  console.log(`📦 Total de models carregados: ${files.length}`);
+}
+
+(async () => {
+  await testConnection();
+  loadAllModels();
+  await syncAllModels();
+  console.log('✅ Tabelas MySQL sincronizadas coluna por coluna com todos os models.');
+  process.exit(0);
+})().catch((error) => {
+  console.error('❌ Erro ao sincronizar MySQL:', error);
+  process.exit(1);
+});

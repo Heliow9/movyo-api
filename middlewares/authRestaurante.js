@@ -56,6 +56,47 @@ module.exports = async function authRestaurante(req, res, next) {
     // ✅ padrão: quando é restaurante/admin, pode deixar o decoded em req.user
     req.user = decoded;
 
+    // ✅ valida plano/assinatura e força logout quando o SaaS altera plano/status/vencimento.
+    const restAuth = await Restaurante.findById(req.restauranteId).select(
+      "garcons ativo bloqueado nome plano statusAssinatura dataFimPlano sessaoVersao"
+    );
+
+    if (!restAuth) return res.status(404).json({ mensagem: "Restaurante não encontrado." });
+
+    const hoje = new Date(); hoje.setHours(0,0,0,0);
+    const fimPlano = restAuth.dataFimPlano ? new Date(restAuth.dataFimPlano) : null;
+    const venceu = fimPlano && !isNaN(fimPlano.getTime()) && fimPlano < hoje;
+
+    if (venceu) {
+      // Licença vencida deve ser tratada como licença vencida, não como bloqueio/desativação.
+      // Não derrubamos sessaoVersao aqui para evitar o falso erro “Sua sessão foi atualizada”.
+      return res.status(403).json({
+        mensagem: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
+        code: "LICENCA_VENCIDA"
+      });
+    }
+
+    if (restAuth?.ativo === false || restAuth?.bloqueado === true || String(restAuth.statusAssinatura || '').toLowerCase() === 'bloqueado') {
+      return res.status(403).json({
+        mensagem: "Restaurante bloqueado/desativado. Fale com o suporte Movyo.",
+        code: "RESTAURANTE_BLOQUEADO",
+      });
+    }
+
+    // ATENÇÃO:
+    // O bloqueio por sessaoVersao causava falso logout no app do garçom/restaurante
+    // quando o cadastro do restaurante era salvo/atualizado no SaaS.
+    // Como este middleware já consulta o restaurante no banco em toda requisição,
+    // bloqueio real e licença vencida continuam sendo aplicados imediatamente acima.
+    const tokenVersao = Number(decoded.sessaoVersao || 1);
+    const bancoVersao = Number(restAuth.sessaoVersao || 1);
+    if (tokenVersao !== bancoVersao) {
+      req.sessaoDesatualizada = true;
+    }
+
+    req.restaurante = restAuth;
+    req.plano = restAuth.plano || 'free';
+
     // =========================
     // ✅ MODO GARÇOM
     // =========================
@@ -75,20 +116,8 @@ module.exports = async function authRestaurante(req, res, next) {
         return res.status(401).json({ mensagem: "Garçom não autenticado." });
       }
 
-      // ✅ busca restaurante e subdoc do garçom
-      const rest = await Restaurante.findById(req.restauranteId).select(
-        "garcons ativo bloqueado nome"
-      );
-
-      if (!rest) return res.status(404).json({ mensagem: "Restaurante não encontrado." });
-
-      // (Opcional) trava restaurante
-      if (rest?.ativo === false || rest?.bloqueado === true) {
-        return res.status(403).json({
-          mensagem: "Restaurante desativado/bloqueado. Fale com o gerente.",
-          code: "RESTAURANTE_BLOQUEADO",
-        });
-      }
+      // ✅ usa restaurante já validado acima
+      const rest = restAuth;
 
       // MySQL: garcons vem como JSON array, não subdocumento Mongoose.
       const garcons = Array.isArray(rest.garcons) ? rest.garcons : [];

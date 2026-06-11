@@ -14,6 +14,7 @@ const { iniciarBot } = require("./utils/bot");
 const Restaurante = require("./models/Restaurante");
 const { testConnection } = require("./db/mysql");
 const { syncAllModels } = require("./lib/mysqlModelFactory");
+const apiMonitor = require("./utils/apiMonitor");
 
 const mercadoPagoPublicoRoutes = require("./routes/mercadoPagoPublicoRoutes");
 const garcomRoutes = require("./routes/garcomRoutes");
@@ -82,6 +83,7 @@ app.use((req, res, next) => {
   const startedAt = Date.now();
   res.on("finish", () => {
     const ms = Date.now() - startedAt;
+    apiMonitor.captureRequest(req, res, ms);
     if (ms > 1000) {
       console.warn(`🐢 Rota lenta: ${req.method} ${req.originalUrl} -> ${res.statusCode} em ${ms}ms`);
     }
@@ -109,6 +111,7 @@ try {
 // ROTAS PADRONIZADAS
 // -------------------------------
 app.use("/api/restaurantes", require("./routes/restauranteRoutes"));
+app.use("/api/saas", require("./routes/saasRoutes"));
 app.use("/api/categorias", require("./routes/categoriaProdutoRoutes"));
 app.use("/api/produtos", require("./routes/ProdutosRoutes"));
 app.use("/api/bot", require("./routes/botRoutes"));
@@ -153,11 +156,13 @@ app.get("/api/health", (req, res) => {
    ========================================================= */
 process.on("unhandledRejection", (reason) => {
   console.error("🛑 unhandledRejection:", reason);
+  apiMonitor.captureError(reason instanceof Error ? reason : new Error(String(reason)));
   // não derruba o servidor
 });
 
 process.on("uncaughtException", (err) => {
   console.error("🛑 uncaughtException:", err);
+  apiMonitor.captureError(err);
   // não derruba o servidor (recomendado em produção usar PM2/Docker pra restart)
 });
 

@@ -124,6 +124,18 @@ router.post(
   pedidoController.cancelarItemPedido
 );
 
+router.post(
+  "/app/pedido/:pedidoId/item/:itemIndex/entregar",
+  checkPermissao("verPedidos"),
+  pedidoController.marcarItemPedidoEntregueApp
+);
+
+router.post(
+  "/app/pedido/:pedidoId/entregar",
+  checkPermissao("verPedidos"),
+  pedidoController.marcarPedidoEntregueApp
+);
+
 /* =========================
    ✅ PAINEL DO RESTAURANTE
 ========================= */

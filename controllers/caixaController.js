@@ -2,7 +2,7 @@ const OperadorCaixa = require('../models/OperadorCaixa');
 const CaixaSessao = require('../models/CaixaSessao');
 const CaixaMovimento = require('../models/CaixaMovimento');
 const Pedido = require('../models/Pedido');
-const { getCaixaAberto, exigirCaixaAberto, recalcularCaixa, round2, toNum, normalizeFormaPagamento } = require('../services/caixaService');
+const { getCaixaAberto, exigirCaixaAberto, recalcularCaixa, montarCaixaComTotais, round2, toNum, normalizeFormaPagamento } = require('../services/caixaService');
 
 function restauranteIdFromReq(req) {
   return req.params.restauranteId || req.body.restauranteId || req.query.restauranteId || req.userId || req.restauranteId;
@@ -53,13 +53,25 @@ exports.alternarOperador = async (req, res) => {
   } catch (e) { res.status(500).json({ message: 'Erro ao alterar operador.', error: e.message }); }
 };
 
+const caixaAtualCache = new Map();
+const CAIXA_ATUAL_CACHE_MS = Number(process.env.CAIXA_ATUAL_CACHE_MS || 5000);
+
 exports.caixaAtual = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
+    if (!restauranteId) return res.status(400).json({ message: 'restauranteId é obrigatório.' });
+
+    const cacheKey = String(restauranteId);
+    const cached = caixaAtualCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < CAIXA_ATUAL_CACHE_MS && req.query.recalc !== '1') {
+      return res.json({ ...cached.data, cache: true });
+    }
+
     const caixa = await getCaixaAberto(restauranteId);
-    if (caixa?._id) await recalcularCaixa(caixa._id);
-    const atualizado = caixa?._id ? await CaixaSessao.findById(caixa._id) : null;
-    res.json({ aberto: !!atualizado, caixa: atualizado || null });
+    const atualizado = caixa?._id ? await montarCaixaComTotais(caixa) : null;
+    const payload = { aberto: !!atualizado, caixa: atualizado || null };
+    caixaAtualCache.set(cacheKey, { ts: Date.now(), data: payload });
+    res.json(payload);
   } catch (e) { res.status(500).json({ message: 'Erro ao consultar caixa atual.', error: e.message }); }
 };
 

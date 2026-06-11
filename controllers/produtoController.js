@@ -1,6 +1,7 @@
 // controllers/produtoController.js
 const Produto = require("../models/Produto");
 const CategoriaProduto = require("../models/CategoriaProduto");
+const { queryWithRetry } = require("../lib/mysqlRetry");
 
 /** =========================
  * Helpers
@@ -80,6 +81,20 @@ function normalizeProdutoListResponse(list) {
   return Array.isArray(list) ? list.map(normalizeProdutoResponse) : [];
 }
 
+
+function parseJsonSafe(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
+function boolFromDb(value, fallback = false) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  return ["1", "true", "sim", "yes"].includes(String(value).toLowerCase());
+}
+
 /** =========================
  * Criar produto
  * ========================= */
@@ -121,76 +136,80 @@ const editarProduto = async (req, res) => {
 const getProdutosPorRestaurante = async (req, res) => {
   const { restauranteId } = req.params;
   try {
-    // mysqlModelFactory ainda não faz populate real.
-    // Por isso buscamos as categorias manualmente para o app garçom/balcão
-    // receber categoria.nome em vez do ID da categoria.
-    const [produtos, categorias] = await Promise.all([
-      Produto.find({ restaurante: restauranteId }),
-      CategoriaProduto.find({ restaurante: restauranteId }),
-    ]);
+    if (!restauranteId) return res.status(400).json({ erro: "restauranteId é obrigatório." });
 
-    const categoriaMap = new Map(
-      (categorias || []).map((cat) => {
-        const plain = typeof cat?.toObject === "function" ? cat.toObject() : cat;
-        return [String(plain?._id || plain?.id || ""), plain];
-      })
+    // Performance/estabilidade: uma única consulta com JOIN e retry contra ECONNRESET.
+    const [rows] = await queryWithRetry(
+      `SELECT p.*, c.id AS categoriaJoinId, c.nome AS categoriaJoinNome, c.ordem AS categoriaJoinOrdem,
+              c.ativa AS categoriaJoinAtiva, c.permiteSabores AS categoriaJoinPermiteSabores,
+              c.pizzaMultisabor AS categoriaJoinPizzaMultisabor, c.calculoPrecoPor AS categoriaJoinCalculoPrecoPor,
+              c.maxSabores AS categoriaJoinMaxSabores, c.tiposExtras AS categoriaJoinTiposExtras,
+              c.saboresDisponiveis AS categoriaJoinSaboresDisponiveis,
+              c.bordasDisponiveis AS categoriaJoinBordasDisponiveis,
+              c.adicionaisDisponiveis AS categoriaJoinAdicionaisDisponiveis,
+              c.complementosDisponiveis AS categoriaJoinComplementosDisponiveis
+         FROM produtos p
+    LEFT JOIN categorias_produto c ON c.id = p.categoria
+        WHERE p.restaurante = ?
+        ORDER BY COALESCE(p.ordem, 0), p.nome`,
+      [String(restauranteId)],
+      { label: "produtos.porRestaurante" }
     );
 
-    // ✅ proteção contra duplicação visual quando o banco/API retorna linhas repetidas.
     const vistos = new Set();
-    const produtosUnicos = (produtos || []).filter((p) => {
-      const id = String(p?._id || p?.id || '');
+    const produtosNormalizados = (rows || []).filter((row) => {
+      const id = String(row?.id || row?._id || "");
       if (!id) return true;
       if (vistos.has(id)) return false;
       vistos.add(id);
       return true;
-    });
+    }).map((row) => {
+      const categoriaId = String(row.categoria || row.categoriaJoinId || "");
+      const produto = normalizeProdutoResponse({
+        ...row,
+        _id: row.id,
+        id: row.id,
+        extras: parseJsonSafe(row.extras, []),
+        estoque: parseJsonSafe(row.estoque, {}),
+        sabores: parseJsonSafe(row.sabores, []),
+        bordas: parseJsonSafe(row.bordas, []),
+        adicionais: parseJsonSafe(row.adicionais, []),
+        complementos: parseJsonSafe(row.complementos, []),
+      });
 
-    const produtosNormalizados = normalizeProdutoListResponse(produtosUnicos).map((produto) => {
-      const categoriaId = String(
-        produto?.categoria?._id ||
-        produto?.categoria?.id ||
-        produto?.categoria ||
-        ""
-      );
-      const categoria = categoriaMap.get(categoriaId);
-
-      if (!categoria) {
-        return {
-          ...produto,
-          categoria: categoriaId || null,
-          categoriaId: categoriaId || null,
-          categoriaNome: "Sem categoria",
-        };
-      }
-
+      const categoriaExiste = !!row.categoriaJoinId;
       return {
         ...produto,
-        categoria: {
-          _id: categoria._id || categoria.id || categoriaId,
-          id: categoria.id || categoria._id || categoriaId,
-          nome: categoria.nome || "Sem categoria",
-          ordem: Number(categoria.ordem || 0),
-          ativa: categoria.ativa !== false,
-          permiteSabores: categoria.permiteSabores === true,
-          pizzaMultisabor: categoria.pizzaMultisabor === true,
-          calculoPrecoPor: categoria.calculoPrecoPor || "maior",
-          maxSabores: Number(categoria.maxSabores || 1),
-          tiposExtras: categoria.tiposExtras || [],
-          saboresDisponiveis: categoria.saboresDisponiveis || [],
-          bordasDisponiveis: categoria.bordasDisponiveis || [],
-          adicionaisDisponiveis: categoria.adicionaisDisponiveis || [],
-          complementosDisponiveis: categoria.complementosDisponiveis || [],
-        },
-        categoriaId,
-        categoriaNome: categoria.nome || "Sem categoria",
+        ativo: boolFromDb(row.ativo, true),
+        ativoVitrine: boolFromDb(row.ativoVitrine, true),
+        disponivel: boolFromDb(row.disponivel, true),
+        destaque: boolFromDb(row.destaque, false),
+        imprimeNaCozinha: boolFromDb(row.imprimeNaCozinha, true),
+        categoria: categoriaExiste ? {
+          _id: row.categoriaJoinId,
+          id: row.categoriaJoinId,
+          nome: row.categoriaJoinNome || "Sem categoria",
+          ordem: Number(row.categoriaJoinOrdem || 0),
+          ativa: boolFromDb(row.categoriaJoinAtiva, true),
+          permiteSabores: boolFromDb(row.categoriaJoinPermiteSabores, false),
+          pizzaMultisabor: boolFromDb(row.categoriaJoinPizzaMultisabor, false),
+          calculoPrecoPor: row.categoriaJoinCalculoPrecoPor || "maior",
+          maxSabores: Number(row.categoriaJoinMaxSabores || 1),
+          tiposExtras: parseJsonSafe(row.categoriaJoinTiposExtras, []),
+          saboresDisponiveis: parseJsonSafe(row.categoriaJoinSaboresDisponiveis, []),
+          bordasDisponiveis: parseJsonSafe(row.categoriaJoinBordasDisponiveis, []),
+          adicionaisDisponiveis: parseJsonSafe(row.categoriaJoinAdicionaisDisponiveis, []),
+          complementosDisponiveis: parseJsonSafe(row.categoriaJoinComplementosDisponiveis, []),
+        } : (categoriaId || null),
+        categoriaId: categoriaId || null,
+        categoriaNome: categoriaExiste ? (row.categoriaJoinNome || "Sem categoria") : "Sem categoria",
       };
     });
 
     res.json(produtosNormalizados);
   } catch (err) {
     console.error("Erro ao buscar produtos:", err);
-    res.status(500).json({ erro: "Erro ao buscar produtos." });
+    res.status(500).json({ erro: "Erro ao buscar produtos.", code: err.code, message: err.message });
   }
 };
 
