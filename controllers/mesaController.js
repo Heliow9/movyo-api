@@ -29,7 +29,7 @@ function getMercadoPagoInfo(restaurante) {
    HELPERS DE PERFORMANCE - MOVYO HUB / APP GARÇOM
 ========================================================= */
 const resumoHomeCache = new Map();
-const RESUMO_HOME_CACHE_MS = Number(process.env.MOVYO_HUB_RESUMO_CACHE_MS || 3000);
+const RESUMO_HOME_CACHE_MS = Number(process.env.MOVYO_HUB_RESUMO_CACHE_MS || 0);
 
 function parseJsonSafe(value, fallback) {
   if (value === null || value === undefined || value === "") return fallback;
@@ -1515,8 +1515,9 @@ exports.resumoHomeApp = async (req, res) => {
     // Cache curto para segurar rajadas do Hub quando a Home remonta/atualiza várias vezes.
     // Mantém atualização praticamente em tempo real, mas evita 5 consultas iguais simultâneas.
     const cacheKey = `${restauranteId}:${garcomId || "all"}`;
+    const forceFresh = req.query?.fresh || req.query?.noCache || req.query?._t;
     const cached = resumoHomeCache.get(cacheKey);
-    if (cached && Date.now() - cached.ts < RESUMO_HOME_CACHE_MS) {
+    if (!forceFresh && RESUMO_HOME_CACHE_MS > 0 && cached && Date.now() - cached.ts < RESUMO_HOME_CACHE_MS) {
       return res.json({ ...cached.data, cache: true });
     }
 
@@ -1614,15 +1615,18 @@ exports.resumoHomeApp = async (req, res) => {
       return id ? { id, nome: nome || (sameId(id, garcomId) ? garcomNomeReq : "Sem garçom") } : null;
     };
 
-    const pedidosHojeGarcom = todosPedidos.filter((pedido) => {
+    const pedidosValidosParaTurno = todosPedidos.filter((pedido) => !isFinalizado(pedido) || isPago(pedido));
+
+    const pedidosHojeGarcom = pedidosValidosParaTurno.filter((pedido) => {
       const atrib = atribuirGarcomPedido(pedido);
       return atrib && sameId(atrib.id, garcomId);
     });
     const pedidosPagosHojeGarcom = pedidosHojeGarcom.filter(isPago);
     const vendasHojeGarcom = pedidosPagosHojeGarcom.reduce((acc, p) => acc + valorPedido(p), 0);
+    const vendasLancadasHojeGarcom = pedidosHojeGarcom.reduce((acc, p) => acc + valorPedido(p), 0);
 
     const rankingMap = new Map();
-    todosPedidos.filter(isPago).forEach((pedido) => {
+    pedidosValidosParaTurno.forEach((pedido) => {
       const atrib = atribuirGarcomPedido(pedido);
       if (!atrib) return;
       const atual = rankingMap.get(atrib.id) || { id: atrib.id, nome: atrib.nome, pedidos: 0, total: 0 };
@@ -1647,7 +1651,9 @@ exports.resumoHomeApp = async (req, res) => {
       pedidosFila: pedidosPendentes,
       pedidosHojeGarcom: pedidosHojeGarcom.length,
       vendasHojeGarcom,
+      vendasLancadasHojeGarcom,
       rankingGarcons,
+      rankingGarconsHoje: rankingGarcons,
       filtros: {
         pedidosAtivos: Array.from(STATUS_ATIVOS),
         ignorados: Array.from(STATUS_AGUARDANDO_PAGAMENTO),
