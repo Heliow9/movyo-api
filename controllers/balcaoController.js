@@ -13,7 +13,17 @@ const { enviarMensagem, enviarMensagemMidia, estaConectado } = require("../utils
    Helpers gerais (igual Mesa)
 -------------------------*/
 const toNum = (v) => {
-  const n = Number(String(v ?? 0).replace(",", "."));
+  if (v === undefined || v === null || v === '') return 0;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  let s = String(v).trim().replace(/\s/g, '').replace(/R\$/gi, '').replace(/[^0-9,.-]/g, '');
+  if (!s || s === '-' || s === ',' || s === '.') return 0;
+  if (s.includes(',') && s.includes('.')) {
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.');
+    else s = s.replace(/,/g, '');
+  } else if (s.includes(',')) {
+    s = s.replace(',', '.');
+  }
+  const n = Number(s);
   return Number.isFinite(n) ? n : 0;
 };
 

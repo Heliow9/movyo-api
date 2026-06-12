@@ -18,6 +18,22 @@ function toBool(v, fallback = undefined) {
   return fallback;
 }
 
+
+function parseMoney(value) {
+  if (value === undefined || value === null || value === '') return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  let s = String(value).trim().replace(/\s/g, '').replace(/R\$/gi, '').replace(/[^0-9,.-]/g, '');
+  if (!s || s === '-' || s === ',' || s === '.') return 0;
+  if (s.includes(',') && s.includes('.')) {
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.');
+    else s = s.replace(/,/g, '');
+  } else if (s.includes(',')) {
+    s = s.replace(',', '.');
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function normalizeProdutoBody(body = {}, { partial = false } = {}) {
   // ✅ aceita:
   // - imprimeNaCozinha (novo)
@@ -57,8 +73,8 @@ function normalizeProdutoBody(body = {}, { partial = false } = {}) {
 
   const rawPreco = normalized.precoBase ?? normalized.preco;
   if (rawPreco !== undefined && rawPreco !== null && rawPreco !== '') {
-    const precoNumber = Number(String(rawPreco).replace(',', '.'));
-    normalized.preco = Number.isFinite(precoNumber) ? precoNumber : 0;
+    const precoNumber = parseMoney(rawPreco);
+    normalized.preco = precoNumber;
     normalized.precoBase = normalized.preco;
   }
 
@@ -69,9 +85,9 @@ function normalizeProdutoBody(body = {}, { partial = false } = {}) {
 function normalizeProdutoResponse(produto) {
   if (!produto) return produto;
   const plain = typeof produto.toObject === "function" ? produto.toObject() : { ...produto };
-  const preco = Number(plain.preco ?? plain.precoBase ?? 0);
-  plain.preco = Number.isFinite(preco) ? preco : 0;
-  plain.precoBase = Number.isFinite(preco) ? preco : 0;
+  const preco = parseMoney(plain.preco ?? plain.precoBase ?? 0);
+  plain.preco = preco;
+  plain.precoBase = preco;
   // ✅ compatibilidade: produtos já cadastrados antes desse campo entram como ativos na vitrine.
   if (plain.ativoVitrine === undefined || plain.ativoVitrine === null) plain.ativoVitrine = true;
   return plain;
