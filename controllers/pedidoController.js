@@ -1165,6 +1165,9 @@ const listarPedidosPorRestaurante = async (req, res) => {
   const { restauranteId } = req.params;
 
   try {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
     const { status, origem, somenteMesa, somenteBalcao, page = 1, limit = 200, dataInicio, dataFim } =
       req.query;
 

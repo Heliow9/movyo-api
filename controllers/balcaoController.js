@@ -190,6 +190,19 @@ function calcularTotalPedido(pedido) {
   return round2(Math.max(0, bruto - desconto));
 }
 
+
+function emitirAtualizacaoAtendimento(req, restauranteId, payload = {}) {
+  if (!req?.io || !restauranteId) return;
+  const room = `restaurante-${String(restauranteId)}`;
+  const data = { ...payload, restauranteId: String(restauranteId), atualizadoEm: new Date().toISOString() };
+  [
+    "atendimentoAtualizado",
+    "resumoGarcomAtualizado",
+    "filaPedidosAtualizada",
+    "rankingGarconsAtualizado",
+  ].forEach((evento) => req.io.to(room).emit(evento, data));
+}
+
 function isPaidStatus(st) {
   const s = String(st || "").toLowerCase();
   return s === "approved" || s === "paid" || s === "aprovado" || s === "confirmado";
@@ -436,6 +449,7 @@ async function fecharPedidoGenerico({ req, pedido }) {
     if (String(pedido.statusPagamento || "").toLowerCase() === "pago" || Number(pedido.valorPendente || 0) <= 0) {
       req.io.to(room).emit("novoPedido", pedido);
       req.io.to(room).emit("balcaoAtualizado", pedido);
+      emitirAtualizacaoAtendimento(req, pedido.restaurante, { pedidoId: String(pedido?._id || pedido?.id || ""), origem: "balcao" });
     }
   }
 
@@ -700,6 +714,7 @@ exports.adicionarItensBalcao = async (req, res) => {
 
     if (req.io) {
       req.io.to(`restaurante-${String(pedido.restaurante)}`).emit("pedidoAtualizado", pedido);
+      emitirAtualizacaoAtendimento(req, pedido.restaurante, { pedidoId: String(pedido?._id || pedido?.id || ""), origem: "balcao" });
     }
 
     return res.json({ ok: true, pedido, total, pago, pendente });
@@ -817,6 +832,7 @@ exports.registrarPagamentoBalcao = async (req, res) => {
       const room = `restaurante-${String(pedido.restaurante)}`;
       req.io.to(room).emit("pedidoAtualizado", pedido);
       req.io.to(room).emit("balcaoAtualizado", pedido);
+      emitirAtualizacaoAtendimento(req, pedido.restaurante, { pedidoId: String(pedido?._id || pedido?.id || ""), origem: "balcao" });
     }
 
     return res.json({ ok: true, fechado: false, pedido, total, pago, pendente });
@@ -928,6 +944,7 @@ exports.gerarPixBalcao = async (req, res) => {
 
     if (req.io) {
       req.io.to(`restaurante-${String(pedido.restaurante)}`).emit("pedidoAtualizado", pedido);
+      emitirAtualizacaoAtendimento(req, pedido.restaurante, { pedidoId: String(pedido?._id || pedido?.id || ""), origem: "balcao" });
     }
 
     return res.json({
@@ -1053,6 +1070,7 @@ Seu pedido de balcão foi confirmado e já foi enviado para produção.
 
     if (req.io) {
       req.io.to(`restaurante-${String(pedido.restaurante)}`).emit("pedidoAtualizado", pedido);
+      emitirAtualizacaoAtendimento(req, pedido.restaurante, { pedidoId: String(pedido?._id || pedido?.id || ""), origem: "balcao" });
     }
 
     return res.json({

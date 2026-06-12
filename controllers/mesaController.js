@@ -31,6 +31,19 @@ function getMercadoPagoInfo(restaurante) {
 const resumoHomeCache = new Map();
 const RESUMO_HOME_CACHE_MS = Number(process.env.MOVYO_HUB_RESUMO_CACHE_MS || 0);
 
+
+function emitirAtualizacaoAtendimento(req, restauranteId, payload = {}) {
+  if (!req?.io || !restauranteId) return;
+  const room = `restaurante-${String(restauranteId)}`;
+  const data = { ...payload, restauranteId: String(restauranteId), atualizadoEm: new Date().toISOString() };
+  [
+    "atendimentoAtualizado",
+    "resumoGarcomAtualizado",
+    "filaPedidosAtualizada",
+    "rankingGarconsAtualizado",
+  ].forEach((evento) => req.io.to(room).emit(evento, data));
+}
+
 function parseJsonSafe(value, fallback) {
   if (value === null || value === undefined || value === "") return fallback;
   if (typeof value !== "string") return value;
@@ -351,6 +364,7 @@ async function liberarMesaGenerico({ req, mesa, pedido }) {
     req.io.to(`restaurante-${mesa.restauranteId}`).emit("pedidoAtualizado", pedido);
     req.io.to(`restaurante-${mesa.restauranteId}`).emit("mesaAtualizada", mesa);
     req.io.to(`mesa-${String(mesa._id)}`).emit("mesaAtualizada", mesa);
+    emitirAtualizacaoAtendimento(req, mesa.restauranteId, { pedidoId: String(pedido?._id || pedido?.id || ""), mesaId: String(mesa?._id || mesa?.id || ""), origem: "mesa" });
   }
 
   return { mesa, pedido };
@@ -613,6 +627,7 @@ exports.criarPedidoMesa = async (req, res) => {
     if (req.io) {
       req.io.to(`restaurante-${mesa.restauranteId}`).emit("pedidoAtualizado", pedido);
       req.io.to(`restaurante-${mesa.restauranteId}`).emit("mesaAtualizada", mesa);
+      emitirAtualizacaoAtendimento(req, mesa.restauranteId, { pedidoId: String(pedido?._id || pedido?.id || ""), mesaId: String(mesa?._id || mesa?.id || ""), origem: "mesa" });
     }
 
     return res.status(201).json(pedido);
@@ -799,6 +814,7 @@ exports.abrirMesaPainel = async (req, res) => {
       req.io.to(`restaurante-${mesa.restauranteId}`).emit("mesaAtualizada", mesa);
       req.io.to(`restaurante-${mesa.restauranteId}`).emit("novoPedido", novoPedido);
       req.io.to(`restaurante-${mesa.restauranteId}`).emit("pedidoAtualizado", novoPedido);
+      emitirAtualizacaoAtendimento(req, mesa.restauranteId, { pedidoId: String(novoPedido?._id || novoPedido?.id || ""), mesaId: String(mesa?._id || mesa?.id || ""), origem: "mesa" });
     }
 
     return res.status(201).json({ mesa, pedido: novoPedido });
@@ -858,6 +874,7 @@ exports.adicionarItensMesaPainel = async (req, res) => {
     if (req.io) {
       req.io.to(`restaurante-${mesa.restauranteId}`).emit("pedidoAtualizado", pedido);
       req.io.to(`restaurante-${mesa.restauranteId}`).emit("mesaAtualizada", mesa);
+      emitirAtualizacaoAtendimento(req, mesa.restauranteId, { pedidoId: String(pedido?._id || pedido?.id || ""), mesaId: String(mesa?._id || mesa?.id || ""), origem: "mesa" });
     }
 
     return res.json({ mesa, pedido });
@@ -1514,6 +1531,10 @@ exports.resumoHomeApp = async (req, res) => {
 
     // Cache curto para segurar rajadas do Hub quando a Home remonta/atualiza várias vezes.
     // Mantém atualização praticamente em tempo real, mas evita 5 consultas iguais simultâneas.
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+
     const cacheKey = `${restauranteId}:${garcomId || "all"}`;
     const forceFresh = req.query?.fresh || req.query?.noCache || req.query?._t;
     const cached = resumoHomeCache.get(cacheKey);
