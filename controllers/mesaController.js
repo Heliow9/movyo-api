@@ -787,7 +787,10 @@ exports.abrirMesaPainel = async (req, res) => {
       valorPendente: 0,
     });
 
-    if (req.role === "garcom") {
+    // ✅ Sempre vincula o pedido ao garçom autenticado quando existir.
+    // Em alguns fluxos do Hub o token chega com garcomId, mas req.role pode não vir exatamente como "garcom".
+    // Isso fazia o card "Vendas do turno" e o ranking somarem menor que o real.
+    {
       const g = getGarcomFromReq(req);
       if (g.id) {
         novoPedido.garcomId = g.id;
@@ -844,7 +847,9 @@ exports.adicionarItensMesaPainel = async (req, res) => {
     const pedido = await Pedido.findById(mesa.pedidoAtualId);
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
 
-    if (req.role === "garcom") {
+    // ✅ Sempre tenta vincular o item lançado ao garçom autenticado.
+    // Não depende apenas de req.role, pois alguns logins do Hub chegam com garcomId no token/sessão.
+    {
       const g = getGarcomFromReq(req);
       if (g.id && !pedido.garcomId) {
         pedido.garcomId = g.id;
@@ -1546,7 +1551,23 @@ exports.resumoHomeApp = async (req, res) => {
 
     const norm = (v) => String(v || "").trim().toLowerCase();
     const sameId = (a, b) => a && b && String(a) === String(b);
-    const valorPedido = (p) => Number(p?.valorTotal ?? p?.total ?? p?.valor ?? 0) || 0;
+
+    // ✅ Total real do pedido: usa o maior valor entre coluna total/valorTotal e soma dos itens.
+    // Corrige casos em que o total salvo ficou menor/desatualizado após lançar novos itens.
+    const totalItensPedido = (p) => {
+      const itens = Array.isArray(p?.itens) ? p.itens : [];
+      return itens.reduce((acc, it) => {
+        const qtd = Number(it?.quantidade || 1) || 1;
+        const unit = Number(String(it?.precoUnitario ?? it?.preco ?? it?.valorUnitario ?? 0).replace(",", ".")) || 0;
+        const tot = Number(String(it?.precoTotal ?? it?.total ?? it?.valorTotal ?? 0).replace(",", ".")) || 0;
+        return acc + (tot > 0 ? tot : unit * qtd);
+      }, 0);
+    };
+    const valorPedido = (p) => {
+      const salvo = Number(p?.valorTotal ?? p?.total ?? p?.valor ?? 0) || 0;
+      const itensTotal = totalItensPedido(p);
+      return Math.round(Math.max(salvo, itensTotal) * 100) / 100;
+    };
 
     const STATUS_AGUARDANDO_PAGAMENTO = new Set(["aguardando_pagamento", "pagamento_pendente", "pending_payment"]);
     const STATUS_FINALIZADOS = new Set(["entregue", "finalizado", "cancelado", "cancelado_cliente", "cancelado_restaurante"]);
@@ -1627,7 +1648,10 @@ exports.resumoHomeApp = async (req, res) => {
       let id = idRaw ? String(idRaw) : null;
       let nome = nomeRaw || null;
 
-      if (!id && garcomId && ["balcao", "mesa", "garcom"].includes(norm(pedido?.origem))) {
+      // Fallback somente para mesa/salão. Balcão só entra no turno quando o pedido
+      // tem garcomId/criadoPor/recebidoPor vinculado, evitando atribuir vendas de balcão
+      // do restaurante inteiro para qualquer garçom logado.
+      if (!id && garcomId && ["mesa", "garcom", "salao", "salão"].includes(norm(pedido?.origem))) {
         id = garcomId;
         nome = garcomNomeReq;
       }

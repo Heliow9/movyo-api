@@ -605,12 +605,17 @@ exports.abrirPedidoBalcao = async (req, res) => {
       created_at: agoraPedido,
     });
 
-    // se for garçom abrindo no balcão (caso use)
-    if (req.role === "garcom") {
+    // ✅ Vendas de balcão também entram no turno do garçom que lançou.
+    // Não depende apenas de req.role, pois em alguns fluxos do Hub o token traz garcomId
+    // mesmo quando a role não chega exatamente como "garcom".
+    {
       const g = getGarcomFromReq(req);
       if (g.id) {
         novoPedido.garcomId = g.id;
-        novoPedido.garcomNome = g.nome;
+        novoPedido.garcomNome = g.nome || "Garçom";
+        novoPedido.criadoPor = g.id;
+        novoPedido.criadoPorNome = g.nome || "Garçom";
+        novoPedido.criadoPorRole = "garcom";
       }
     }
 
@@ -679,6 +684,20 @@ exports.adicionarItensBalcao = async (req, res) => {
         : await Pedido.findById(pedidoId);
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    // ✅ Se o garçom adicionou itens no balcão, mantém a venda vinculada ao turno dele.
+    {
+      const g = getGarcomFromReq(req);
+      if (g.id && !pedido.garcomId) {
+        pedido.garcomId = g.id;
+        pedido.garcomNome = g.nome || "Garçom";
+      }
+      if (g.id && !pedido.criadoPor) {
+        pedido.criadoPor = g.id;
+        pedido.criadoPorNome = g.nome || "Garçom";
+        pedido.criadoPorRole = "garcom";
+      }
+    }
 
     const itensNormalizados = normalizarItensBalcao(itens);
     if (!itensNormalizados.length) {
