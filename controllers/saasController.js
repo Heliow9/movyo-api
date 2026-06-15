@@ -14,6 +14,8 @@ const OperadorCaixa = require('../models/OperadorCaixa');
 const Entregador = require('../models/Entregador');
 const { pool, testConnection } = require('../db/mysql');
 const apiMonitor = require('../utils/apiMonitor');
+const AuditLog = require('../models/AuditLog');
+const { registrarAuditoria } = require('../utils/audit');
 
 const PLANOS_PADRAO = [
   { codigo:'free', nome:'Free', valorMensal:0, ordem:1, descricao:'Plano gratuito inicial para novos restaurantes.', recursos:['Cadastro inicial','Teste controlado','Recursos limitados'] },
@@ -99,6 +101,10 @@ function dateOnlyISO(d){
   const pad = (n) => String(n).padStart(2, '0');
   return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())}`;
 }
+const SQL_VENDA_CONFIRMADA = `
+  LOWER(COALESCE(statusPagamento,'')) IN ('pago','paga','paid','aprovado','aprovada','approved','concluido','concluído')
+  OR LOWER(COALESCE(status,'')) IN ('pago','paga','paid','aprovado','aprovada','approved','em_producao','em_produção','em produção','preparando','em_preparo','em entrega','em_entrega','entregue','concluido','concluído','finalizado','finalizada')
+`;
 function idFilter(column, id){
   return id ? { sql:` AND ${column} = ?`, params:[String(id)] } : { sql:'', params:[] };
 }
@@ -175,6 +181,12 @@ function isStatusPagamentoConfirmado(p){
   const sp = String(p?.statusPagamento || '').toLowerCase();
   return ['pago','paga','paid','aprovado','aprovada','approved','concluido','concluído'].includes(sp);
 }
+function isVendaConfirmada(p){
+  if (!p || isStatusCanceladoPedido(p)) return false;
+  if (isStatusPagamentoConfirmado(p)) return true;
+  const st = String(p?.status || '').trim().toLowerCase();
+  return ['pago','paga','paid','aprovado','aprovada','approved','em_producao','em_produção','em produção','preparando','em_preparo','em entrega','em_entrega','entregue','concluido','concluído','finalizado','finalizada'].includes(st);
+}
 function isStatusOperacionalAberto(p){
   const st = String(p?.status || '').toLowerCase();
   return ['novo','pendente','aberto','em_aberto','preparando','em_preparo','em_producao','em_produção','producao','produção'].includes(st);
@@ -204,16 +216,17 @@ function isVendaPedidoNoPeriodo(p, inicio, fim){
 async function pedidosPeriodoQuery(restauranteId, inicio, fim){
   const rest = restauranteId ? ' AND restaurante = ?' : '';
   const params = restauranteId ? [String(restauranteId), sqlDate(inicio), sqlDate(fim)] : [sqlDate(inicio), sqlDate(fim)];
-  // Usar somente criadoEm como data operacional do pedido.
-  // created_at/updated_at não entram no filtro para evitar pedidos antigos aparecendo no dia atual.
+  // Fonte de verdade financeira: pagoEm quando existir; caso contrário criadoEm.
+  // A confirmação final é aplicada por isVendaConfirmada para suportar pagamento na entrega.
   const [rows] = await pool.query(`
     SELECT * FROM pedidos
      WHERE 1=1${rest}
-       AND criadoEm BETWEEN ? AND ?
+       AND COALESCE(pagoEm, criadoEm) BETWEEN ? AND ?
        AND LOWER(COALESCE(status,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
        AND LOWER(COALESCE(statusPagamento,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
+     ORDER BY COALESCE(pagoEm, criadoEm) DESC
   `, params);
-  return rows || [];
+  return (rows || []).filter(isVendaConfirmada);
 }
 
 module.exports = {
@@ -348,7 +361,7 @@ module.exports = {
       const entregadorRestWhere = idFilter('restaurante', restauranteFiltro);
       // Vendas/Pedidos no período do SaaS são filtrados pela data operacional `criadoEm`.
       // Não usar created_at/updated_at nem pagoEm como filtro principal, para não puxar pedido antigo/migrado.
-      const pedidoDateSql = ` AND criadoEm BETWEEN ? AND ?`;
+      const pedidoDateSql = ` AND COALESCE(pagoEm, criadoEm) BETWEEN ? AND ?`;
       const pedidoDateParams = [sqlDate(inicio), sqlDate(fim)];
 
       const [
@@ -393,6 +406,7 @@ module.exports = {
            WHERE 1=1${pedidoRestWhere.sql}${pedidoDateSql}
              AND LOWER(COALESCE(status,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
              AND LOWER(COALESCE(statusPagamento,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
+             AND (${SQL_VENDA_CONFIRMADA})
         `, [...pedidoRestWhere.params, ...pedidoDateParams]),
         sqlScalar(`SELECT COUNT(*) total FROM caixa_sessoes WHERE LOWER(COALESCE(status,''))='aberto'${caixaRestWhere.sql}`, caixaRestWhere.params),
         sqlScalar(`SELECT COUNT(*) total FROM produtos WHERE 1=1${produtoRestWhere.sql}`, produtoRestWhere.params),
@@ -438,8 +452,9 @@ module.exports = {
       const list = (arr)=> rid ? arr.filter(x=>belongsToRestaurante(x,rid)) : arr;
       const pedidosFil = list(pedidos), caixasFil=list(caixas), produtosFil=list(produtos), categoriasFil=list(categorias), mesasFil=list(mesas), pedidosMesaFil=list(pedidosMesa), operadoresFil=list(operadores), entregadoresFil=list(entregadores), movFil=list(movimentos);
       const pedidosPeriodo = pedidosFil.filter(p => isPedidoNoPeriodo(p, inicio, fim));
+      const vendasPeriodo = pedidosFil.filter(p => isVendaConfirmada(p) && isVendaPedidoNoPeriodo(p, inicio, fim));
       const movimentosPeriodo = filterDateRange(movFil, inicio, fim, ['data','createdAt']);
-      const cards = { pedidosHoje: pedidosPeriodo.length, vendasHoje: pedidosPeriodo.reduce((acc,p)=>acc+num(p.total || p.valorTotal),0), pedidosPendentes: pedidosFil.filter(p=>['pendente','novo','preparando','em_preparo'].includes(String(p.status||'').toLowerCase())).length, caixasAbertos: caixasFil.filter(c=>String(c.status).toLowerCase()==='aberto').length, produtosAtivos: produtosFil.filter(p=>p.ativo !== false && p.disponivel !== false).length, categoriasAtivas: categoriasFil.filter(c=>c.ativa !== false).length, mesasOcupadas: mesasFil.filter(m=>String(m.status||'').toLowerCase() !== 'livre').length, mesasAbertas: pedidosMesaFil.filter(p=>String(p.status||'').toLowerCase()==='aberto').length, operadoresAtivos: operadoresFil.filter(o=>o.ativo !== false).length, entregadoresAtivos: entregadoresFil.filter(e=>e.status !== false && e.statusConta !== 'bloqueado').length, totalCaixaHoje: movimentosPeriodo.filter(m=>['entrada','venda'].includes(String(m.tipo||'').toLowerCase())).reduce((a,m)=>a+num(m.valor),0) };
+      const cards = { pedidosHoje: pedidosPeriodo.length, vendasHoje: vendasPeriodo.reduce((acc,p)=>acc+num(p.total || p.valorTotal),0), pedidosPendentes: pedidosFil.filter(p=>['pendente','novo','preparando','em_preparo'].includes(String(p.status||'').toLowerCase())).length, caixasAbertos: caixasFil.filter(c=>String(c.status).toLowerCase()==='aberto').length, produtosAtivos: produtosFil.filter(p=>p.ativo !== false && p.disponivel !== false).length, categoriasAtivas: categoriasFil.filter(c=>c.ativa !== false).length, mesasOcupadas: mesasFil.filter(m=>String(m.status||'').toLowerCase() !== 'livre').length, mesasAbertas: pedidosMesaFil.filter(p=>String(p.status||'').toLowerCase()==='aberto').length, operadoresAtivos: operadoresFil.filter(o=>o.ativo !== false).length, entregadoresAtivos: entregadoresFil.filter(e=>e.status !== false && e.statusConta !== 'bloqueado').length, totalCaixaHoje: movimentosPeriodo.filter(m=>['entrada','venda'].includes(String(m.tipo||'').toLowerCase())).reduce((a,m)=>a+num(m.valor),0) };
       const recentes = pedidosPeriodo.sort((a,b)=>new Date(b.criadoEm||0)-new Date(a.criadoEm||0)).slice(0,15).map(p=>({id:docId(p), numeroPedido:p.numeroPedido, restaurante:p.restaurante, nomeCliente:p.nomeCliente, origem:p.origem, status:p.status, formaPagamento:p.formaPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm}));
       return res.json({cards,recentes, restaurantes: restaurantes.map(publicRestaurante)});
     }catch(e){ console.error('saas operacao:',e); res.status(500).json({mensagem:'Erro ao carregar operação SaaS.', erro:e.message}); }
@@ -485,9 +500,10 @@ module.exports = {
           SELECT COUNT(*) pedidosHoje, COALESCE(SUM(COALESCE(total,0)),0) vendasHoje
             FROM pedidos
            WHERE restaurante = ?
-             AND criadoEm BETWEEN ? AND ?
+             AND COALESCE(pagoEm, criadoEm) BETWEEN ? AND ?
              AND LOWER(COALESCE(status,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
              AND LOWER(COALESCE(statusPagamento,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
+             AND (${SQL_VENDA_CONFIRMADA})
         `, [rid, inicioSql, fimSql]),
         sqlScalar(`SELECT COUNT(*) total FROM caixa_sessoes WHERE restauranteId = ? AND LOWER(COALESCE(status,''))='aberto'`, [rid]),
         sqlScalar(`SELECT COUNT(*) total FROM produtos WHERE restaurante = ?`, [rid]),
@@ -545,15 +561,15 @@ module.exports = {
     }catch(e){ console.error('saas detalhe restaurante:',e); res.status(500).json({mensagem:'Erro ao carregar restaurante.', erro:e.message }); }
   },
   async bloquearRestaurante(req,res){
-    try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:false,statusAssinatura:'bloqueado'}, $inc:{ sessaoVersao:1 }}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
+    try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:false,statusAssinatura:'bloqueado'}, $inc:{ sessaoVersao:1 }}); await registrarAuditoria(req,'saas.restaurante_bloqueado','restaurante',req.params.id,{restauranteId:req.params.id}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
     catch(e){ res.status(500).json({mensagem:'Erro ao bloquear restaurante.', erro:e.message}); }
   },
   async ativarRestaurante(req,res){
-    try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:true,statusAssinatura:req.body.statusAssinatura || 'ativo'}, $inc:{ sessaoVersao:1 }}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
+    try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:true,statusAssinatura:req.body.statusAssinatura || 'ativo'}, $inc:{ sessaoVersao:1 }}); await registrarAuditoria(req,'saas.restaurante_ativado','restaurante',req.params.id,{restauranteId:req.params.id}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
     catch(e){ res.status(500).json({mensagem:'Erro ao ativar restaurante.', erro:e.message}); }
   },
   async excluirRestaurante(req,res){
-    try{ const r=await Restaurante.findByIdAndDelete(req.params.id); res.json({ok:true, restaurante:publicRestaurante(r||{})}); }
+    try{ const r=await Restaurante.findByIdAndDelete(req.params.id); await registrarAuditoria(req,'saas.restaurante_excluido','restaurante',req.params.id,{restauranteId:req.params.id,nome:r?.nome}); res.json({ok:true, restaurante:publicRestaurante(r||{})}); }
     catch(e){ res.status(500).json({mensagem:'Erro ao excluir restaurante.', erro:e.message}); }
   },
 
@@ -601,7 +617,11 @@ module.exports = {
       let total = 0;
       let quantidadePedidos = 0;
       const produtos = new Map();
+      const porStatus = {};
+      const porOrigem = {};
+      const porDia = {};
       for (const p of pedidos) {
+        if (!isVendaConfirmada(p)) continue;
         const valor = Number(p.total || p.valorTotal || 0);
         const status = String(p.statusPagamento || p.status || '').toLowerCase();
         // mantém compatível: se não houver status de pagamento, ainda conta pedido fechado/entregue/pago
@@ -610,6 +630,12 @@ module.exports = {
         total += valor;
         const forma = normalizeFormaPagamento(p.formaPagamento || p.formadePagamento || p.pagamento?.formaPagamento);
         porForma[forma] = (porForma[forma] || 0) + valor;
+        const statusNorm = String(p.status || p.statusPagamento || 'sem_status').toLowerCase();
+        const origemNorm = String(p.origem || 'nao_informada').toLowerCase();
+        const dia = dateOnlyISO(dataVendaPedido(p)) || 'sem_data';
+        porStatus[statusNorm] = (porStatus[statusNorm] || 0) + 1;
+        porOrigem[origemNorm] = (porOrigem[origemNorm] || 0) + valor;
+        porDia[dia] = (porDia[dia] || 0) + valor;
         for (const item of extractItensPedido(p)) {
           const nome = itemNome(item);
           const qtd = itemQtd(item);
@@ -621,8 +647,18 @@ module.exports = {
         }
       }
       const produtosMaisVendidos = Array.from(produtos.values()).sort((a,b)=>b.quantidade-a.quantidade).slice(0,15);
-      return res.json({ restauranteId: restauranteId || null, dataInicio: dateOnlyISO(inicio), dataFim: dateOnlyISO(fim), quantidadePedidos, total, ticketMedio: quantidadePedidos ? total/quantidadePedidos : 0, porForma, produtosMaisVendidos, pedidos: pedidos.slice(0,100).map(p=>({ id:docId(p), numeroPedido:p.numeroPedido, cliente:p.nomeCliente, formaPagamento:p.formaPagamento, status:p.status, statusPagamento:p.statusPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm || p.created_at, pagoEm:p.pagoEm })) });
+      return res.json({ criterio:'vendas confirmadas; data financeira = pagoEm ou criadoEm', restauranteId: restauranteId || null, dataInicio: dateOnlyISO(inicio), dataFim: dateOnlyISO(fim), quantidadePedidos, total, ticketMedio: quantidadePedidos ? total/quantidadePedidos : 0, porForma, porStatus, porOrigem, porDia, produtosMaisVendidos, pedidos: pedidos.slice(0,100).map(p=>({ id:docId(p), numeroPedido:p.numeroPedido, cliente:p.nomeCliente, formaPagamento:p.formaPagamento, status:p.status, statusPagamento:p.statusPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm || p.created_at, pagoEm:p.pagoEm })) });
     }catch(e){ console.error('relatorio vendas saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatório de vendas.', erro:e.message }); }
+  },
+  async listarAuditoria(req,res){
+    try{
+      const query = {};
+      if(req.query.restauranteId) query.restauranteId=String(req.query.restauranteId);
+      if(req.query.acao) query.acao=String(req.query.acao);
+      const limit=Math.min(Math.max(Number(req.query.limit||200),1),500);
+      const logs=await AuditLog.find(query).sort({criadoEm:-1}).limit(limit).lean();
+      return res.json({total:logs.length,logs});
+    }catch(e){ return res.status(500).json({mensagem:'Erro ao carregar auditoria.',erro:e.message}); }
   },
   async listarAdmins(req,res){
     try{ const rows = await AdminSaas.find({}).sort({created_at:-1}).lean(); res.json(rows.map(publicAdmin)); }

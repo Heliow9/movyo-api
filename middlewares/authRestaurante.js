@@ -63,9 +63,16 @@ module.exports = async function authRestaurante(req, res, next) {
 
     if (!restAuth) return res.status(404).json({ mensagem: "Restaurante não encontrado." });
 
-    const hoje = new Date(); hoje.setHours(0,0,0,0);
-    const fimPlano = restAuth.dataFimPlano ? new Date(restAuth.dataFimPlano) : null;
-    const venceu = fimPlano && !isNaN(fimPlano.getTime()) && fimPlano < hoje;
+    const dataLocal = (value) => {
+      if (!value) return null;
+      const text = String(value);
+      const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      const d = match ? new Date(Number(match[1]), Number(match[2])-1, Number(match[3]), 23, 59, 59, 999) : new Date(value);
+      return Number.isNaN(d.getTime()) ? null : d;
+    };
+    const agora = new Date();
+    const fimPlano = dataLocal(restAuth.dataFimPlano);
+    const venceu = !!(fimPlano && fimPlano.getTime() < agora.getTime());
 
     if (venceu) {
       // Licença vencida deve ser tratada como licença vencida, não como bloqueio/desativação.
@@ -96,6 +103,8 @@ module.exports = async function authRestaurante(req, res, next) {
 
     req.restaurante = restAuth;
     req.plano = restAuth.plano || 'free';
+    res.setHeader('X-Movyo-License-Status', 'valid');
+    if (restAuth.dataFimPlano) res.setHeader('X-Movyo-License-Expires', new Date(restAuth.dataFimPlano).toISOString());
 
     // =========================
     // ✅ MODO GARÇOM

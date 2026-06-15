@@ -112,6 +112,7 @@ try {
 // -------------------------------
 app.use("/api/restaurantes", require("./routes/restauranteRoutes"));
 app.use("/api/saas", require("./routes/saasRoutes"));
+app.use("/api/auditoria", require("./routes/auditoriaRoutes"));
 app.use("/api/categorias", require("./routes/categoriaProdutoRoutes"));
 app.use("/api/produtos", require("./routes/ProdutosRoutes"));
 app.use("/api/bot", require("./routes/botRoutes"));

@@ -2,6 +2,9 @@
 const express = require("express");
 const router = express.Router();
 const balcaoController = require("../controllers/balcaoController");
+const authRestaurante = require("../middlewares/authRestaurante");
+const matchRestaurante = require("../middlewares/requireRestaurantMatch");
+router.use(authRestaurante, matchRestaurante);
 
 // =====================
 // Painel (Electron) - Balcão

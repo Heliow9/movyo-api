@@ -24,6 +24,7 @@ router.post('/seed-planos', authSaas, controller.seedPlanos);
 router.get('/overview', authSaas, controller.overview);
 router.get('/saude-api', authSaas, controller.saudeApi);
 router.get('/erros-api', authSaas, controller.errosApi);
+router.get('/auditoria', authSaas, controller.listarAuditoria);
 router.get('/relatorios/vendas', authSaas, controller.relatorioVendas);
 router.get('/operacao', authSaas, controller.operacao);
 router.get('/restaurantes/:id/detalhes', authSaas, controller.detalheRestaurante);

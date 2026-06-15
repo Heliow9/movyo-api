@@ -1,6 +1,8 @@
 // routes/pedidosRoutes.js
 const express = require("express");
 const Pedido = require("../models/Pedido");
+const authRestaurante = require("../middlewares/authRestaurante");
+const matchRestaurante = require("../middlewares/requireRestaurantMatch");
 
 const {
   // =========================
@@ -59,45 +61,45 @@ module.exports = (io) => {
 
   // Status / pedido
   router.get("/status/:id", getStatusPedido);
-  router.put("/status/:id", atualizarStatusPedido);
-  router.get("/pedido/:id", obterPedidoPorId);
+  router.put("/status/:id", authRestaurante, matchRestaurante, atualizarStatusPedido);
+  router.get("/pedido/:id", authRestaurante, matchRestaurante, obterPedidoPorId);
 
   // =========================================================
   // ✅ COZINHA — ANTES do catch-all
   //  - TROCA itemIndex por itemId (mais seguro)
   // =========================================================
-  router.get("/:restauranteId/fila-cozinha", listarFilaCozinha);
+  router.get("/:restauranteId/fila-cozinha", authRestaurante, matchRestaurante, listarFilaCozinha);
 
-  router.put("/:pedidoId/itens/:itemIndex/cozinha/pronto", marcarItemPronto);
-  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-mesa", marcarItemEntregueMesa);
-  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-cliente", marcarItemEntregueCliente);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/pronto", authRestaurante, matchRestaurante, marcarItemPronto);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-mesa", authRestaurante, matchRestaurante, marcarItemEntregueMesa);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-cliente", authRestaurante, matchRestaurante, marcarItemEntregueCliente);
 
   // =========================================================
   // 🔹 BALCÃO
   // =========================================================
 
   // Abrir ou atualizar pedido do balcão
-  router.post("/balcao/abrir", criarOuAtualizarPedidoBalcao);
+  router.post("/balcao/abrir", authRestaurante, matchRestaurante, criarOuAtualizarPedidoBalcao);
 
   // Pagamento parcial / misto
-  router.post("/:pedidoId/pagamento", registrarPagamentoPedido);
+  router.post("/:pedidoId/pagamento", authRestaurante, matchRestaurante, registrarPagamentoPedido);
 
   // PIX parcial (balcão)
-  router.post("/:pedidoId/pix", gerarPixPedido);
-  router.get("/:pedidoId/pix/:paymentId/status", consultarStatusPixPedido);
+  router.post("/:pedidoId/pix", authRestaurante, matchRestaurante, gerarPixPedido);
+  router.get("/:pedidoId/pix/:paymentId/status", authRestaurante, matchRestaurante, consultarStatusPixPedido);
 
   // =========================================================
   // 🔹 ENTREGA
   // =========================================================
-  router.post("/enviar/:idPedido/:idEntregador", enviarParaEntregador);
-  router.post("/iniciar-entrega/:id", iniciarEntrega);
-  router.post("/concluir-entrega/:id", concluirEntrega);
+  router.post("/enviar/:idPedido/:idEntregador", authRestaurante, matchRestaurante, enviarParaEntregador);
+  router.post("/iniciar-entrega/:id", authRestaurante, matchRestaurante, iniciarEntrega);
+  router.post("/concluir-entrega/:id", authRestaurante, matchRestaurante, concluirEntrega);
 
   // =========================================================
   // 🔹 LISTAS AUXILIARES
   // =========================================================
-  router.get("/ativos/:restauranteId", listarPedidosAtivos);
-  router.get("/resumo-dia/:entregadorId", resumoDoDia);
+  router.get("/ativos/:restauranteId", authRestaurante, matchRestaurante, listarPedidosAtivos);
+  router.get("/resumo-dia/:entregadorId", authRestaurante, matchRestaurante, resumoDoDia);
 
   // =========================================================
   // 🔹 PÚBLICO – ACOMPANHAR ENTREGA
@@ -131,7 +133,7 @@ module.exports = (io) => {
   // =========================================================
   // 🔹 CATCH-ALL (SEMPRE A ÚLTIMA)
   // =========================================================
-  router.get("/:restauranteId", listarPedidosPorRestaurante);
+  router.get("/:restauranteId", authRestaurante, matchRestaurante, listarPedidosPorRestaurante);
 
   return router;
 };

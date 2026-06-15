@@ -1,6 +1,8 @@
 // routes/produtoRoutes.js
 const express = require("express");
 const controller = require("../controllers/produtoController");
+const authRestaurante = require("../middlewares/authRestaurante");
+const matchRestaurante = require("../middlewares/requireRestaurantMatch");
 
 const router = express.Router();
 
@@ -11,22 +13,22 @@ const router = express.Router();
  */
 
 // ✅ Novas rotas (fixas primeiro)
-router.put("/ordem/reordenar", controller.reordenarProdutos);
-router.post("/duplicar/:id", controller.duplicarProduto);
+router.put("/ordem/reordenar", authRestaurante, matchRestaurante, controller.reordenarProdutos);
+router.post("/duplicar/:id", authRestaurante, matchRestaurante, controller.duplicarProduto);
 
-router.put("/:id/ativar", controller.ativarProduto);
-router.put("/:id/desativar", controller.desativarProduto);
+router.put("/:id/ativar", authRestaurante, matchRestaurante, controller.ativarProduto);
+router.put("/:id/desativar", authRestaurante, matchRestaurante, controller.desativarProduto);
 
-router.put("/:id/destaque", controller.setProdutoDestaque);
-router.put("/:id/vitrine", controller.setProdutoAtivoVitrine);
+router.put("/:id/destaque", authRestaurante, matchRestaurante, controller.setProdutoDestaque);
+router.put("/:id/vitrine", authRestaurante, matchRestaurante, controller.setProdutoAtivoVitrine);
 
 // ✅ NOVO: imprime na cozinha
-router.put("/:id/imprime-cozinha", controller.setProdutoImprimeCozinha);
+router.put("/:id/imprime-cozinha", authRestaurante, matchRestaurante, controller.setProdutoImprimeCozinha);
 
 // CRUD
-router.post("/", controller.criarProduto);
-router.put("/:id", controller.editarProduto);
-router.delete("/:id", controller.excluirProduto);
+router.post("/", authRestaurante, matchRestaurante, controller.criarProduto);
+router.put("/:id", authRestaurante, matchRestaurante, controller.editarProduto);
+router.delete("/:id", authRestaurante, matchRestaurante, controller.excluirProduto);
 
 // Buscar produtos por restaurante (deixe por último por causa do "/:param")
 router.get("/:restauranteId", controller.getProdutosPorRestaurante);

@@ -1,13 +1,20 @@
+const authRestaurante = require('../middlewares/authRestaurante');
+const checkPermissao = require('../middlewares/checkPermissao');
 const express = require('express');
 const router = express.Router();
 const c = require('../controllers/caixaController');
+router.use(authRestaurante);
+router.param('restauranteId', (req,res,next,value)=>{
+  if(String(req.restauranteId)!==String(value)) return res.status(403).json({code:'RESTAURANTE_MISMATCH',message:'Restaurante não autorizado.'});
+  next();
+});
 router.get('/:restauranteId/operadores', c.listarOperadores);
-router.post('/:restauranteId/operadores', c.salvarOperador);
-router.put('/:restauranteId/operadores/:operadorId', c.salvarOperador);
-router.patch('/:restauranteId/operadores/:operadorId/status', c.alternarOperador);
+router.post('/:restauranteId/operadores', checkPermissao('gerenciarOperadores'), c.salvarOperador);
+router.put('/:restauranteId/operadores/:operadorId', checkPermissao('gerenciarOperadores'), c.salvarOperador);
+router.patch('/:restauranteId/operadores/:operadorId/status', checkPermissao('gerenciarOperadores'), c.alternarOperador);
 router.get('/:restauranteId/atual', c.caixaAtual);
-router.post('/:restauranteId/abrir', c.abrirCaixa);
-router.post('/:restauranteId/movimento', c.movimentarCaixa);
-router.post('/:restauranteId/fechar', c.fecharCaixa);
-router.get('/:restauranteId/relatorios', c.relatorios);
+router.post('/:restauranteId/abrir', checkPermissao('abrirCaixa'), c.abrirCaixa);
+router.post('/:restauranteId/movimento', checkPermissao('movimentarCaixa'), c.movimentarCaixa);
+router.post('/:restauranteId/fechar', checkPermissao('fecharCaixa'), c.fecharCaixa);
+router.get('/:restauranteId/relatorios', checkPermissao('visualizarRelatorios'), c.relatorios);
 module.exports = router;

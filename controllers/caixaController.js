@@ -2,6 +2,7 @@ const OperadorCaixa = require('../models/OperadorCaixa');
 const CaixaSessao = require('../models/CaixaSessao');
 const CaixaMovimento = require('../models/CaixaMovimento');
 const Pedido = require('../models/Pedido');
+const { registrarAuditoria } = require('../utils/audit');
 const { getCaixaAberto, exigirCaixaAberto, recalcularCaixa, montarCaixaComTotais, round2, toNum, normalizeFormaPagamento } = require('../services/caixaService');
 
 function restauranteIdFromReq(req) {
@@ -16,6 +17,11 @@ function pinConfere(operador, pinInformado) {
   if (!pin) return true;
   return String(pinInformado || '').trim() === pin;
 }
+function operadorPode(operador, permissao){
+  const p=operador?.permissoes;
+  if(!p || typeof p!=='object') return true;
+  return p[permissao] !== false && p[permissao] !== 'false';
+}
 
 exports.listarOperadores = async (req, res) => {
   try {
@@ -28,7 +34,7 @@ exports.listarOperadores = async (req, res) => {
 exports.salvarOperador = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
-    const { nome, apelido, pin, ativo=true, observacao } = req.body;
+    const { nome, apelido, pin, ativo=true, observacao, permissoes={} } = req.body;
     if (!restauranteId) return res.status(400).json({ message: 'restauranteId é obrigatório.' });
     if (!String(nome || '').trim()) return res.status(400).json({ message: 'Nome do operador é obrigatório.' });
     let operador = req.params.operadorId ? await OperadorCaixa.findById(req.params.operadorId) : null;
@@ -38,7 +44,9 @@ exports.salvarOperador = async (req, res) => {
     operador.pin = String(pin || '').trim();
     operador.ativo = ativo !== false;
     operador.observacao = String(observacao || '').trim();
+    operador.permissoes = permissoes && typeof permissoes === 'object' ? permissoes : {};
     await operador.save();
+    await registrarAuditoria(req, req.params.operadorId ? 'operador.atualizado' : 'operador.criado', 'operador', operador._id, { nome:operador.nome, ativo:operador.ativo, permissoes:operador.permissoes });
     res.json({ ok: true, operador });
   } catch (e) { res.status(500).json({ message: 'Erro ao salvar operador.', error: e.message }); }
 };
@@ -49,6 +57,7 @@ exports.alternarOperador = async (req, res) => {
     if (!operador) return res.status(404).json({ message: 'Operador não encontrado.' });
     operador.ativo = req.body.ativo !== undefined ? !!req.body.ativo : !operador.ativo;
     await operador.save();
+    await registrarAuditoria(req, 'operador.status_alterado', 'operador', operador._id, { nome:operador.nome, ativo:operador.ativo });
     res.json({ ok: true, operador });
   } catch (e) { res.status(500).json({ message: 'Erro ao alterar operador.', error: e.message }); }
 };
@@ -87,6 +96,7 @@ exports.abrirCaixa = async (req, res) => {
     if (!operador || String(operador.restauranteId) !== String(restauranteId) || operador.ativo === false) {
       return res.status(400).json({ message: 'Selecione um operador ativo para abrir o caixa.' });
     }
+    if (!operadorPode(operador,'abrirCaixa')) return res.status(403).json({message:'Este operador não tem permissão para abrir o caixa.',code:'OPERADOR_SEM_PERMISSAO'});
     if (operadorExigePin(operador) && !pinConfere(operador, pin)) {
       return res.status(401).json({ message: 'PIN do operador inválido para abrir o caixa.', code: 'PIN_INVALIDO' });
     }
@@ -95,6 +105,7 @@ exports.abrirCaixa = async (req, res) => {
       saldoInicial: round2(toNum(saldoInicial)), status: 'aberto', dataOperacional, abertoEm: new Date(), observacaoAbertura: String(observacaoAbertura || '').trim(),
     });
     req.io?.to(`restaurante-${restauranteId}`).emit('caixaAtualizado', caixa);
+    await registrarAuditoria(req, 'caixa.aberto', 'caixa', caixa._id, { operadorId, operadorNome:operador.nome, saldoInicial:caixa.saldoInicial });
     res.status(201).json({ ok: true, caixa });
   } catch (e) { res.status(500).json({ message: 'Erro ao abrir caixa.', error: e.message }); }
 };
@@ -103,6 +114,8 @@ exports.movimentarCaixa = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
     const caixa = await exigirCaixaAberto(restauranteId);
+    const operador = await OperadorCaixa.findById(caixa.operadorId);
+    if (!operadorPode(operador,'movimentarCaixa')) return res.status(403).json({message:'Este operador não tem permissão para sangria ou suprimento.',code:'OPERADOR_SEM_PERMISSAO'});
     const tipo = String(req.body.tipo || '').toLowerCase();
     if (!['sangria','suprimento'].includes(tipo)) return res.status(400).json({ message: 'Tipo deve ser sangria ou suprimento.' });
     const valor = round2(toNum(req.body.valor));
@@ -110,6 +123,7 @@ exports.movimentarCaixa = async (req, res) => {
     const movimento = await CaixaMovimento.create({ restauranteId, caixaSessaoId: caixa._id, operadorId: caixa.operadorId, tipo, valor, formaPagamento: 'dinheiro', origem: 'caixa', descricao: String(req.body.descricao || '').trim() });
     const atualizado = await recalcularCaixa(caixa._id);
     req.io?.to(`restaurante-${restauranteId}`).emit('caixaAtualizado', atualizado);
+    await registrarAuditoria(req, `caixa.${tipo}`, 'movimento_caixa', movimento._id, { caixaSessaoId:caixa._id, valor, descricao:movimento.descricao });
     res.json({ ok: true, movimento, caixa: atualizado });
   } catch (e) { res.status(e.status || 500).json({ message: e.message || 'Erro ao movimentar caixa.', code: e.code }); }
 };
@@ -119,6 +133,7 @@ exports.fecharCaixa = async (req, res) => {
     const restauranteId = restauranteIdFromReq(req);
     const caixa = await exigirCaixaAberto(restauranteId);
     const operador = await OperadorCaixa.findById(caixa.operadorId);
+    if (!operadorPode(operador,'fecharCaixa')) return res.status(403).json({message:'Este operador não tem permissão para fechar o caixa.',code:'OPERADOR_SEM_PERMISSAO'});
     if (operadorExigePin(operador) && !pinConfere(operador, req.body.pin)) {
       return res.status(401).json({ message: 'PIN do operador inválido para fechar o caixa.', code: 'PIN_INVALIDO' });
     }
@@ -130,6 +145,7 @@ exports.fecharCaixa = async (req, res) => {
     doc.fechadoPor = req.userId || req.body.fechadoPor || '';
     await doc.save();
     req.io?.to(`restaurante-${restauranteId}`).emit('caixaAtualizado', doc);
+    await registrarAuditoria(req, 'caixa.fechado', 'caixa', doc._id, { operadorId:doc.operadorId, operadorNome:doc.operadorNome, saldoFinalInformado:doc.saldoFinalInformado, totalVendas:doc.totalVendas });
     res.json({ ok: true, caixa: doc });
   } catch (e) { res.status(e.status || 500).json({ message: e.message || 'Erro ao fechar caixa.', code: e.code }); }
 };
