@@ -13,6 +13,7 @@ const Produto = require("../models/Produto");
 const Frete = require("../models/Frete");
 
 const { enviarMensagem } = require("../utils/bot");
+const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
 
 /* =========================================================
    HELPERS DE PERFORMANCE - APP GARÇOM / HUB
@@ -428,7 +429,17 @@ async function recalcularItensPublicos({ itens = [], restauranteId }) {
     throw err;
   }
 
-  const ids = [...new Set(entrada.map(getItemProdutoId).filter(Boolean))];
+  // Itens auxiliares antigos (frete/taxa) já foram enviados por versões anteriores da vitrine.
+  // Eles nunca devem ser tratados como produtos: frete e taxas são recalculados no backend.
+  const itensProduto = entrada.filter((item) => {
+    if (getItemProdutoId(item)) return true;
+    const nome = normalizeText(item?.nome || item?.description || item?.title || "");
+    const sintetico = nome === "entrega" || nome.startsWith("taxa cartao") || nome.startsWith("taxa de cartao");
+    if (sintetico) return false;
+    return true;
+  });
+
+  const ids = [...new Set(itensProduto.map(getItemProdutoId).filter(Boolean))];
   const produtos = new Map();
   for (const id of ids) {
     const produto = await Produto.findById(id).lean();
@@ -438,7 +449,7 @@ async function recalcularItensPublicos({ itens = [], restauranteId }) {
   let totalItens = 0;
   const itensSeguros = [];
 
-  for (const item of entrada) {
+  for (const item of itensProduto) {
     const produtoId = getItemProdutoId(item);
     const produto = produtoId ? produtos.get(produtoId) : null;
     if (!produto) {
@@ -770,11 +781,13 @@ const criarPedido = async (req, res) => {
     const formaRelatorio = formaPagamentoRelatorio(formadePagamento);
     const isBalcao = isOrigemBalcao(origem);
 
+    // Pedido da vitrine nunca entra direto em produção: após pagamento fica em
+    // "pago" (Recebidos) até o restaurante aceitar manualmente.
     const statusInicial = isBalcao
       ? "aguardando_pagamento"
       : isPix || isCard
       ? "aguardando_pagamento"
-      : "em_producao";
+      : "pago";
 
     let itensSeed = seedCozinhaOnItens(Array.isArray(itens) ? itens : []);
     let taxaEntregaSegura = round2(taxaEntrega || req.body.taxaEntrega || 0);
@@ -796,7 +809,12 @@ const criarPedido = async (req, res) => {
       const calculado = await recalcularItensPublicos({ itens, restauranteId: restaurante });
       itensSeed = seedCozinhaOnItens(calculado.itensSeguros);
       taxaEntregaSegura = round2(freteValidado.taxaEntrega || 0);
-      totalNumber = round2(calculado.totalItens + taxaEntregaSegura);
+      const subtotalSeguro = round2(calculado.totalItens + taxaEntregaSegura);
+      const taxaCartaoPercent = Number(restauranteDoc?.taxaCartaoCreditoAvistaPercent ?? 3.8);
+      const taxaCartaoSegura = isCard && Number.isFinite(taxaCartaoPercent) && taxaCartaoPercent > 0
+        ? round2(subtotalSeguro * (taxaCartaoPercent / 100))
+        : 0;
+      totalNumber = round2(subtotalSeguro + taxaCartaoSegura);
 
       if (!Number.isFinite(totalNumber) || totalNumber <= 0) {
         return res.status(400).json({ message: "Total do pedido inválido após validação." });
@@ -862,7 +880,20 @@ const criarPedido = async (req, res) => {
       if (!novoPedido.pagoEm) novoPedido.pagoEm = agora;
     }
 
+    // Vincula o pedido ao caixa que estava aberto no instante da criação.
+    // Isso faz os KPIs representarem exatamente o turno (abertura → fechamento).
+    const caixaAbertoCriacao = await getCaixaAberto(restaurante).catch(() => null);
+    if (caixaAbertoCriacao) await vincularPedidoAoCaixa(novoPedido, caixaAbertoCriacao);
+
     await novoPedido.save();
+
+    // Pagamentos offline da vitrine já chegam confirmados; registra a venda no caixa.
+    if (caixaAbertoCriacao && !isBalcao && !isPix && !isCard && novoPedido.statusPagamento === "pago") {
+      await registrarMovimentoVenda({ pedido: novoPedido, caixa: caixaAbertoCriacao, restauranteId: restaurante }).catch((e) =>
+        console.warn("Falha ao registrar venda da vitrine no caixa:", e?.message || e)
+      );
+      await recalcularCaixa(caixaAbertoCriacao._id || caixaAbertoCriacao.id).catch(() => null);
+    }
 
     // =========================================================
     // ✅ BALCÃO: encerra aqui
@@ -1094,7 +1125,7 @@ const criarPedido = async (req, res) => {
           novoPedido.valorPago = round2(totalNumber);
           novoPedido.valorPendente = 0;
 
-          novoPedido.status = "em_producao";
+          novoPedido.status = "pago";
           novoPedido.statusPagamento = "pago";
           if (!novoPedido.pagoEm) novoPedido.pagoEm = agora;
         } else {
@@ -1499,6 +1530,16 @@ const atualizarStatusPedido = async (req, res) => {
 
     const statusAnterior = pedido.status;
     pedido.status = status;
+    const agoraStatus = new Date();
+    pedido.statusAtualizadoEm = agoraStatus;
+    if (status === "em_producao") pedido.emProducaoEm = agoraStatus;
+    if (status === "em_entrega") pedido.emEntregaEm = agoraStatus;
+    if (status === "entregue") pedido.entregueEm = agoraStatus;
+
+    if (status === "em_producao" && !pedido.caixaSessaoId) {
+      const caixaAberto = await getCaixaAberto(pedido.restaurante?._id || pedido.restaurante).catch(() => null);
+      if (caixaAberto) await vincularPedidoAoCaixa(pedido, caixaAberto);
+    }
     await pedido.save();
 
     req.io?.to(`restaurante-${pedido.restaurante._id}`).emit("pedidoAtualizado", pedido);

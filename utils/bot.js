@@ -68,7 +68,11 @@ const handledMsgIds = new Map(); // msgId -> ts
 const HANDLED_TTL_MS = 2 * 60 * 1000;
 
 // Gap entre envios do sistema (PIX partes)
-const DEFAULT_SEND_GAP_MS = 650;
+const DEFAULT_SEND_GAP_MS = Number(process.env.BOT_SEND_GAP_MS || 900);
+const BOT_TYPING_MIN_MS = Number(process.env.BOT_TYPING_MIN_MS || 900);
+const BOT_TYPING_MAX_MS = Number(process.env.BOT_TYPING_MAX_MS || 3200);
+const BOT_REACTION_DELAY_MIN_MS = Number(process.env.BOT_REACTION_DELAY_MIN_MS || 250);
+const BOT_REACTION_DELAY_MAX_MS = Number(process.env.BOT_REACTION_DELAY_MAX_MS || 750);
 
 // Conexão WhatsApp/Baileys
 const BOT_CONNECT_TIMEOUT_MS = Number(process.env.BOT_CONNECT_TIMEOUT_MS || 70_000);
@@ -92,6 +96,11 @@ function now() {
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function randomBetween(min, max) {
+  const a = Math.max(0, Number(min || 0));
+  const b = Math.max(a, Number(max || a));
+  return Math.floor(a + Math.random() * (b - a + 1));
 }
 
 function clearRestauranteCache(restauranteId) {
@@ -406,6 +415,7 @@ function escolherReacao(texto) {
 
 async function reagirAntesDeResponder(sock, msg, texto) {
   try {
+    await sleep(randomBetween(BOT_REACTION_DELAY_MIN_MS, BOT_REACTION_DELAY_MAX_MS));
     await sock.sendMessage(msg.key.remoteJid, { react: { text: escolherReacao(texto), key: msg.key } });
   } catch {}
 }
@@ -542,11 +552,15 @@ function isPerguntaHorario(t) {
 /* =========================================================
    PRESENCE (digitando...)
 ========================================================= */
-async function typingDelay(sock, jid, ms = 6000) {
+async function typingDelay(sock, jid, ms) {
+  const requested = Number(ms);
+  const duration = Number.isFinite(requested)
+    ? Math.max(BOT_TYPING_MIN_MS, Math.min(BOT_TYPING_MAX_MS, requested))
+    : randomBetween(BOT_TYPING_MIN_MS, BOT_TYPING_MAX_MS);
   try {
     await sock.sendPresenceUpdate("composing", jid);
   } catch {}
-  await sleep(ms);
+  await sleep(duration + randomBetween(120, 480));
   try {
     await sock.sendPresenceUpdate("paused", jid);
   } catch {}

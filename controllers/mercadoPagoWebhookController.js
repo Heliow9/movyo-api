@@ -217,8 +217,9 @@ function recalcPedidoParcial(pedido) {
   const quitou = total > 0 && pendente <= 0;
 
   if (quitou) {
-    // ✅ quitou 100% (parcial/misto balcão) -> produção
-    pedido.status = "em_producao";
+    // Vitrine/site precisa ser aceita pelo restaurante; balcão quitado segue direto.
+    const origem = String(pedido.origem || "").toLowerCase();
+    pedido.status = origem === "balcao" ? "em_producao" : "pago";
 
     // ✅ marca que está pago sem depender de status legado
     pedido.statusPagamento = "pago";
