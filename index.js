@@ -92,6 +92,7 @@ app.use(cors({
     "Origin",
     "X-Requested-With",
     "x-movyo-client",
+    "X-Movyo-Version",
     "x-restaurante-id",
   ],
 
@@ -213,8 +214,8 @@ async function restaurarBotsLigados() {
       if (typeof value === 'boolean') return value;
       if (typeof value === 'number') return value !== 0;
       const s = String(value).trim().toLowerCase();
-      if (['false','0','nao','não','no','off','desligado'].includes(s)) return false;
-      if (['true','1','sim','yes','on','ligado'].includes(s)) return true;
+      if (['false', '0', 'nao', 'não', 'no', 'off', 'desligado'].includes(s)) return false;
+      if (['true', '1', 'sim', 'yes', 'on', 'ligado'].includes(s)) return true;
       return defaultValue;
     };
 
