@@ -65,14 +65,44 @@ app.use((req, res, next) => {
 
 app.use(cors({
   origin(origin, cb) {
-    // Permite chamadas server-to-server/app sem Origin e browsers liberados.
+    // Permite Electron, aplicativos, chamadas internas e origens autorizadas.
     if (!origin) return cb(null, true);
-    if (allowedOrigins.includes(origin)) return cb(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
+
+    console.warn(`🚫 CORS bloqueado para origem: ${origin}`);
     return cb(new Error("Origem não permitida pelo CORS."));
   },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-requested-with"],
+
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
+
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Accept",
+    "Origin",
+    "X-Requested-With",
+    "x-movyo-client",
+    "x-restaurante-id",
+  ],
+
+  exposedHeaders: [
+    "Content-Disposition",
+    "Content-Length",
+  ],
+
   credentials: false,
+
+  optionsSuccessStatus: 204,
 }));
 
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "1mb" }));
