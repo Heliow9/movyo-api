@@ -98,17 +98,56 @@ async function registrarMovimentoVenda({ pedido, pagamento, caixa, restauranteId
 }
 
 async function calcularTotaisCaixa(caixaId) {
-  const [rows] = await queryWithRetry(
-    `SELECT tipo, formaPagamento, COALESCE(SUM(valor), 0) AS total
-       FROM caixa_movimentos
-      WHERE caixaSessaoId = ?
-      GROUP BY tipo, formaPagamento`,
-    [String(caixaId)],
-    { label: 'caixa.calcularTotais' }
-  );
+  const id = String(caixaId);
 
-  const totals = { dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangria:0, suprimento:0, vendas:0 };
-  for (const m of rows || []) {
+  // Tudo é calculado exclusivamente pelo ID da sessão atualmente aberta.
+  // dataOperacional/data do calendário não entram aqui, pois um turno pode
+  // atravessar a meia-noite e outro caixa pode ser aberto no mesmo dia.
+  const [movimentosResult, pedidosResult] = await Promise.all([
+    queryWithRetry(
+      `SELECT tipo, formaPagamento, COALESCE(SUM(valor), 0) AS total
+         FROM caixa_movimentos
+        WHERE caixaSessaoId = ?
+        GROUP BY tipo, formaPagamento`,
+      [id],
+      { label: 'caixa.calcularTotais.movimentos' }
+    ),
+    queryWithRetry(
+      `SELECT
+          COUNT(*) AS totalPedidos,
+          COALESCE(SUM(
+            CASE
+              WHEN LOWER(COALESCE(statusPagamento, '')) IN ('pago','paid','approved','aprovado')
+                OR LOWER(COALESCE(status, '')) IN ('pago','em_producao','em_entrega','entregue','concluido','finalizado')
+              THEN COALESCE(total, 0)
+              ELSE 0
+            END
+          ), 0) AS totalVendasPedidos
+         FROM pedidos
+        WHERE caixaSessaoId = ?
+          AND LOWER(COALESCE(status, '')) NOT IN ('cancelado','cancelada','canceled','cancelled')`,
+      [id],
+      { label: 'caixa.calcularTotais.pedidos' }
+    ),
+  ]);
+
+  const rows = movimentosResult?.[0] || [];
+  const pedidoRow = pedidosResult?.[0]?.[0] || {};
+  const totals = {
+    dinheiro: 0,
+    pix: 0,
+    credito: 0,
+    debito: 0,
+    online: 0,
+    outros: 0,
+    sangria: 0,
+    suprimento: 0,
+    vendas: 0,
+    pedidos: Math.max(0, Number(pedidoRow.totalPedidos || 0)),
+    vendasPedidos: round2(toNum(pedidoRow.totalVendasPedidos || 0)),
+  };
+
+  for (const m of rows) {
     const val = round2(toNum(m.total));
     const tipo = String(m.tipo || '').toLowerCase();
     if (tipo === 'sangria') totals.sangria += val;
@@ -120,6 +159,10 @@ async function calcularTotaisCaixa(caixaId) {
       else totals[f] += val;
     }
   }
+  // O movimento financeiro é a fonte contábil principal. Como pedidos online
+  // antigos podem não ter gerado movimento, conciliamos somente dentro do mesmo
+  // caixa e usamos o maior total estritamente vinculado à sessão atual.
+  totals.vendas = round2(Math.max(totals.vendas, totals.vendasPedidos));
   return totals;
 }
 
@@ -132,6 +175,7 @@ async function aplicarTotaisNoCaixa(caixa, totals) {
   caixa.totalOnline = round2(totals.online);
   caixa.totalOutros = round2(totals.outros);
   caixa.totalVendas = round2(totals.vendas);
+  caixa.totalPedidos = Math.max(0, Number(totals.pedidos || 0));
   caixa.totalSangrias = round2(totals.sangria);
   caixa.totalSuprimentos = round2(totals.suprimento);
   caixa.totalEsperadoDinheiro = round2(toNum(caixa.saldoInicial) + totals.dinheiro + totals.suprimento - totals.sangria);

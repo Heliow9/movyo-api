@@ -14,6 +14,10 @@ const config = {
   keepAliveInitialDelay: 0,
   queueLimit: 0,
   charset: 'utf8mb4',
+  // Os DATETIME da Movyo são gravados como horário operacional do Brasil.
+  // Sem timezone explícito, servidores Linux em UTC interpretam 19:13 como 19:13Z,
+  // acrescentando 3 horas aos cronômetros exibidos no Desktop/Hub.
+  timezone: process.env.MYSQL_TIMEZONE || '-03:00',
 };
 
 const pool = mysql.createPool(config);
