@@ -7,6 +7,7 @@ const Restaurante = require("../models/Restaurante");
 
 const { consultarPagamento } = require("../services/mercadoPagoPixService");
 const { enviarMensagem, estaConectado } = require("../utils/bot");
+const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
 
 /**
  * ✅ valida assinatura (opcional)
@@ -107,6 +108,23 @@ function round2(v) {
 }
 function formatBRL(v) {
   return `R$ ${Number(v || 0).toFixed(2).replace(".", ",")}`;
+}
+
+async function sincronizarVendaComCaixaAtual({ pedido, pagamento }) {
+  const restauranteId = String(pedido?.restaurante?._id || pedido?.restaurante || "");
+  if (!restauranteId) return null;
+
+  const caixa = await getCaixaAberto(restauranteId).catch(() => null);
+  if (!caixa) return null;
+
+  // O pagamento é o fato gerador financeiro: a venda pertence ao caixa aberto
+  // no instante da confirmação, mesmo quando o pedido foi criado antes.
+  await vincularPedidoAoCaixa(pedido, caixa, { force: true });
+  await pedido.save();
+
+  await registrarMovimentoVenda({ pedido, pagamento, caixa, restauranteId });
+  await recalcularCaixa(caixa._id || caixa.id);
+  return caixa;
 }
 
 async function enviarConfirmacaoWhatsappSePossivel({ pedido, pagamento, total }) {
@@ -333,6 +351,9 @@ exports.mpWebhook = async (req, res) => {
       await pedido.save();
 
       if (quitouTotal) {
+        await sincronizarVendaComCaixaAtual({ pedido, pagamento: pg }).catch((e) =>
+          console.warn("Falha ao vincular pagamento parcial ao caixa atual:", e?.message || e)
+        );
         await enviarConfirmacaoWhatsappSePossivel({ pedido, pagamento: pg, total });
       }
 
@@ -424,6 +445,20 @@ exports.mpWebhook = async (req, res) => {
     }
 
     await pedido.save();
+
+    if (isPaidStatus(mpStatus)) {
+      await sincronizarVendaComCaixaAtual({
+        pedido,
+        pagamento: {
+          metodo: metodoLegado,
+          valor: valorLegado,
+          status: "confirmado",
+          mpPaymentId: paymentIdStr,
+        },
+      }).catch((e) =>
+        console.warn("Falha ao vincular pagamento Mercado Pago ao caixa atual:", e?.message || e)
+      );
+    }
 
     if (req.io) {
       req.io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);

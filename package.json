@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon --ignore sessions/ index.js",
-    "migrate:mysql": "node scripts/sync-mysql.js"
+    "migrate:mysql": "node scripts/sync-mysql.js",
+    "push:generate-keys": "node scripts/generate-vapid-keys.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.16",
@@ -21,11 +22,12 @@
     "link-preview-js": "^3.0.14",
     "mercadopago": "^2.11.0",
     "multer": "^2.0.2",
+    "mysql2": "^3.11.5",
     "ngrok": "^5.0.0-beta.2",
     "node-fetch": "^3.3.2",
     "nodemon": "^3.1.9",
     "pino": "^9.6.0",
     "socket.io": "^4.8.1",
-    "mysql2": "^3.11.5"
+    "web-push": "^3.6.7"
   }
 }

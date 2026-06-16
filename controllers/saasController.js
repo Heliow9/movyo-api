@@ -28,8 +28,8 @@ const PLANOS_PADRAO = [
 
 function signAdmin(payload){ return jwt.sign(payload, process.env.JWT_SECRET || 'movyo-dev-secret', { expiresIn:'8h' }); }
 
-const ADMIN_INICIAL_EMAIL = String(process.env.SAAS_ADMIN_INICIAL_EMAIL || 'helio.desenvolv@gmail.com').trim().toLowerCase();
-const ADMIN_INICIAL_SENHA = String(process.env.SAAS_ADMIN_INICIAL_SENHA || '22021419hH@');
+const ADMIN_INICIAL_EMAIL = String(process.env.SAAS_ADMIN_INICIAL_EMAIL || '').trim().toLowerCase();
+const ADMIN_INICIAL_SENHA = String(process.env.SAAS_ADMIN_INICIAL_SENHA || '');
 
 function publicAdmin(a={}){
   const o = typeof a.toObject === 'function' ? a.toObject() : a;
@@ -37,8 +37,13 @@ function publicAdmin(a={}){
 }
 
 async function ensureAdminInicial(){
-  const existing = await AdminSaas.findOne({ email: ADMIN_INICIAL_EMAIL });
-  if (existing) return existing;
+  if (ADMIN_INICIAL_EMAIL) {
+    const existing = await AdminSaas.findOne({ email: ADMIN_INICIAL_EMAIL });
+    if (existing) return existing;
+  }
+  if (!ADMIN_INICIAL_EMAIL || !ADMIN_INICIAL_SENHA) {
+    throw new Error('Configure SAAS_ADMIN_INICIAL_EMAIL e SAAS_ADMIN_INICIAL_SENHA para criar o primeiro administrador.');
+  }
   const senhaHash = await bcrypt.hash(ADMIN_INICIAL_SENHA, 10);
   return AdminSaas.create({
     nome: 'Helio Desenvolvimento',

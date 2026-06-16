@@ -439,6 +439,11 @@ acorn-jsx@^5.3.2:
   resolved "https://registry.npmjs.org/acorn/-/acorn-8.14.1.tgz"
   integrity sha512-OvQ/2pUDKmgfCg++xsTX1wGxfTaszcHVcTctW4UJB4hibJx2HXxxO5UmVgyjMa+ZDsiaf5wWLXYpRWMmBI0QHg==
 
+agent-base@^7.1.2:
+  version "7.1.4"
+  resolved "https://registry.npmjs.org/agent-base/-/agent-base-7.1.4.tgz"
+  integrity sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==
+
 ajv@^6.12.4:
   version "6.12.6"
   resolved "https://registry.npmjs.org/ajv/-/ajv-6.12.6.tgz"
@@ -484,6 +489,16 @@ array-union@^2.1.0:
   resolved "https://registry.npmjs.org/array-union/-/array-union-2.1.0.tgz"
   integrity sha512-HGyxoOTYUyCM6stUe6EJgnd4EoewAI7zMdfqO+kGjnlZmBDz/cR5pf8r/cR4Wq60sL/p0IkcjUEEPwS3GFrIyw==
 
+asn1.js@^5.3.0:
+  version "5.4.1"
+  resolved "https://registry.npmjs.org/asn1.js/-/asn1.js-5.4.1.tgz"
+  integrity sha512-+I//4cYPccV8LdmBLiX8CYvf9Sp3vQsrqu2QNXRcrbiWvcx/UdlFiqUJJzxRQxgsZmvhXhn4cSKeSmoFjVdupA==
+  dependencies:
+    bn.js "^4.0.0"
+    inherits "^2.0.1"
+    minimalistic-assert "^1.0.0"
+    safer-buffer "^2.1.0"
+
 async-lock@^1.4.1:
   version "1.4.1"
   resolved "https://registry.npmjs.org/async-lock/-/async-lock-1.4.1.tgz"
@@ -525,7 +540,7 @@ audio-type@^2.2.1:
 
 aws-ssl-profiles@^1.1.2:
   version "1.1.2"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/aws-ssl-profiles/-/aws-ssl-profiles-1.1.2.tgz"
+  resolved "https://registry.npmjs.org/aws-ssl-profiles/-/aws-ssl-profiles-1.1.2.tgz"
   integrity sha512-NZKeq9AfyQvEeNlN0zSYAaWrmBffJh3IELMZfRpJVWgrpEbtEpnjvzqBPf+mxoI287JohRDoa+/nsfqqiZmF6g==
 
 axios@^1.6.0:
@@ -570,6 +585,11 @@ binary-extensions@^2.0.0:
   version "2.3.0"
   resolved "https://registry.npmjs.org/binary-extensions/-/binary-extensions-2.3.0.tgz"
   integrity sha512-Ceh+7ox5qe7LJuLHoY0feh3pHuUDHAcRUeyL2VYghZwfpkNIy/+8Ocg0a3UuSoYzavmylwuLWQOf3hl0jjMMIw==
+
+bn.js@^4.0.0:
+  version "4.12.3"
+  resolved "https://registry.npmjs.org/bn.js/-/bn.js-4.12.3.tgz"
+  integrity sha512-fGTi3gxV/23FTYdAoUtLYp6qySe2KE3teyZitipKNRuVYcBkoP/bB3guXN/XVKUe9mxCHXnc9C4ocyz8OmgN0g==
 
 body-parser@^2.2.0:
   version "2.2.0"
@@ -618,14 +638,14 @@ buffer-crc32@~0.2.3:
   resolved "https://registry.npmjs.org/buffer-crc32/-/buffer-crc32-0.2.13.tgz"
   integrity sha512-VO9Ht/+p3SN7SKWqcrgEzjGbRSJYTx+Q1pTQC0wrWqHx0vpJraQ6GtHx8tvcg1rlK1byhU5gccxgOgj7B0TDkQ==
 
-buffer-equal-constant-time@1.0.1:
+buffer-equal-constant-time@^1.0.1, buffer-equal-constant-time@1.0.1:
   version "1.0.1"
   resolved "https://registry.npmjs.org/buffer-equal-constant-time/-/buffer-equal-constant-time-1.0.1.tgz"
   integrity sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==
 
 buffer-from@^1.0.0:
   version "1.1.2"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/buffer-from/-/buffer-from-1.1.2.tgz"
+  resolved "https://registry.npmjs.org/buffer-from/-/buffer-from-1.1.2.tgz"
   integrity sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==
 
 buffer@^6.0.3:
@@ -792,7 +812,7 @@ concat-map@0.0.1:
 
 concat-stream@^2.0.0:
   version "2.0.0"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/concat-stream/-/concat-stream-2.0.0.tgz"
+  resolved "https://registry.npmjs.org/concat-stream/-/concat-stream-2.0.0.tgz"
   integrity sha512-MWufYdFw53ccGjCA+Ol7XJYpAlW6/prSMzuPOTRnJGcGzuhLn4Scrz7qf6o8bROZ514ltazcIFJZevcfbo0x7A==
   dependencies:
     buffer-from "^1.0.0"
@@ -865,7 +885,7 @@ data-uri-to-buffer@^4.0.0:
   resolved "https://registry.npmjs.org/data-uri-to-buffer/-/data-uri-to-buffer-4.0.1.tgz"
   integrity sha512-0R9ikRb668HB7QDxT1vkpuUBtqc53YyAwMwGeUFKRojY/NWKvdZ+9UYtRfGmhqNbRkTSVpMbmyhXipFFv2cb/A==
 
-debug@^4, debug@^4.1.1, debug@^4.3.1, debug@^4.3.2, debug@^4.3.4, debug@^4.3.5, debug@^4.4.0:
+debug@^4, debug@^4.1.1, debug@^4.3.1, debug@^4.3.2, debug@^4.3.4, debug@^4.3.5, debug@^4.4.0, debug@4:
   version "4.4.0"
   resolved "https://registry.npmjs.org/debug/-/debug-4.4.0.tgz"
   integrity sha512-6WTZ/IxCY/T6BALoZHaE4ctp9xm+Z5kY/pzYaCHRFeyVhojxlrm+46y68HA6hr0TcwEssoxNiDEUJQjfPZ/RYA==
@@ -917,7 +937,7 @@ delayed-stream@~1.0.0:
 
 denque@^2.1.0:
   version "2.1.0"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/denque/-/denque-2.1.0.tgz"
+  resolved "https://registry.npmjs.org/denque/-/denque-2.1.0.tgz"
   integrity sha512-HVQE3AAb/pxF8fQAoiqpvg9i3evqug3hoiwakOyZAwJm+6vZehbkYXZ0l4JxS+I3QxM97v5aaRNhj8v5oBhekw==
 
 depd@^2.0.0, depd@2.0.0:
@@ -1387,7 +1407,7 @@ function-bind@^1.1.2:
 
 generate-function@^2.3.1:
   version "2.3.1"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/generate-function/-/generate-function-2.3.1.tgz"
+  resolved "https://registry.npmjs.org/generate-function/-/generate-function-2.3.1.tgz"
   integrity sha512-eeB5GfMNeevm/GRYq20ShmsaGcmI81kIX2K9XQx5miC8KdHaC6Jm0qQ8ZNeGOi7wYB8OsdxKs+Y2oVuTFuVwKQ==
   dependencies:
     is-property "^1.0.2"
@@ -1544,6 +1564,11 @@ htmlparser2@^8.0.1:
     domutils "^3.0.1"
     entities "^4.4.0"
 
+http_ece@1.2.0:
+  version "1.2.0"
+  resolved "https://registry.npmjs.org/http_ece/-/http_ece-1.2.0.tgz"
+  integrity sha512-JrF8SSLVmcvc5NducxgyOrKXe3EsyHMgBFgSaIUGmArKe+rwr0uphRkRXvwiom3I+fpIfoItveHrfudL8/rxuA==
+
 http-cache-semantics@^4.0.0:
   version "4.1.1"
   resolved "https://registry.npmjs.org/http-cache-semantics/-/http-cache-semantics-4.1.1.tgz"
@@ -1568,6 +1593,14 @@ http2-wrapper@^1.0.0-beta.5.2:
     quick-lru "^5.1.1"
     resolve-alpn "^1.0.0"
 
+https-proxy-agent@^7.0.0:
+  version "7.0.6"
+  resolved "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-7.0.6.tgz"
+  integrity sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==
+  dependencies:
+    agent-base "^7.1.2"
+    debug "4"
+
 iconv-lite@^0.6.3, iconv-lite@0.6.3:
   version "0.6.3"
   resolved "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.6.3.tgz"
@@ -1577,7 +1610,7 @@ iconv-lite@^0.6.3, iconv-lite@0.6.3:
 
 iconv-lite@^0.7.2:
   version "0.7.2"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/iconv-lite/-/iconv-lite-0.7.2.tgz"
+  resolved "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.7.2.tgz"
   integrity sha512-im9DjEDQ55s9fL4EYzOAv0yMqmMBSZp6G0VvFyTMPKWxiSBHUj9NW/qqLmXUwXrrM7AvqSlTCfvqRb0cM8yYqw==
   dependencies:
     safer-buffer ">= 2.1.2 < 3.0.0"
@@ -1618,7 +1651,7 @@ inflight@^1.0.4:
     once "^1.3.0"
     wrappy "1"
 
-inherits@^2.0.3, inherits@2, inherits@2.0.4:
+inherits@^2.0.1, inherits@^2.0.3, inherits@2, inherits@2.0.4:
   version "2.0.4"
   resolved "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz"
   integrity sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==
@@ -1664,7 +1697,7 @@ is-promise@^4.0.0:
 
 is-property@^1.0.2:
   version "1.0.2"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/is-property/-/is-property-1.0.2.tgz"
+  resolved "https://registry.npmjs.org/is-property/-/is-property-1.0.2.tgz"
   integrity sha512-Ks/IoX00TtClbGQr4TWXemAnktAQvYB7HzcCxDGqEZU6oCmb2INHuOoKxbtR+HFkmYWBKv/dOZtGRiAjDhj92g==
 
 isexe@^2.0.0:
@@ -1719,12 +1752,29 @@ jwa@^1.4.1:
     ecdsa-sig-formatter "1.0.11"
     safe-buffer "^5.0.1"
 
+jwa@^2.0.1:
+  version "2.0.1"
+  resolved "https://registry.npmjs.org/jwa/-/jwa-2.0.1.tgz"
+  integrity sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==
+  dependencies:
+    buffer-equal-constant-time "^1.0.1"
+    ecdsa-sig-formatter "1.0.11"
+    safe-buffer "^5.0.1"
+
 jws@^3.2.2:
   version "3.2.2"
   resolved "https://registry.npmjs.org/jws/-/jws-3.2.2.tgz"
   integrity sha512-YHlZCB6lMTllWDtSPHz/ZXTsi8S00usEV6v1tjq8tOUZzw7DpSDWVXjXDre6ed1w/pd495ODpHZYSdkRTsa0HA==
   dependencies:
     jwa "^1.4.1"
+    safe-buffer "^5.0.1"
+
+jws@^4.0.0:
+  version "4.0.1"
+  resolved "https://registry.npmjs.org/jws/-/jws-4.0.1.tgz"
+  integrity sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==
+  dependencies:
+    jwa "^2.0.1"
     safe-buffer "^5.0.1"
 
 keyv@^4.0.0:
@@ -1855,7 +1905,7 @@ lru-cache@^10.2.2:
 
 lru.min@^1.1.0, lru.min@^1.1.4:
   version "1.1.4"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/lru.min/-/lru.min-1.1.4.tgz"
+  resolved "https://registry.npmjs.org/lru.min/-/lru.min-1.1.4.tgz"
   integrity sha512-DqC6n3QQ77zdFpCMASA1a3Jlb64Hv2N2DciFGkO/4L9+q/IpIAuRlKOvCXabtRW6cQf8usbmM6BE/TOPysCdIA==
 
 math-intrinsics@^1.1.0:
@@ -1875,7 +1925,7 @@ media-typer@0.3.0:
 
 mercadopago@^2.11.0:
   version "2.12.1"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/mercadopago/-/mercadopago-2.12.1.tgz"
+  resolved "https://registry.npmjs.org/mercadopago/-/mercadopago-2.12.1.tgz"
   integrity sha512-7jyAl3hRVairUNMtOD7Lum/fafJwGALzdMqBOCm3JXt18GksSLYNyDGxSxte7CnYiS4sUSlfeYnZoRkPbb4RMA==
   dependencies:
     node-fetch "^2.7.0"
@@ -1947,6 +1997,11 @@ mimic-response@^3.1.0:
   resolved "https://registry.npmjs.org/mimic-response/-/mimic-response-3.1.0.tgz"
   integrity sha512-z0yWI+4FDrrweS8Zmt4Ej5HdJmky15+L2e6Wgn3+iK5fWzb6T3fhNFq2+MeTRb064c6Wr4N/wv0DzQTjNzHNGQ==
 
+minimalistic-assert@^1.0.0:
+  version "1.0.1"
+  resolved "https://registry.npmjs.org/minimalistic-assert/-/minimalistic-assert-1.0.1.tgz"
+  integrity sha512-UtJcAD4yEaGtjPezWuO9wC4nwUnVH/8/Im3yEHQP4b67cXlD/Qr9hdITCU1xDbSEXg2XKNaP8jsReV7vQd00/A==
+
 minimatch@^3.0.5, minimatch@^3.1.1, minimatch@^3.1.2:
   version "3.1.2"
   resolved "https://registry.npmjs.org/minimatch/-/minimatch-3.1.2.tgz"
@@ -1960,6 +2015,11 @@ minimatch@^9.0.4:
   integrity sha512-G6T0ZX48xgozx7587koeX9Ys2NYy6Gmv//P89sEte9V9whIapMNF4idKxnW2QtCcLiTWlb/wfCabAtAFWhhBow==
   dependencies:
     brace-expansion "^2.0.1"
+
+minimist@^1.2.5:
+  version "1.2.8"
+  resolved "https://registry.npmjs.org/minimist/-/minimist-1.2.8.tgz"
+  integrity sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA==
 
 mpg123-decoder@^1.0.0:
   version "1.0.0"
@@ -1975,7 +2035,7 @@ ms@^2.1.1, ms@^2.1.3:
 
 multer@^2.0.2:
   version "2.1.1"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/multer/-/multer-2.1.1.tgz"
+  resolved "https://registry.npmjs.org/multer/-/multer-2.1.1.tgz"
   integrity sha512-mo+QTzKlx8R7E5ylSXxWzGoXoZbOsRMpyitcht8By2KHvMbf3tjwosZ/Mu/XYU6UuJ3VZnODIrak5ZrPiPyB6A==
   dependencies:
     append-field "^1.0.0"
@@ -1998,7 +2058,7 @@ music-metadata@^7.12.3:
 
 mysql2@^3.11.5:
   version "3.22.3"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/mysql2/-/mysql2-3.22.3.tgz"
+  resolved "https://registry.npmjs.org/mysql2/-/mysql2-3.22.3.tgz"
   integrity sha512-uWWxvZSRvRhtBdh2CdcuK83YcOfPdmEeEYB069bAmPnV93QApDGVPuvCQOLjlh7tYHEWdgQPrn6kosDxHBVLkA==
   dependencies:
     aws-ssl-profiles "^1.1.2"
@@ -2012,7 +2072,7 @@ mysql2@^3.11.5:
 
 named-placeholders@^1.1.6:
   version "1.1.6"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/named-placeholders/-/named-placeholders-1.1.6.tgz"
+  resolved "https://registry.npmjs.org/named-placeholders/-/named-placeholders-1.1.6.tgz"
   integrity sha512-Tz09sEL2EEuv5fFowm419c1+a/jSMiBjI9gHxVLrVdbUkkNUUfjsVYs9pVZu5oCon/kmRh9TfLEObFtkVxmY0w==
   dependencies:
     lru.min "^1.1.0"
@@ -2052,7 +2112,7 @@ node-domexception@^1.0.0:
 
 node-fetch@^2.7.0:
   version "2.7.0"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/node-fetch/-/node-fetch-2.7.0.tgz"
+  resolved "https://registry.npmjs.org/node-fetch/-/node-fetch-2.7.0.tgz"
   integrity sha512-c4FRfUm/dbcWZ7U+1Wq0AwCyFL+3nt2bEw05wfxSz+DWpWsitgmSgYmy2dQdWyKC1694ELPqMs/YzUSNozLt8A==
   dependencies:
     whatwg-url "^5.0.0"
@@ -2420,7 +2480,7 @@ raw-body@^3.0.0:
 
 readable-stream@^3.0.2:
   version "3.6.2"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/readable-stream/-/readable-stream-3.6.2.tgz"
+  resolved "https://registry.npmjs.org/readable-stream/-/readable-stream-3.6.2.tgz"
   integrity sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA==
   dependencies:
     inherits "^2.0.3"
@@ -2514,7 +2574,7 @@ safe-stable-stringify@^2.3.1:
   resolved "https://registry.npmjs.org/safe-stable-stringify/-/safe-stable-stringify-2.5.0.tgz"
   integrity sha512-b3rppTKm9T+PsVCBEOUR46GWI7fdOs00VKZ1+9c1EWDaDMvjQc6tUwuFyIprgGgTcWoVHSKrU8H31ZHA2e0RHA==
 
-"safer-buffer@>= 2.1.2 < 3.0.0":
+safer-buffer@^2.1.0, "safer-buffer@>= 2.1.2 < 3.0.0":
   version "2.1.2"
   resolved "https://registry.npmjs.org/safer-buffer/-/safer-buffer-2.1.2.tgz"
   integrity sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==
@@ -2668,7 +2728,7 @@ split2@^4.0.0:
 
 sql-escaper@^1.3.3:
   version "1.3.3"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/sql-escaper/-/sql-escaper-1.3.3.tgz"
+  resolved "https://registry.npmjs.org/sql-escaper/-/sql-escaper-1.3.3.tgz"
   integrity sha512-BsTCV265VpTp8tm1wyIm1xqQCS+Q9NHx2Sr+WcnUrgLrQ6yiDIvHYJV5gHxsj1lMBy2zm5twLaZao8Jd+S8JJw==
 
 statuses@^2.0.1, statuses@2.0.1:
@@ -2683,7 +2743,7 @@ streamsearch@^1.1.0:
 
 string_decoder@^1.1.1, string_decoder@^1.3.0:
   version "1.3.0"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/string_decoder/-/string_decoder-1.3.0.tgz"
+  resolved "https://registry.npmjs.org/string_decoder/-/string_decoder-1.3.0.tgz"
   integrity sha512-hkRX8U1WjJFd8LsDJ2yQ/wWWxaopEsABU1XfkM8A+j0+85JAGppt16cr1Whg6KIbb4okU6Mql6BOj+uup/wKeA==
   dependencies:
     safe-buffer "~5.2.0"
@@ -2761,7 +2821,7 @@ touch@^3.1.0:
 
 tr46@~0.0.3:
   version "0.0.3"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/tr46/-/tr46-0.0.3.tgz"
+  resolved "https://registry.npmjs.org/tr46/-/tr46-0.0.3.tgz"
   integrity sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==
 
 ts-api-utils@^1.3.0:
@@ -2805,7 +2865,7 @@ type-is@^2.0.0, type-is@^2.0.1:
 
 typedarray@^0.0.6:
   version "0.0.6"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/typedarray/-/typedarray-0.0.6.tgz"
+  resolved "https://registry.npmjs.org/typedarray/-/typedarray-0.0.6.tgz"
   integrity sha512-/aCDEGatGvZ2BIk+HmLf4ifCJFwvKFNb9/JeZPMulfgFracn9QFcAf5GO8B/mweUjSoblS5In0cWhqpfs/5PQA==
 
 typescript@>=4, typescript@>=4.2.0:
@@ -2845,7 +2905,7 @@ url@0.11.0:
 
 util-deprecate@^1.0.1:
   version "1.0.2"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/util-deprecate/-/util-deprecate-1.0.2.tgz"
+  resolved "https://registry.npmjs.org/util-deprecate/-/util-deprecate-1.0.2.tgz"
   integrity sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==
 
 uuid@^10.0.0:
@@ -2860,13 +2920,24 @@ uuid@^10.0.0:
 
 uuid@^9.0.0:
   version "9.0.1"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/uuid/-/uuid-9.0.1.tgz"
+  resolved "https://registry.npmjs.org/uuid/-/uuid-9.0.1.tgz"
   integrity sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==
 
 vary@^1, vary@^1.1.2:
   version "1.1.2"
   resolved "https://registry.npmjs.org/vary/-/vary-1.1.2.tgz"
   integrity sha512-BNGbWLfd0eUPabhkXUVm0j8uuvREyTh5ovRa/dyow/BqAbZJyC+5fU+IzQOzmAKzYqYRAISoRhdQr3eIZ/PXqg==
+
+web-push@^3.6.7:
+  version "3.6.7"
+  resolved "https://registry.npmjs.org/web-push/-/web-push-3.6.7.tgz"
+  integrity sha512-OpiIUe8cuGjrj3mMBFWY+e4MMIkW3SVT+7vEIjvD9kejGUypv8GPDf84JdPWskK8zMRIJ6xYGm+Kxr8YkPyA0A==
+  dependencies:
+    asn1.js "^5.3.0"
+    http_ece "1.2.0"
+    https-proxy-agent "^7.0.0"
+    jws "^4.0.0"
+    minimist "^1.2.5"
 
 web-streams-polyfill@^3.0.3:
   version "3.3.3"
@@ -2875,12 +2946,12 @@ web-streams-polyfill@^3.0.3:
 
 webidl-conversions@^3.0.0:
   version "3.0.1"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/webidl-conversions/-/webidl-conversions-3.0.1.tgz"
+  resolved "https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-3.0.1.tgz"
   integrity sha512-2JAn3z8AR6rjK8Sm8orRC0h/bcl/DqL7tRPdGZ4I1CjdF+EaMLmYxBHyXuKL849eucPFhvBoxMsflfOb8kxaeQ==
 
 whatwg-url@^5.0.0:
   version "5.0.0"
-  resolved "https://packages.applied-caas-gateway1.internal.api.openai.org/artifactory/api/npm/npm-public/whatwg-url/-/whatwg-url-5.0.0.tgz"
+  resolved "https://registry.npmjs.org/whatwg-url/-/whatwg-url-5.0.0.tgz"
   integrity sha512-saE57nupxk6v3HY35+jzBwYa0rKSy0XR8JSxZPwgLr7ys0IBzhGviA1/TUGJLmSVqs8pb9AnvICXEuOHLprYTw==
   dependencies:
     tr46 "~0.0.3"

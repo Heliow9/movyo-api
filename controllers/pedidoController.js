@@ -1139,6 +1139,23 @@ const criarPedido = async (req, res) => {
 
         await novoPedido.save();
 
+        if (cartaoConfirmado && caixaAbertoCriacao) {
+          await vincularPedidoAoCaixa(novoPedido, caixaAbertoCriacao, { force: true });
+          await novoPedido.save();
+          await registrarMovimentoVenda({
+            pedido: novoPedido,
+            pagamento: {
+              metodo: "cartao",
+              valor: round2(totalNumber),
+              status: "confirmado",
+              mpPaymentId: novoPedido.mpPaymentId,
+            },
+            caixa: caixaAbertoCriacao,
+            restauranteId: restaurante,
+          }).catch((e) => console.warn("Falha ao registrar cartão no caixa:", e?.message || e));
+          await recalcularCaixa(caixaAbertoCriacao._id || caixaAbertoCriacao.id).catch(() => null);
+        }
+
         // Cartão só vira novo pedido quando aprovado. Se ficar pendente, não notifica desktop.
         if (novoPedido.status === "aguardando_pagamento" || novoPedido.statusPagamento === "pendente") {
           req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
@@ -1550,11 +1567,28 @@ const atualizarStatusPedido = async (req, res) => {
     if (status === "em_entrega") pedido.emEntregaEm = agoraStatus;
     if (status === "entregue") pedido.entregueEm = agoraStatus;
 
-    if (status === "em_producao" && !pedido.caixaSessaoId) {
-      const caixaAberto = await getCaixaAberto(pedido.restaurante?._id || pedido.restaurante).catch(() => null);
-      if (caixaAberto) await vincularPedidoAoCaixa(pedido, caixaAberto);
+    let caixaAbertoStatus = null;
+    if (status === "em_producao") {
+      caixaAbertoStatus = await getCaixaAberto(pedido.restaurante?._id || pedido.restaurante).catch(() => null);
+      if (caixaAbertoStatus) {
+        const caixaIdAtual = String(caixaAbertoStatus._id || caixaAbertoStatus.id || "");
+        const caixaIdPedido = String(pedido.caixaSessaoId || "");
+        const eventoFinanceiro = pedido.pagoEm || pedido.emProducaoEm || pedido.aceitoEm || pedido.criadoEm;
+        const eventoMs = eventoFinanceiro ? new Date(eventoFinanceiro).getTime() : NaN;
+        const aberturaMs = caixaAbertoStatus.abertoEm ? new Date(caixaAbertoStatus.abertoEm).getTime() : NaN;
+        const pertenceAoTurnoAtual = Number.isFinite(eventoMs) && Number.isFinite(aberturaMs) && eventoMs >= aberturaMs;
+        await vincularPedidoAoCaixa(pedido, caixaAbertoStatus, {
+          force: !caixaIdPedido || (caixaIdPedido !== caixaIdAtual && pertenceAoTurnoAtual),
+        });
+      }
     }
     await pedido.save();
+
+    if (status === "em_producao" && caixaAbertoStatus) {
+      // O movimento financeiro é criado na confirmação do pagamento. Aqui apenas
+      // recalculamos o caixa, evitando duplicar vendas em pedidos mistos/parciais.
+      await recalcularCaixa(caixaAbertoStatus._id || caixaAbertoStatus.id).catch(() => null);
+    }
 
     req.io?.to(`restaurante-${pedido.restaurante._id}`).emit("pedidoAtualizado", pedido);
     console.log(`📦 Status atualizado: ${statusAnterior} → ${status}`);

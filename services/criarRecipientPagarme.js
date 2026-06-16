@@ -2,10 +2,11 @@ const axios = require("axios");
 
 
 
-const PAGARME_API_KEY = "sk_test_146350bc4ec840e4b046d68a06668444";
+const PAGARME_API_KEY = String(process.env.PAGARME_SECRET_KEY || process.env.PAGARME_API_KEY || "").trim();
 
 async function criarRecipient({ nome, email, cnpj, contaBancaria }) {
   try {
+    if (!PAGARME_API_KEY) throw new Error("PAGARME_SECRET_KEY não configurada.");
     if (!contaBancaria || !contaBancaria.bank || !contaBancaria.account_number) {
       throw new Error("Dados bancários inválidos ou incompletos.");
     }

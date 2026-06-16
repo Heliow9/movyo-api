@@ -1,10 +1,11 @@
 const axios = require("axios");
 
-const PAGARME_API_KEY = "sk_test_146350bc4ec840e4b046d68a06668444";
+const PAGARME_API_KEY = String(process.env.PAGARME_SECRET_KEY || process.env.PAGARME_API_KEY || "").trim();
 const GOTRACK_RECIPIENT_ID = "re_cmbjn2ueb00ki0l9tiu99p3os";
 
 async function criarCobrancaPix({ itens, nomeCliente, telefoneCliente, valorTotal, pedidoId, restauranteRecipientId }) {
   try {
+    if (!PAGARME_API_KEY) throw new Error("PAGARME_SECRET_KEY não configurada.");
     const itensEmCentavos = itens.map((item, index) => ({
       description: item.description,
       quantity: item.quantity,
