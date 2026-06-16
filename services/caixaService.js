@@ -67,7 +67,15 @@ async function vincularPedidoAoCaixa(pedido, caixa) {
   if (!pedido.caixaSessaoId) pedido.caixaSessaoId = caixa._id || caixa.id;
   if (!pedido.operadorCaixaId) pedido.operadorCaixaId = caixa.operadorId;
   if (!pedido.operadorCaixaNome) pedido.operadorCaixaNome = caixa.operadorNome;
-  if (!pedido.aceitoEm) pedido.aceitoEm = new Date();
+  // Vincular ao caixa não significa aceitar o pedido. O marco de produção é gravado
+  // somente quando o restaurante efetivamente move o pedido para em_producao.
+  if (!pedido.dataOperacional) {
+    const raw = caixa.dataOperacional || caixa.abertoEm || new Date();
+    const d = new Date(raw);
+    if (!Number.isNaN(d.getTime())) {
+      pedido.dataOperacional = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+  }
   return pedido;
 }
 

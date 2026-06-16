@@ -43,6 +43,10 @@ function rowToPedidoLean(row = {}) {
   pedido.itens = parseJsonSafe(row.itens, []);
   pedido.pagamentos = parseJsonSafe(row.pagamentos, []);
   pedido.pagamento = parseJsonSafe(row.pagamento, null);
+  // Normaliza aliases do MySQL para os nomes usados pelos clientes.
+  pedido.createdAt = row.createdAt || row.created_at || row.criadoEm || null;
+  pedido.updatedAt = row.updatedAt || row.updated_at || row.statusAtualizadoEm || null;
+  pedido.criadoEm = row.criadoEm || pedido.createdAt;
   return pedido;
 }
 
@@ -1237,19 +1241,26 @@ const listarPedidosPorRestaurante = async (req, res) => {
 
     const whereSql = where.join(" AND ");
 
-    const [[countRow]] = await queryWithRetry(
-      `SELECT COUNT(*) AS total FROM pedidos WHERE ${whereSql}`,
-      params
-    );
-
-    const [rows] = await queryWithRetry(
-      `SELECT *
-         FROM pedidos
-        WHERE ${whereSql}
-        ORDER BY criadoEm DESC, created_at DESC, id DESC
-        LIMIT ? OFFSET ?`,
-      [...params, limitNum, offset]
-    );
+    // Executa contagem e listagem em paralelo. Antes eram sequenciais e a
+    // latência do MySQL externo era somada, aumentando o risco de timeout.
+    const [countResult, rowsResult] = await Promise.all([
+      queryWithRetry(
+        `SELECT COUNT(*) AS total FROM pedidos WHERE ${whereSql}`,
+        params,
+        { label: "pedidos.listar.count" }
+      ),
+      queryWithRetry(
+        `SELECT *
+           FROM pedidos
+          WHERE ${whereSql}
+          ORDER BY criadoEm DESC, created_at DESC, id DESC
+          LIMIT ? OFFSET ?`,
+        [...params, limitNum, offset],
+        { label: "pedidos.listar.rows" }
+      ),
+    ]);
+    const countRow = countResult?.[0]?.[0] || {};
+    const rows = rowsResult?.[0] || [];
 
     const pedidos = rows.map(rowToPedidoLean);
     return res.json({ total: Number(countRow?.total || 0), page: pageNum, limit: limitNum, pedidos });
@@ -1532,7 +1543,10 @@ const atualizarStatusPedido = async (req, res) => {
     pedido.status = status;
     const agoraStatus = new Date();
     pedido.statusAtualizadoEm = agoraStatus;
-    if (status === "em_producao") pedido.emProducaoEm = agoraStatus;
+    if (status === "em_producao") {
+      pedido.emProducaoEm = agoraStatus;
+      if (!pedido.aceitoEm) pedido.aceitoEm = agoraStatus;
+    }
     if (status === "em_entrega") pedido.emEntregaEm = agoraStatus;
     if (status === "entregue") pedido.entregueEm = agoraStatus;
 
