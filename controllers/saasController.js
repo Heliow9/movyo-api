@@ -130,6 +130,20 @@ async function sqlScalar(query, params=[], key='total'){
   return Number(row?.[key] || 0);
 }
 
+async function tableColumns(table){
+  try {
+    const [rows] = await pool.query(`SHOW COLUMNS FROM ${table}`);
+    return new Set((rows || []).map((r) => r.Field));
+  } catch {
+    return new Set();
+  }
+}
+function coalesceExisting(columns, candidates, fallback){
+  const existing = candidates.filter((c) => columns.has(c));
+  if (!existing.length) return fallback;
+  return existing.length === 1 ? existing[0] : `COALESCE(${existing.join(', ')})`;
+}
+
 
 function startOfToday(){ const d = new Date(); d.setHours(0,0,0,0); return d; }
 function endOfToday(){ const d = new Date(); d.setHours(23,59,59,999); return d; }
@@ -205,6 +219,30 @@ function matchesRestaurante(doc, rid){ return !rid || belongsToRestaurante(doc, 
 function isDocInRange(doc, inicio, fim, fields){
   return fields.some((field) => inDateRange(doc?.[field], inicio, fim));
 }
+
+function caixaSessaoIntersectsPeriodo(c, inicio, fim){
+  if (!c) return false;
+  const aberto = parseLocalDateInput(c.abertoEm || c.createdAt || c.dataOperacional, false);
+  const fechado = parseLocalDateInput(c.fechadoEm, true);
+  const dataOperacional = parseLocalDateInput(c.dataOperacional, false);
+  if (aberto && !isNaN(aberto.getTime())) {
+    const fimCaixa = fechado && !isNaN(fechado.getTime()) ? fechado : new Date(8640000000000000);
+    return aberto <= fim && fimCaixa >= inicio;
+  }
+  return !!dataOperacional && dataOperacional >= inicio && dataOperacional <= fim;
+}
+function caixaSessaoLabel(c){
+  const id = docId(c);
+  const data = c?.dataOperacional || dateOnlyISO(c?.abertoEm) || 'sem-data';
+  const operador = c?.operadorNome ? ` - ${c.operadorNome}` : '';
+  return `${data} / Caixa ${id.slice(-6)}${operador}`;
+}
+function pedidoCaixaLabel(p, caixaMap){
+  const caixaId = String(p?.caixaSessaoId || '');
+  const caixa = caixaId ? caixaMap.get(caixaId) : null;
+  return caixa ? caixaSessaoLabel(caixa) : 'Sem caixa vinculado';
+}
+
 function sumValues(rows, picker){
   return (rows || []).reduce((acc, row) => acc + Number(picker(row) || 0), 0);
 }
@@ -282,15 +320,23 @@ function isVendaPedidoNoPeriodo(p, inicio, fim){
   return !!d && inDateRange(d, inicio, fim);
 }
 
-async function pedidosPeriodoQuery(restauranteId, inicio, fim){
+async function pedidosPeriodoQuery(restauranteId, inicio, fim, caixaIds=[]){
   const rest = restauranteId ? ' AND restaurante = ?' : '';
-  const params = restauranteId ? [String(restauranteId), sqlDate(inicio), sqlDate(fim)] : [sqlDate(inicio), sqlDate(fim)];
-  // Fonte de verdade financeira: pagoEm quando existir; caso contrário criadoEm.
-  // A confirmação final é aplicada por isVendaConfirmada para suportar pagamento na entrega.
+  const params = restauranteId ? [String(restauranteId)] : [];
+  const ids = Array.from(new Set((caixaIds || []).map(String).filter(Boolean)));
+  let filtroPeriodo = 'COALESCE(pagoEm, criadoEm) BETWEEN ? AND ?';
+  if (ids.length) {
+    filtroPeriodo = `(caixaSessaoId IN (${ids.map(() => '?').join(',')}) OR ((caixaSessaoId IS NULL OR caixaSessaoId = '') AND COALESCE(pagoEm, criadoEm) BETWEEN ? AND ?))`;
+    params.push(...ids, sqlDate(inicio), sqlDate(fim));
+  } else {
+    params.push(sqlDate(inicio), sqlDate(fim));
+  }
+  // Prioridade: sessão de caixa. Assim um caixa que abriu no dia 16 e fechou no dia 17
+  // permanece inteiro no mesmo relatório, sem dividir pedidos por virada de data.
   const [rows] = await pool.query(`
     SELECT * FROM pedidos
      WHERE 1=1${rest}
-       AND COALESCE(pagoEm, criadoEm) BETWEEN ? AND ?
+       AND ${filtroPeriodo}
        AND LOWER(COALESCE(status,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
        AND LOWER(COALESCE(statusPagamento,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
      ORDER BY COALESCE(pagoEm, criadoEm) DESC
@@ -518,6 +564,11 @@ module.exports = {
       const fim = req.query.dataFim || req.query.data ? endOfDayValue(req.query.dataFim || req.query.data) : endOfToday();
       const inicioSql = sqlDate(inicio);
       const fimSql = sqlDate(fim);
+      const pedidoColumns = await tableColumns('pedidos');
+      const pedidoDataExpr = coalesceExisting(pedidoColumns, ['criadoEm','createdAt','created_at','data'], 'criadoEm');
+      const vendaDataExpr = pedidoColumns.has('pagoEm') ? `COALESCE(pagoEm, ${pedidoDataExpr})` : pedidoDataExpr;
+      const pedidoOrderExpr = coalesceExisting(pedidoColumns, ['criadoEm','createdAt','created_at','data'], pedidoDataExpr);
+      const pedidoIdExpr = coalesceExisting(pedidoColumns, ['id','_id'], 'id');
 
       const pedidoRestWhere = idFilter('restaurante', rid);
       const caixaRestWhere = idFilter('restauranteId', rid);
@@ -553,14 +604,14 @@ module.exports = {
           SELECT COUNT(*) pedidosHoje
             FROM pedidos
            WHERE 1=1${pedidoRestWhere.sql}
-             AND criadoEm BETWEEN ? AND ?
+             AND ${pedidoDataExpr} BETWEEN ? AND ?
              ${notCanceledSql}
         `, [...pedidoRestWhere.params, inicioSql, fimSql]),
         sqlOne(`
           SELECT COUNT(*) quantidadeVendas, COALESCE(SUM(COALESCE(total,0)),0) vendasHoje
             FROM pedidos
            WHERE 1=1${pedidoRestWhere.sql}
-             AND COALESCE(pagoEm, criadoEm) BETWEEN ? AND ?
+             AND ${vendaDataExpr} BETWEEN ? AND ?
              ${notCanceledSql}
              AND (${SQL_VENDA_CONFIRMADA})
         `, [...pedidoRestWhere.params, inicioSql, fimSql]),
@@ -586,12 +637,12 @@ module.exports = {
              AND LOWER(COALESCE(tipo,'')) IN ('entrada','venda')
         `, [...movimentoRestWhere.params, inicioSql, fimSql]),
         pool.query(`
-          SELECT id, numeroPedido, restaurante, nomeCliente, origem, status, formaPagamento, total, criadoEm
+          SELECT ${pedidoIdExpr} AS id, numeroPedido, restaurante, nomeCliente, origem, status, formaPagamento, total, ${pedidoDataExpr} AS criadoEm
             FROM pedidos
            WHERE 1=1${pedidoRestWhere.sql}
-             AND criadoEm BETWEEN ? AND ?
+             AND ${pedidoDataExpr} BETWEEN ? AND ?
              ${notCanceledSql}
-           ORDER BY criadoEm DESC, created_at DESC, id DESC
+           ORDER BY ${pedidoOrderExpr} DESC, id DESC
            LIMIT 15
         `, [...pedidoRestWhere.params, inicioSql, fimSql]).then(([rows]) => rows || [])
       ]);
@@ -766,7 +817,11 @@ module.exports = {
       const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';
       const inicio = startOfDayValue(req.query.dataInicio || req.query.data || new Date());
       const fim = endOfDayValue(req.query.dataFim || req.query.data || new Date());
-      const pedidos = await pedidosPeriodoQuery(restauranteId, inicio, fim);
+      const caixasRaw = await CaixaSessao.find({}).sort({abertoEm:-1}).lean();
+      const caixas = (caixasRaw || []).filter((c) => matchesRestaurante(c, restauranteId) && caixaSessaoIntersectsPeriodo(c, inicio, fim));
+      const caixaMap = new Map(caixas.map((c) => [docId(c), c]));
+      const caixaIds = Array.from(caixaMap.keys());
+      const pedidos = await pedidosPeriodoQuery(restauranteId, inicio, fim, caixaIds);
       const porForma = {};
       let total = 0;
       let quantidadePedidos = 0;
@@ -774,6 +829,7 @@ module.exports = {
       const porStatus = {};
       const porOrigem = {};
       const porDia = {};
+      const porCaixa = {};
       for (const p of pedidos) {
         if (!isVendaConfirmada(p)) continue;
         const valor = Number(p.total || p.valorTotal || 0);
@@ -787,9 +843,11 @@ module.exports = {
         const statusNorm = String(p.status || p.statusPagamento || 'sem_status').toLowerCase();
         const origemNorm = String(p.origem || 'nao_informada').toLowerCase();
         const dia = dateOnlyISO(dataVendaPedido(p)) || 'sem_data';
+        const caixaLabel = pedidoCaixaLabel(p, caixaMap);
         porStatus[statusNorm] = (porStatus[statusNorm] || 0) + 1;
         porOrigem[origemNorm] = (porOrigem[origemNorm] || 0) + valor;
         porDia[dia] = (porDia[dia] || 0) + valor;
+        porCaixa[caixaLabel] = (porCaixa[caixaLabel] || 0) + valor;
         for (const item of extractItensPedido(p)) {
           const nome = itemNome(item);
           const qtd = itemQtd(item);
@@ -801,7 +859,24 @@ module.exports = {
         }
       }
       const produtosMaisVendidos = Array.from(produtos.values()).sort((a,b)=>b.quantidade-a.quantidade).slice(0,15);
-      return res.json({ criterio:'vendas confirmadas; data financeira = pagoEm ou criadoEm', restauranteId: restauranteId || null, dataInicio: dateOnlyISO(inicio), dataFim: dateOnlyISO(fim), quantidadePedidos, total, ticketMedio: quantidadePedidos ? total/quantidadePedidos : 0, porForma, porStatus, porOrigem, porDia, produtosMaisVendidos, pedidos: pedidos.slice(0,100).map(p=>({ id:docId(p), numeroPedido:p.numeroPedido, cliente:p.nomeCliente, formaPagamento:p.formaPagamento, status:p.status, statusPagamento:p.statusPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm || p.created_at, pagoEm:p.pagoEm })) });
+      return res.json({
+        criterio:'vendas confirmadas por sessão de caixa; se o caixa virar o dia, os pedidos continuam no mesmo caixa',
+        criterioCaixa:true,
+        restauranteId: restauranteId || null,
+        dataInicio: dateOnlyISO(inicio),
+        dataFim: dateOnlyISO(fim),
+        quantidadePedidos,
+        total,
+        ticketMedio: quantidadePedidos ? total/quantidadePedidos : 0,
+        porForma,
+        porStatus,
+        porOrigem,
+        porDia,
+        porCaixa,
+        produtosMaisVendidos,
+        caixas: caixas.slice(0,80).map(c=>({id:docId(c), restauranteId:c.restauranteId, operadorNome:c.operadorNome, status:c.status, dataOperacional:c.dataOperacional, abertoEm:c.abertoEm, fechadoEm:c.fechadoEm, totalVendas:Number(c.totalVendas||0), totalPedidos:Number(c.totalPedidos||0)})),
+        pedidos: pedidos.slice(0,100).map(p=>({ id:docId(p), numeroPedido:p.numeroPedido, cliente:p.nomeCliente, formaPagamento:p.formaPagamento, status:p.status, statusPagamento:p.statusPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm || p.created_at, pagoEm:p.pagoEm, caixaSessaoId:p.caixaSessaoId, caixa: pedidoCaixaLabel(p, caixaMap) }))
+      });
     }catch(e){ console.error('relatorio vendas saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatório de vendas.', erro:e.message }); }
   },
   async relatorioCaixa(req,res){
@@ -815,9 +890,9 @@ module.exports = {
         CaixaMovimento.find({}).sort({data:-1}).lean()
       ]);
       const nomes = restauranteNomeMap(restaurantes);
-      const caixas = (caixasRaw || []).filter((c) => matchesRestaurante(c, restauranteId) && isDocInRange(c, inicio, fim, ['abertoEm','fechadoEm','dataOperacional']));
+      const caixas = (caixasRaw || []).filter((c) => matchesRestaurante(c, restauranteId) && caixaSessaoIntersectsPeriodo(c, inicio, fim));
       const caixasIds = new Set(caixas.map((c) => docId(c)));
-      const movimentos = (movimentosRaw || []).filter((m) => matchesRestaurante(m, restauranteId) && isDocInRange(m, inicio, fim, ['data','createdAt']) && (!m.caixaSessaoId || caixasIds.has(String(m.caixaSessaoId))));
+      const movimentos = (movimentosRaw || []).filter((m) => matchesRestaurante(m, restauranteId) && ((m.caixaSessaoId && caixasIds.has(String(m.caixaSessaoId))) || (!m.caixaSessaoId && isDocInRange(m, inicio, fim, ['data','createdAt']))));
       const resumo = {
         caixas: caixas.length,
         caixasAbertos: caixas.filter((c) => String(c.status || '').toLowerCase() === 'aberto').length,
@@ -851,7 +926,7 @@ module.exports = {
         item.pedidos += Number(c.totalPedidos || 0);
       }
       return res.json({
-        criterio:'caixas e movimentos no periodo selecionado',
+        criterio:'sessões de caixa que cruzam o período selecionado; movimentos vinculados ao caixa entram por inteiro',
         restauranteId: restauranteId || null,
         dataInicio: dateOnlyISO(inicio),
         dataFim: dateOnlyISO(fim),
