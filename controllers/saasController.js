@@ -12,6 +12,11 @@ const CaixaSessao = require('../models/CaixaSessao');
 const CaixaMovimento = require('../models/CaixaMovimento');
 const OperadorCaixa = require('../models/OperadorCaixa');
 const Entregador = require('../models/Entregador');
+const EntregadorOnline = require('../models/EntregadorOnline');
+const Insumo = require('../models/Insumo');
+const MovimentoEstoque = require('../models/MovimentoEstoque');
+const Receita = require('../models/Receita');
+const PushSubscription = require('../models/PushSubscription');
 const { pool, testConnection } = require('../db/mysql');
 const apiMonitor = require('../utils/apiMonitor');
 const AuditLog = require('../models/AuditLog');
@@ -176,6 +181,65 @@ function parseStatusBot(r){
   if (!st) return { ligado:false, estado:'desconhecido' };
   if (typeof st === 'object') return st;
   try { return JSON.parse(String(st)); } catch { return { ligado:false, estado:String(st) }; }
+}
+function safeObject(value, fallback={}){
+  if (!value) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function boolLike(value, defaultValue=false){
+  if (value === undefined || value === null || value === '') return defaultValue;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const s = String(value).trim().toLowerCase();
+  if (['true','1','sim','yes','on','ligado','ativo','conectado'].includes(s)) return true;
+  if (['false','0','nao','no','off','desligado','inativo','desconectado'].includes(s)) return false;
+  return defaultValue;
+}
+function matchesRestaurante(doc, rid){ return !rid || belongsToRestaurante(doc, rid); }
+function isDocInRange(doc, inicio, fim, fields){
+  return fields.some((field) => inDateRange(doc?.[field], inicio, fim));
+}
+function sumValues(rows, picker){
+  return (rows || []).reduce((acc, row) => acc + Number(picker(row) || 0), 0);
+}
+function restauranteNomeMap(restaurantes=[]){
+  return new Map((restaurantes || []).map((r) => [docId(r), r.nome || `Restaurante ${docId(r).slice(-6)}`]));
+}
+function getRestauranteNome(map, restauranteId){
+  return map.get(String(restauranteId || '')) || (restauranteId ? `Restaurante ${String(restauranteId).slice(-6)}` : 'Sem restaurante');
+}
+function getInsumoQtdBase(insumo){ return Number(insumo?.estoqueAtualBase ?? insumo?.quantidadeBase ?? 0); }
+function getInsumoMinimoBase(insumo){ return Number(insumo?.estoqueMinimoBase ?? insumo?.minimoBase ?? 0); }
+function getInsumoCustoBase(insumo){ return Number(insumo?.custoMedioBase ?? insumo?.costBase ?? 0); }
+function calcProducaoReceita(receita, insumoMap){
+  const itens = Array.isArray(receita?.itens) ? receita.itens : safeObject(receita?.itens, []);
+  const detalhes = [];
+  for (const item of Array.isArray(itens) ? itens : []) {
+    const insumo = insumoMap.get(String(item?.insumoId || item?.insumo || ''));
+    const consumo = Number(item?.consumoBasePorUn || item?.quantidadeBase || item?.quantidade || 0);
+    if (!insumo || consumo <= 0) continue;
+    const estoque = getInsumoQtdBase(insumo);
+    detalhes.push({
+      insumoId: docId(insumo),
+      nome: insumo.nome,
+      baseUnit: insumo.baseUnit || insumo.unidadePadrao || '',
+      estoqueBase: estoque,
+      consumoBasePorUn: consumo,
+      maxPorInsumo: Math.floor(estoque / consumo)
+    });
+  }
+  detalhes.sort((a,b) => a.maxPorInsumo - b.maxPorInsumo);
+  return {
+    produzAte: detalhes.length ? Math.max(0, detalhes[0].maxPorInsumo) : 0,
+    gargalo: detalhes[0] || null,
+    detalhes
+  };
 }
 function isStatusCanceladoPedido(p){
   const st = String(p?.status || '').toLowerCase();
@@ -447,21 +511,106 @@ module.exports = {
     }catch(e){ console.error('saas overview:',e); res.status(500).json({mensagem:'Erro ao carregar visão geral SaaS.', erro:e.message}); }
   },
   async operacao(req,res){
+    const started = Date.now();
     try{
-      const rid = req.query.restauranteId;
+      const rid = req.query.restauranteId ? String(req.query.restauranteId) : '';
       const inicio = req.query.dataInicio || req.query.data ? startOfDayValue(req.query.dataInicio || req.query.data) : startOfToday();
       const fim = req.query.dataFim || req.query.data ? endOfDayValue(req.query.dataFim || req.query.data) : endOfToday();
-      const [restaurantes, pedidos, caixas, produtos, categorias, mesas, pedidosMesa, operadores, entregadores, movimentos] = await Promise.all([
-        Restaurante.find({}).lean(), Pedido.find({}).lean(), CaixaSessao.find({}).lean(), Produto.find({}).lean(), CategoriaProduto.find({}).lean(), Mesa.find({}).lean(), PedidoMesa.find({}).lean(), OperadorCaixa.find({}).lean(), Entregador.find({}).lean(), CaixaMovimento.find({}).lean()
+      const inicioSql = sqlDate(inicio);
+      const fimSql = sqlDate(fim);
+
+      const pedidoRestWhere = idFilter('restaurante', rid);
+      const caixaRestWhere = idFilter('restauranteId', rid);
+      const produtoRestWhere = idFilter('restaurante', rid);
+      const categoriaRestWhere = idFilter('restaurante', rid);
+      const mesaRestWhere = idFilter('restauranteId', rid);
+      const pedidoMesaRestWhere = idFilter('restauranteId', rid);
+      const operadorRestWhere = idFilter('restauranteId', rid);
+      const entregadorRestWhere = idFilter('restaurante', rid);
+      const movimentoRestWhere = idFilter('restauranteId', rid);
+      const notCanceledSql = `
+        AND LOWER(COALESCE(status,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
+        AND LOWER(COALESCE(statusPagamento,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
+      `;
+
+      const [
+        restaurantes,
+        pedidosPeriodoRow,
+        vendasPeriodoRow,
+        pedidosPendentes,
+        caixasAbertos,
+        produtosAtivos,
+        categoriasAtivas,
+        mesasOcupadas,
+        mesasAbertas,
+        operadoresAtivos,
+        entregadoresAtivos,
+        caixaHojeRow,
+        recentesRows
+      ] = await Promise.all([
+        Restaurante.find({}).lean(),
+        sqlOne(`
+          SELECT COUNT(*) pedidosHoje
+            FROM pedidos
+           WHERE 1=1${pedidoRestWhere.sql}
+             AND criadoEm BETWEEN ? AND ?
+             ${notCanceledSql}
+        `, [...pedidoRestWhere.params, inicioSql, fimSql]),
+        sqlOne(`
+          SELECT COUNT(*) quantidadeVendas, COALESCE(SUM(COALESCE(total,0)),0) vendasHoje
+            FROM pedidos
+           WHERE 1=1${pedidoRestWhere.sql}
+             AND COALESCE(pagoEm, criadoEm) BETWEEN ? AND ?
+             ${notCanceledSql}
+             AND (${SQL_VENDA_CONFIRMADA})
+        `, [...pedidoRestWhere.params, inicioSql, fimSql]),
+        sqlScalar(`
+          SELECT COUNT(*) total
+            FROM pedidos
+           WHERE 1=1${pedidoRestWhere.sql}
+             AND LOWER(COALESCE(status,'')) IN ('pendente','novo','preparando','em_preparo')
+             AND LOWER(COALESCE(statusPagamento,'')) NOT IN ('cancelado','cancelada','expirado','estornado')
+        `, pedidoRestWhere.params),
+        sqlScalar(`SELECT COUNT(*) total FROM caixa_sessoes WHERE LOWER(COALESCE(status,''))='aberto'${caixaRestWhere.sql}`, caixaRestWhere.params),
+        sqlScalar(`SELECT COUNT(*) total FROM produtos WHERE COALESCE(ativo,1) <> 0 AND COALESCE(disponivel,1) <> 0${produtoRestWhere.sql}`, produtoRestWhere.params),
+        sqlScalar(`SELECT COUNT(*) total FROM categorias_produto WHERE COALESCE(ativa,1) <> 0${categoriaRestWhere.sql}`, categoriaRestWhere.params),
+        sqlScalar(`SELECT COUNT(*) total FROM mesas WHERE LOWER(COALESCE(status,'')) <> 'livre'${mesaRestWhere.sql}`, mesaRestWhere.params),
+        sqlScalar(`SELECT COUNT(*) total FROM pedidos_mesa WHERE LOWER(COALESCE(status,''))='aberto'${pedidoMesaRestWhere.sql}`, pedidoMesaRestWhere.params),
+        sqlScalar(`SELECT COUNT(*) total FROM operadores_caixa WHERE COALESCE(ativo,1) <> 0${operadorRestWhere.sql}`, operadorRestWhere.params),
+        sqlScalar(`SELECT COUNT(*) total FROM entregadores WHERE COALESCE(status,1) <> 0 AND LOWER(COALESCE(statusConta,'ativo')) <> 'bloqueado'${entregadorRestWhere.sql}`, entregadorRestWhere.params),
+        sqlOne(`
+          SELECT COALESCE(SUM(COALESCE(valor,0)),0) totalCaixaHoje
+            FROM caixa_movimentos
+           WHERE 1=1${movimentoRestWhere.sql}
+             AND data BETWEEN ? AND ?
+             AND LOWER(COALESCE(tipo,'')) IN ('entrada','venda')
+        `, [...movimentoRestWhere.params, inicioSql, fimSql]),
+        pool.query(`
+          SELECT id, numeroPedido, restaurante, nomeCliente, origem, status, formaPagamento, total, criadoEm
+            FROM pedidos
+           WHERE 1=1${pedidoRestWhere.sql}
+             AND criadoEm BETWEEN ? AND ?
+             ${notCanceledSql}
+           ORDER BY criadoEm DESC, created_at DESC, id DESC
+           LIMIT 15
+        `, [...pedidoRestWhere.params, inicioSql, fimSql]).then(([rows]) => rows || [])
       ]);
-      const list = (arr)=> rid ? arr.filter(x=>belongsToRestaurante(x,rid)) : arr;
-      const pedidosFil = list(pedidos), caixasFil=list(caixas), produtosFil=list(produtos), categoriasFil=list(categorias), mesasFil=list(mesas), pedidosMesaFil=list(pedidosMesa), operadoresFil=list(operadores), entregadoresFil=list(entregadores), movFil=list(movimentos);
-      const pedidosPeriodo = pedidosFil.filter(p => isPedidoNoPeriodo(p, inicio, fim));
-      const vendasPeriodo = pedidosFil.filter(p => isVendaConfirmada(p) && isVendaPedidoNoPeriodo(p, inicio, fim));
-      const movimentosPeriodo = filterDateRange(movFil, inicio, fim, ['data','createdAt']);
-      const cards = { pedidosHoje: pedidosPeriodo.length, vendasHoje: vendasPeriodo.reduce((acc,p)=>acc+num(p.total || p.valorTotal),0), pedidosPendentes: pedidosFil.filter(p=>['pendente','novo','preparando','em_preparo'].includes(String(p.status||'').toLowerCase())).length, caixasAbertos: caixasFil.filter(c=>String(c.status).toLowerCase()==='aberto').length, produtosAtivos: produtosFil.filter(p=>p.ativo !== false && p.disponivel !== false).length, categoriasAtivas: categoriasFil.filter(c=>c.ativa !== false).length, mesasOcupadas: mesasFil.filter(m=>String(m.status||'').toLowerCase() !== 'livre').length, mesasAbertas: pedidosMesaFil.filter(p=>String(p.status||'').toLowerCase()==='aberto').length, operadoresAtivos: operadoresFil.filter(o=>o.ativo !== false).length, entregadoresAtivos: entregadoresFil.filter(e=>e.status !== false && e.statusConta !== 'bloqueado').length, totalCaixaHoje: movimentosPeriodo.filter(m=>['entrada','venda'].includes(String(m.tipo||'').toLowerCase())).reduce((a,m)=>a+num(m.valor),0) };
-      const recentes = pedidosPeriodo.sort((a,b)=>new Date(b.criadoEm||0)-new Date(a.criadoEm||0)).slice(0,15).map(p=>({id:docId(p), numeroPedido:p.numeroPedido, restaurante:p.restaurante, nomeCliente:p.nomeCliente, origem:p.origem, status:p.status, formaPagamento:p.formaPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm}));
-      return res.json({cards,recentes, restaurantes: restaurantes.map(publicRestaurante)});
+
+      const cards = {
+        pedidosHoje: Number(pedidosPeriodoRow?.pedidosHoje || 0),
+        vendasHoje: Number(vendasPeriodoRow?.vendasHoje || 0),
+        pedidosPendentes,
+        caixasAbertos,
+        produtosAtivos,
+        categoriasAtivas,
+        mesasOcupadas,
+        mesasAbertas,
+        operadoresAtivos,
+        entregadoresAtivos,
+        totalCaixaHoje: Number(caixaHojeRow?.totalCaixaHoje || 0)
+      };
+      const recentes = (recentesRows || []).map(p=>({id:docId(p), numeroPedido:p.numeroPedido, restaurante:p.restaurante, nomeCliente:p.nomeCliente, origem:p.origem, status:p.status, formaPagamento:p.formaPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm}));
+      return res.json({cards,recentes, restaurantes: restaurantes.map(publicRestaurante), performanceMs: Date.now() - started});
     }catch(e){ console.error('saas operacao:',e); res.status(500).json({mensagem:'Erro ao carregar operação SaaS.', erro:e.message}); }
   },
   async detalheRestaurante(req,res){
@@ -654,6 +803,286 @@ module.exports = {
       const produtosMaisVendidos = Array.from(produtos.values()).sort((a,b)=>b.quantidade-a.quantidade).slice(0,15);
       return res.json({ criterio:'vendas confirmadas; data financeira = pagoEm ou criadoEm', restauranteId: restauranteId || null, dataInicio: dateOnlyISO(inicio), dataFim: dateOnlyISO(fim), quantidadePedidos, total, ticketMedio: quantidadePedidos ? total/quantidadePedidos : 0, porForma, porStatus, porOrigem, porDia, produtosMaisVendidos, pedidos: pedidos.slice(0,100).map(p=>({ id:docId(p), numeroPedido:p.numeroPedido, cliente:p.nomeCliente, formaPagamento:p.formaPagamento, status:p.status, statusPagamento:p.statusPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm || p.created_at, pagoEm:p.pagoEm })) });
     }catch(e){ console.error('relatorio vendas saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatório de vendas.', erro:e.message }); }
+  },
+  async relatorioCaixa(req,res){
+    try{
+      const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';
+      const inicio = startOfDayValue(req.query.dataInicio || req.query.inicio || req.query.data || new Date());
+      const fim = endOfDayValue(req.query.dataFim || req.query.fim || req.query.data || new Date());
+      const [restaurantes, caixasRaw, movimentosRaw] = await Promise.all([
+        Restaurante.find({}).lean(),
+        CaixaSessao.find({}).sort({abertoEm:-1}).lean(),
+        CaixaMovimento.find({}).sort({data:-1}).lean()
+      ]);
+      const nomes = restauranteNomeMap(restaurantes);
+      const caixas = (caixasRaw || []).filter((c) => matchesRestaurante(c, restauranteId) && isDocInRange(c, inicio, fim, ['abertoEm','fechadoEm','dataOperacional']));
+      const caixasIds = new Set(caixas.map((c) => docId(c)));
+      const movimentos = (movimentosRaw || []).filter((m) => matchesRestaurante(m, restauranteId) && isDocInRange(m, inicio, fim, ['data','createdAt']) && (!m.caixaSessaoId || caixasIds.has(String(m.caixaSessaoId))));
+      const resumo = {
+        caixas: caixas.length,
+        caixasAbertos: caixas.filter((c) => String(c.status || '').toLowerCase() === 'aberto').length,
+        caixasFechados: caixas.filter((c) => String(c.status || '').toLowerCase() === 'fechado').length,
+        totalVendas: sumValues(caixas, (c) => c.totalVendas),
+        dinheiro: sumValues(caixas, (c) => c.totalDinheiro),
+        pix: sumValues(caixas, (c) => c.totalPix),
+        credito: sumValues(caixas, (c) => c.totalCredito),
+        debito: sumValues(caixas, (c) => c.totalDebito),
+        online: sumValues(caixas, (c) => c.totalOnline),
+        outros: sumValues(caixas, (c) => c.totalOutros),
+        sangrias: sumValues(caixas, (c) => c.totalSangrias),
+        suprimentos: sumValues(caixas, (c) => c.totalSuprimentos),
+        pedidos: sumValues(caixas, (c) => c.totalPedidos),
+        movimentos: movimentos.length
+      };
+      resumo.saldoDinheiroProjetado = resumo.dinheiro + resumo.suprimentos - resumo.sangrias;
+      const porForma = { dinheiro: resumo.dinheiro, pix: resumo.pix, credito: resumo.credito, debito: resumo.debito, online: resumo.online, outros: resumo.outros };
+      const porTipoMovimento = {};
+      for (const m of movimentos) {
+        const tipo = String(m.tipo || 'outros').toLowerCase();
+        porTipoMovimento[tipo] = (porTipoMovimento[tipo] || 0) + Number(m.valor || 0);
+      }
+      const porRestauranteMap = new Map();
+      for (const c of caixas) {
+        const rid = String(c.restauranteId || '');
+        if (!porRestauranteMap.has(rid)) porRestauranteMap.set(rid, { restauranteId:rid, nome:getRestauranteNome(nomes, rid), caixas:0, vendas:0, pedidos:0 });
+        const item = porRestauranteMap.get(rid);
+        item.caixas += 1;
+        item.vendas += Number(c.totalVendas || 0);
+        item.pedidos += Number(c.totalPedidos || 0);
+      }
+      return res.json({
+        criterio:'caixas e movimentos no periodo selecionado',
+        restauranteId: restauranteId || null,
+        dataInicio: dateOnlyISO(inicio),
+        dataFim: dateOnlyISO(fim),
+        resumo,
+        porForma,
+        porTipoMovimento,
+        porRestaurante: Array.from(porRestauranteMap.values()).sort((a,b) => b.vendas - a.vendas).slice(0,20),
+        caixas: caixas.slice(0,80).map((c) => ({
+          id: docId(c),
+          restauranteId: c.restauranteId,
+          restaurante: getRestauranteNome(nomes, c.restauranteId),
+          operadorNome: c.operadorNome,
+          status: c.status,
+          dataOperacional: c.dataOperacional,
+          totalVendas: Number(c.totalVendas || 0),
+          totalPedidos: Number(c.totalPedidos || 0),
+          abertoEm: c.abertoEm,
+          fechadoEm: c.fechadoEm
+        })),
+        movimentosRecentes: movimentos.slice(0,60).map((m) => ({
+          id: docId(m),
+          restaurante: getRestauranteNome(nomes, m.restauranteId),
+          tipo: m.tipo,
+          formaPagamento: m.formaPagamento,
+          valor: Number(m.valor || 0),
+          origem: m.origem,
+          descricao: m.descricao,
+          data: m.data
+        }))
+      });
+    }catch(e){ console.error('relatorio caixa saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatorio de caixa.', erro:e.message }); }
+  },
+  async relatorioEstoque(req,res){
+    try{
+      const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';
+      const inicio = startOfDayValue(req.query.dataInicio || req.query.inicio || req.query.data || addDays(new Date(), -30));
+      const fim = endOfDayValue(req.query.dataFim || req.query.fim || req.query.data || new Date());
+      const [restaurantes, insumosRaw, receitasRaw, movimentosRaw] = await Promise.all([
+        Restaurante.find({}).lean(),
+        Insumo.find({}).lean(),
+        Receita.find({}).lean(),
+        MovimentoEstoque.find({}).sort({data:-1}).lean()
+      ]);
+      const nomes = restauranteNomeMap(restaurantes);
+      const insumos = (insumosRaw || []).filter((i) => matchesRestaurante(i, restauranteId) && i.ativo !== false);
+      const receitas = (receitasRaw || []).filter((r) => matchesRestaurante(r, restauranteId) && r.ativo !== false);
+      const movimentos = (movimentosRaw || []).filter((m) => matchesRestaurante(m, restauranteId) && isDocInRange(m, inicio, fim, ['data','createdAt']));
+      const insumoMap = new Map(insumos.map((i) => [docId(i), i]));
+      const abaixoMinimo = insumos.filter((i) => getInsumoQtdBase(i) <= getInsumoMinimoBase(i)).sort((a,b) => getInsumoQtdBase(a) - getInsumoQtdBase(b));
+      const receitasCriticas = receitas
+        .map((r) => ({ receitaId:docId(r), restauranteId:r.restauranteId, restaurante:getRestauranteNome(nomes, r.restauranteId), nome:r.nome, ...calcProducaoReceita(r, insumoMap) }))
+        .filter((r) => r.gargalo)
+        .sort((a,b) => a.produzAte - b.produzAte)
+        .slice(0,30);
+      const porRestauranteMap = new Map();
+      for (const i of insumos) {
+        const rid = String(i.restauranteId || '');
+        if (!porRestauranteMap.has(rid)) porRestauranteMap.set(rid, { restauranteId:rid, nome:getRestauranteNome(nomes, rid), insumos:0, abaixoMinimo:0, custoEstoque:0 });
+        const item = porRestauranteMap.get(rid);
+        item.insumos += 1;
+        item.custoEstoque += getInsumoQtdBase(i) * getInsumoCustoBase(i);
+        if (getInsumoQtdBase(i) <= getInsumoMinimoBase(i)) item.abaixoMinimo += 1;
+      }
+      const porTipoMovimento = {};
+      for (const m of movimentos) {
+        const tipo = String(m.tipo || 'outros').toLowerCase();
+        porTipoMovimento[tipo] = (porTipoMovimento[tipo] || 0) + Math.abs(Number(m.quantidadeBase || 0));
+      }
+      return res.json({
+        criterio:'insumos ativos, alertas e movimentos de estoque no periodo selecionado',
+        restauranteId: restauranteId || null,
+        dataInicio: dateOnlyISO(inicio),
+        dataFim: dateOnlyISO(fim),
+        resumo:{
+          insumos: insumos.length,
+          receitas: receitas.length,
+          abaixoMinimo: abaixoMinimo.length,
+          custoEstoque: sumValues(insumos, (i) => getInsumoQtdBase(i) * getInsumoCustoBase(i)),
+          movimentos: movimentos.length,
+          receitasCriticas: receitasCriticas.length
+        },
+        porTipoMovimento,
+        porRestaurante: Array.from(porRestauranteMap.values()).sort((a,b) => b.abaixoMinimo - a.abaixoMinimo).slice(0,20),
+        abaixoMinimo: abaixoMinimo.slice(0,40).map((i) => ({
+          id: docId(i),
+          restaurante: getRestauranteNome(nomes, i.restauranteId),
+          nome: i.nome,
+          baseUnit: i.baseUnit || i.unidadePadrao || '',
+          estoqueAtualBase: getInsumoQtdBase(i),
+          estoqueMinimoBase: getInsumoMinimoBase(i),
+          custoMedioBase: getInsumoCustoBase(i)
+        })),
+        receitasCriticas,
+        movimentosRecentes: movimentos.slice(0,60).map((m) => ({
+          id: docId(m),
+          restaurante: getRestauranteNome(nomes, m.restauranteId),
+          insumoId: m.insumoId,
+          tipo: m.tipo,
+          quantidadeBase: Number(m.quantidadeBase || 0),
+          origem: m.origem,
+          observacao: m.observacao,
+          data: m.data
+        }))
+      });
+    }catch(e){ console.error('relatorio estoque saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatorio de estoque.', erro:e.message }); }
+  },
+  async relatorioEntregas(req,res){
+    try{
+      const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';
+      const inicio = startOfDayValue(req.query.dataInicio || req.query.inicio || req.query.data || new Date());
+      const fim = endOfDayValue(req.query.dataFim || req.query.fim || req.query.data || new Date());
+      const hoje = dateOnlyISO(new Date());
+      const [restaurantes, entregadoresRaw, onlineRaw, pedidosRaw] = await Promise.all([
+        Restaurante.find({}).lean(),
+        Entregador.find({}).lean(),
+        EntregadorOnline.find({}).lean(),
+        Pedido.find({}).sort({criadoEm:-1}).lean()
+      ]);
+      const nomes = restauranteNomeMap(restaurantes);
+      const entregadores = (entregadoresRaw || []).filter((e) => matchesRestaurante(e, restauranteId));
+      const onlineHoje = (onlineRaw || []).filter((o) => matchesRestaurante(o, restauranteId) && (String(o.dia || '') === hoje || isToday(o.dataEntrada)));
+      const pedidosEntrega = (pedidosRaw || []).filter((p) => {
+        const origem = String(p.origem || '').toLowerCase();
+        const status = String(p.status || '').toLowerCase();
+        const entregaLike = origem.includes('delivery') || origem.includes('entrega') || !!p.entregador || !!p.enderecoCliente;
+        return matchesRestaurante(p, restauranteId) && entregaLike && !isStatusCanceladoPedido(p) && isDocInRange(p, inicio, fim, ['criadoEm','pagoEm','createdAt']) && status !== 'cancelado';
+      });
+      const porStatus = {};
+      const porEntregadorMap = new Map();
+      const entregadorNome = new Map(entregadores.map((e) => [docId(e), e.nome || `Entregador ${docId(e).slice(-6)}`]));
+      for (const p of pedidosEntrega) {
+        const status = String(p.status || 'sem_status').toLowerCase();
+        porStatus[status] = (porStatus[status] || 0) + 1;
+        const eid = String(p.entregador || p.entregadorId || '');
+        if (!eid) continue;
+        if (!porEntregadorMap.has(eid)) porEntregadorMap.set(eid, { entregadorId:eid, nome:entregadorNome.get(eid) || `Entregador ${eid.slice(-6)}`, pedidos:0, total:0 });
+        const item = porEntregadorMap.get(eid);
+        item.pedidos += 1;
+        item.total += Number(p.total || p.valorTotal || 0);
+      }
+      const isEntregue = (p) => ['entregue','concluido','finalizado','finalizada'].includes(String(p.status || '').toLowerCase());
+      const isEmRota = (p) => ['em_entrega','em entrega','saiu_para_entrega','saiu para entrega'].includes(String(p.status || '').toLowerCase());
+      return res.json({
+        criterio:'pedidos de delivery/entrega no periodo selecionado',
+        restauranteId: restauranteId || null,
+        dataInicio: dateOnlyISO(inicio),
+        dataFim: dateOnlyISO(fim),
+        resumo:{
+          entregadores: entregadores.length,
+          entregadoresAtivos: entregadores.filter((e) => e.status !== false && e.statusConta !== 'bloqueado').length,
+          onlineHoje: onlineHoje.length,
+          pedidosEntrega: pedidosEntrega.length,
+          entregues: pedidosEntrega.filter(isEntregue).length,
+          emRota: pedidosEntrega.filter(isEmRota).length,
+          semEntregador: pedidosEntrega.filter((p) => !p.entregador && !p.entregadorId).length,
+          totalEntrega: sumValues(pedidosEntrega, (p) => p.total || p.valorTotal)
+        },
+        porStatus,
+        porEntregador: Array.from(porEntregadorMap.values()).sort((a,b) => b.pedidos - a.pedidos).slice(0,20),
+        onlineHoje: onlineHoje.slice(0,40).map((o) => ({
+          id: docId(o),
+          restaurante: getRestauranteNome(nomes, o.restauranteId),
+          entregadorId: o.entregadorId,
+          online: o.online !== false,
+          dataEntrada: o.dataEntrada,
+          dia: o.dia
+        })),
+        pedidosRecentes: pedidosEntrega.slice(0,80).map((p) => ({
+          id: docId(p),
+          numeroPedido: p.numeroPedido,
+          restaurante: getRestauranteNome(nomes, p.restaurante),
+          cliente: p.nomeCliente,
+          status: p.status,
+          entregador: entregadorNome.get(String(p.entregador || p.entregadorId || '')) || '',
+          total: p.total || p.valorTotal,
+          criadoEm: p.criadoEm
+        }))
+      });
+    }catch(e){ console.error('relatorio entregas saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatorio de entregas.', erro:e.message }); }
+  },
+  async relatorioIntegracoes(req,res){
+    try{
+      const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';
+      const [restaurantesRaw, pushRaw] = await Promise.all([
+        Restaurante.find({}).sort({created_at:-1}).lean(),
+        PushSubscription.find({}).lean()
+      ]);
+      const restaurantes = (restaurantesRaw || []).filter((r) => !restauranteId || docId(r) === restauranteId);
+      const pushAtivosPorRestaurante = new Map();
+      for (const p of (pushRaw || [])) {
+        if (p.ativo === false) continue;
+        const rid = String(p.restauranteId || '');
+        pushAtivosPorRestaurante.set(rid, (pushAtivosPorRestaurante.get(rid) || 0) + 1);
+      }
+      const linhas = restaurantes.map((r) => {
+        const mp = safeObject(r.mercadoPago);
+        const ifood = safeObject(r.ifood);
+        const bot = parseStatusBot(r);
+        const mercadoPagoConectado = boolLike(mp.conectado) || !!(mp.accessToken || mp.token || mp.access_token);
+        const ifoodConectado = boolLike(r.ifoodStatus) || boolLike(ifood.conectado) || !!ifood.accessToken;
+        return {
+          restauranteId: docId(r),
+          nome: r.nome,
+          plano: r.plano || 'free',
+          statusAssinatura: r.statusAssinatura || 'ativo',
+          botLigado: boolLike(bot.ligado),
+          botEstado: bot.estado || bot.status || (boolLike(bot.ligado) ? 'ligado' : 'desligado'),
+          ifoodConectado,
+          mercadoPagoConectado,
+          pagamentoCartaoAtivo: boolLike(r.pagamentoCartaoAtivo, true),
+          pushAtivos: pushAtivosPorRestaurante.get(docId(r)) || 0,
+          mercadoPagoUserId: mp.userId || null,
+          ifoodMerchantId: ifood.merchantId || ifood.merchant_id || r.ifoodIdentificador || null
+        };
+      });
+      const resumo = {
+        restaurantes: linhas.length,
+        botsLigados: linhas.filter((r) => r.botLigado).length,
+        ifoodConectados: linhas.filter((r) => r.ifoodConectado).length,
+        mercadoPagoConectados: linhas.filter((r) => r.mercadoPagoConectado).length,
+        cartaoAtivo: linhas.filter((r) => r.pagamentoCartaoAtivo).length,
+        pushAtivos: sumValues(linhas, (r) => r.pushAtivos),
+        pendencias: linhas.filter((r) => !r.mercadoPagoConectado || !r.botLigado || !r.pagamentoCartaoAtivo).length
+      };
+      return res.json({
+        criterio:'status consolidado de bot, marketplace, pagamentos e push',
+        restauranteId: restauranteId || null,
+        resumo,
+        linhas
+      });
+    }catch(e){ console.error('relatorio integracoes saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatorio de integracoes.', erro:e.message }); }
   },
   async listarAuditoria(req,res){
     try{

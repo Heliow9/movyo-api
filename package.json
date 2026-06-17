@@ -9,6 +9,7 @@
     "start": "node index.js",
     "dev": "nodemon --ignore sessions/ index.js",
     "migrate:mysql": "node scripts/sync-mysql.js",
+    "perf:indexes": "node scripts/ensure-performance-indexes.js",
     "push:generate-keys": "node scripts/generate-vapid-keys.js"
   },
   "dependencies": {

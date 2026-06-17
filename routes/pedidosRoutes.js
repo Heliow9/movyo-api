@@ -40,6 +40,30 @@ const {
   marcarItemEntregueCliente,
 } = require("../controllers/pedidoController");
 
+function aplicarDataNoPath(req, res, next) {
+  const { dia, mes, ano } = req.params;
+  if (!/^\d{1,2}$/.test(String(dia)) || !/^\d{1,2}$/.test(String(mes)) || !/^\d{4}$/.test(String(ano))) {
+    return next("route");
+  }
+
+  const day = Number(dia);
+  const month = Number(mes);
+  const year = Number(ano);
+  if (day < 1 || day > 31 || month < 1 || month > 12) {
+    return res.status(400).json({ message: "Data inválida." });
+  }
+
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+    return res.status(400).json({ message: "Data inválida." });
+  }
+
+  const data = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  req.query.dataInicio = req.query.dataInicio || data;
+  req.query.dataFim = req.query.dataFim || data;
+  return next();
+}
+
 module.exports = (io) => {
   const router = express.Router();
 
@@ -133,6 +157,7 @@ module.exports = (io) => {
   // =========================================================
   // 🔹 CATCH-ALL (SEMPRE A ÚLTIMA)
   // =========================================================
+  router.get("/:restauranteId/:dia/:mes/:ano", aplicarDataNoPath, authRestaurante, matchRestaurante, listarPedidosPorRestaurante);
   router.get("/:restauranteId", authRestaurante, matchRestaurante, listarPedidosPorRestaurante);
 
   return router;

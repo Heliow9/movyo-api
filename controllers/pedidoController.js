@@ -59,6 +59,38 @@ function dataInicioFimSql(dataInicio, dataFim) {
   return { inicio: `${ini} 00:00:00`, fim: `${fim} 23:59:59` };
 }
 
+const PEDIDOS_LIST_COUNT_CACHE_MS = Number(process.env.PEDIDOS_LIST_COUNT_CACHE_MS || 5000);
+const pedidosListCountCache = new Map();
+const PEDIDOS_LIST_COLUMNS = `
+  id, numeroPedido, restaurante, cliente, entregador, mesaId, mesaNumero, nomeCliente,
+  telefoneCliente, enderecoCliente, itens, total, taxaEntrega, formaPagamento, status,
+  statusPagamento, origem, observacao, pagamento, pagamentos, descontoValor, valorDesconto,
+  totalBruto, valorPago, valorPendente, mpPaymentId, garcomId, garcomNome, recebidoPor,
+  recebidoPorNome, fechadoPor, fechadoPorNome, criadoPor, criadoPorNome, criadoEm, pagoEm,
+  aceitoEm, emProducaoEm, emEntregaEm, statusAtualizadoEm, entregueEm, canceladoEm,
+  dataOperacional, caixaSessaoId, operadorCaixaId, operadorCaixaNome, created_at, updated_at
+`;
+
+function getPedidosCountCache(key) {
+  if (PEDIDOS_LIST_COUNT_CACHE_MS <= 0) return null;
+  const cached = pedidosListCountCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - cached.ts > PEDIDOS_LIST_COUNT_CACHE_MS) {
+    pedidosListCountCache.delete(key);
+    return null;
+  }
+  return cached.total;
+}
+
+function setPedidosCountCache(key, total) {
+  if (PEDIDOS_LIST_COUNT_CACHE_MS <= 0) return;
+  pedidosListCountCache.set(key, { total:Number(total || 0), ts:Date.now() });
+  if (pedidosListCountCache.size > 200) {
+    const oldestKey = pedidosListCountCache.keys().next().value;
+    if (oldestKey) pedidosListCountCache.delete(oldestKey);
+  }
+}
+
 
 /* =========================================================
    HELPERS (gerais + MP)
@@ -1215,6 +1247,7 @@ const criarPedido = async (req, res) => {
 ========================================================= */
 const listarPedidosPorRestaurante = async (req, res) => {
   const { restauranteId } = req.params;
+  const startedAt = Date.now();
 
   try {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
@@ -1257,17 +1290,26 @@ const listarPedidosPorRestaurante = async (req, res) => {
     }
 
     const whereSql = where.join(" AND ");
+    const countCacheKey = JSON.stringify({ whereSql, params });
+    const cachedTotal = getPedidosCountCache(countCacheKey);
+    const countPromise = cachedTotal === null
+      ? queryWithRetry(
+          `SELECT COUNT(*) AS total FROM pedidos WHERE ${whereSql}`,
+          params,
+          { label: "pedidos.listar.count" }
+        ).then((result) => {
+          const total = Number(result?.[0]?.[0]?.total || 0);
+          setPedidosCountCache(countCacheKey, total);
+          return total;
+        })
+      : Promise.resolve(cachedTotal);
 
     // Executa contagem e listagem em paralelo. Antes eram sequenciais e a
     // latência do MySQL externo era somada, aumentando o risco de timeout.
-    const [countResult, rowsResult] = await Promise.all([
+    const [total, rowsResult] = await Promise.all([
+      countPromise,
       queryWithRetry(
-        `SELECT COUNT(*) AS total FROM pedidos WHERE ${whereSql}`,
-        params,
-        { label: "pedidos.listar.count" }
-      ),
-      queryWithRetry(
-        `SELECT *
+        `SELECT ${PEDIDOS_LIST_COLUMNS}
            FROM pedidos
           WHERE ${whereSql}
           ORDER BY criadoEm DESC, created_at DESC, id DESC
@@ -1276,11 +1318,16 @@ const listarPedidosPorRestaurante = async (req, res) => {
         { label: "pedidos.listar.rows" }
       ),
     ]);
-    const countRow = countResult?.[0]?.[0] || {};
     const rows = rowsResult?.[0] || [];
 
     const pedidos = rows.map(rowToPedidoLean);
-    return res.json({ total: Number(countRow?.total || 0), page: pageNum, limit: limitNum, pedidos });
+    return res.json({
+      total,
+      page: pageNum,
+      limit: limitNum,
+      pedidos,
+      performanceMs: Date.now() - startedAt,
+    });
   } catch (error) {
     console.error("Erro ao buscar pedidos:", error);
     res.status(500).json({
