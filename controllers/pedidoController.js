@@ -13,6 +13,7 @@ const Produto = require("../models/Produto");
 const Frete = require("../models/Frete");
 
 const { enviarMensagem } = require("../utils/bot");
+const { todayYmd } = require("../utils/operationalDate");
 const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
 
 /* =========================================================
@@ -1817,11 +1818,7 @@ const listarPedidos = async (req, res) => {
     // ✅ App do garçom: por padrão mostra somente pedidos do dia.
     // Evita histórico antigo poluindo a tela e mantém produção/pronto/entrega visíveis.
     if (role === "garcom") {
-      const hoje = new Date();
-      const yyyy = hoje.getFullYear();
-      const mm = String(hoje.getMonth() + 1).padStart(2, "0");
-      const dd = String(hoje.getDate()).padStart(2, "0");
-      const hojeStr = `${yyyy}-${mm}-${dd}`;
+      const hojeStr = todayYmd();
 
       req.query = {
         ...req.query,

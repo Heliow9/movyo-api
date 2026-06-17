@@ -10,6 +10,7 @@ const Restaurante = require("../models/Restaurante");
 
 const { criarPagamentoPix, consultarPagamento } = require("../services/mercadoPagoPixService");
 const { exigirCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa, normalizeFormaPagamento } = require("../services/caixaService");
+const { dayRangeSql } = require("../utils/operationalDate");
 // controllers/mesaController.js (no topo)
 const { enviarMensagem, enviarMensagemMidia, estaConectado } = require("../utils/bot");
 
@@ -67,10 +68,7 @@ function rowToPedidoLean(row = {}) {
 }
 
 function hojeSqlLocal() {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const ymd = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  return { inicio: `${ymd} 00:00:00`, fim: `${ymd} 23:59:59`, ymd };
+  return dayRangeSql();
 }
 
 function mesaRowToLean(row = {}) {
@@ -581,6 +579,8 @@ exports.criarPedidoMesa = async (req, res) => {
       return res.status(400).json({ message: "Envie itens válidos." });
     }
 
+    const caixa = await exigirCaixaAberto(mesa.restauranteId);
+
     const itensNormalizados = itens.map((i) => {
       const qtd = Number(i.quantidade || 1);
       const unit = Number(i.precoUnitario || 0);
@@ -610,6 +610,8 @@ exports.criarPedidoMesa = async (req, res) => {
       });
     }
 
+    await vincularPedidoAoCaixa(pedido, caixa);
+
     pedido.itens.push(...itensNormalizados);
     pedido.valorTotal = round2(Number(pedido.valorTotal || 0) + totalRodada);
 
@@ -633,7 +635,12 @@ exports.criarPedidoMesa = async (req, res) => {
     return res.status(201).json(pedido);
   } catch (error) {
     console.error("Erro ao criar/atualizar pedido da mesa:", error);
-    return res.status(500).json({ message: "Erro interno ao processar pedido.", error });
+    const status = error?.status || 500;
+    return res.status(status).json({
+      message: error?.message || "Erro interno ao processar pedido.",
+      code: error?.code,
+      error,
+    });
   }
 };
 
@@ -846,6 +853,9 @@ exports.adicionarItensMesaPainel = async (req, res) => {
 
     const pedido = await Pedido.findById(mesa.pedidoAtualId);
     if (!pedido) return res.status(404).json({ message: "Pedido atual não encontrado." });
+
+    const caixa = await exigirCaixaAberto(mesa.restauranteId);
+    await vincularPedidoAoCaixa(pedido, caixa);
 
     // ✅ Sempre tenta vincular o item lançado ao garçom autenticado.
     // Não depende apenas de req.role, pois alguns logins do Hub chegam com garcomId no token/sessão.
@@ -1577,26 +1587,49 @@ exports.resumoHomeApp = async (req, res) => {
     ]);
     const STATUS_MESA_ABERTA = new Set(["ocupada", "ocupado", "aberta", "aberto", "em_aberto"]);
 
-    const [mesasRows, pedidosRows] = await Promise.all([
+    const caixaAbertoPromise = queryWithRetry(
+      `SELECT id, abertoEm, dataOperacional
+         FROM caixa_sessoes
+        WHERE restauranteId = ?
+          AND LOWER(COALESCE(status,'')) = 'aberto'
+        ORDER BY abertoEm DESC, created_at DESC, id DESC
+        LIMIT 1`,
+      [String(restauranteId)]
+    ).then(([rows]) => rows?.[0] || null);
+
+    const [mesasRows, caixaAberto] = await Promise.all([
       queryWithRetry(
         `SELECT id, numero, status, pedidoAtualId, ocupadaDesde
            FROM mesas
           WHERE restauranteId = ?`,
         [String(restauranteId)]
       ).then(([rows]) => rows),
-      queryWithRetry(
-        `SELECT id, numeroPedido, restaurante, mesaId, mesaNumero, nomeCliente, itens, total,
-                formaPagamento, status, statusPagamento, origem, pagamentos, valorPago, valorPendente,
-                garcomId, garcomNome, recebidoPor, recebidoPorNome, fechadoPor, fechadoPorNome,
-                criadoPor, criadoPorNome, criadoEm, pagoEm, entregueEm, canceladoEm, created_at
-           FROM pedidos
-          WHERE restaurante = ?
-            AND criadoEm >= ? AND criadoEm <= ?
-          ORDER BY criadoEm DESC, created_at DESC
-          LIMIT 600`,
-        [String(restauranteId), inicio, fim]
-      ).then(([rows]) => rows),
+      caixaAbertoPromise,
     ]);
+
+    const caixaAbertoId = caixaAberto?.id ? String(caixaAberto.id) : "";
+    const pedidosWhereTurno = caixaAbertoId
+      ? `AND (
+           caixaSessaoId = ?
+           OR ((caixaSessaoId IS NULL OR caixaSessaoId = '') AND criadoEm >= ?)
+         )`
+      : `AND criadoEm >= ? AND criadoEm <= ?`;
+    const pedidosParamsTurno = caixaAbertoId
+      ? [caixaAbertoId, caixaAberto.abertoEm || inicio]
+      : [inicio, fim];
+
+    const pedidosRows = await queryWithRetry(
+      `SELECT id, numeroPedido, restaurante, mesaId, mesaNumero, nomeCliente, itens, total,
+              formaPagamento, status, statusPagamento, origem, pagamentos, valorPago, valorPendente,
+              garcomId, garcomNome, recebidoPor, recebidoPorNome, fechadoPor, fechadoPorNome,
+              criadoPor, criadoPorNome, caixaSessaoId, criadoEm, pagoEm, entregueEm, canceladoEm, created_at
+         FROM pedidos
+        WHERE restaurante = ?
+          ${pedidosWhereTurno}
+        ORDER BY criadoEm DESC, created_at DESC
+        LIMIT 600`,
+      [String(restauranteId), ...pedidosParamsTurno]
+    ).then(([rows]) => rows);
 
     const todosPedidos = pedidosRows.map(rowToPedidoLean);
     const pedidosPorId = new Map(todosPedidos.map((p) => [String(p?._id || p?.id || ""), p]));

@@ -648,7 +648,12 @@ exports.abrirPedidoBalcao = async (req, res) => {
     return res.status(201).json({ pedido: novoPedido });
   } catch (error) {
     log("ERRO abrirPedidoBalcao", { message: error?.message, stack: error?.stack });
-    return res.status(500).json({ message: "Erro ao abrir pedido balcão", error: error?.message });
+    const status = error?.status || 500;
+    return res.status(status).json({
+      message: error?.message || "Erro ao abrir pedido balcão",
+      code: error?.code,
+      error: error?.message,
+    });
   }
 };
 
