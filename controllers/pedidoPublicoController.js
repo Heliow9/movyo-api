@@ -16,7 +16,7 @@ exports.criarPedidoPublico = async (req, res) => {
 
     // 2) se for Pix, cria cobrança no Mercado Pago usando token do RESTAURANTE
     if (payload.formadePagamento === "Pix") {
-      const rest = await Restaurante.findById(payload.restaurante).select("mercadoPago");
+      const rest = await Restaurante.findById(payload.restaurante).select("mercadoPago taxaConvenienciaPix");
       const accessToken = rest?.mercadoPago?.accessToken;
 
       if (!rest?.mercadoPago?.conectado || !accessToken) {
@@ -32,6 +32,7 @@ exports.criarPedidoPublico = async (req, res) => {
         valorTotal: pedido.valorTotal,
         nomeCliente: pedido.nomeCliente,
         telefoneCliente: pedido.telefoneCliente,
+        applicationFee: Number(rest?.taxaConvenienciaPix ?? 0.5),
       });
 
       // salva IDs no pedido pra consultar depois

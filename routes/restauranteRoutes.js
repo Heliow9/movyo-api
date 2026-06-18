@@ -26,6 +26,10 @@ router.post("/teste", restauranteController.teste);
 
 // perfil
 router.get("/me", authRestaurante, restauranteController.perfil);
+router.get("/cobranca/resumo", authRestaurante, restauranteController.resumoCobranca);
+router.post("/cobranca/pix", authRestaurante, restauranteController.gerarPixMensalidade);
+router.get("/cobranca/:restauranteId/resumo", restauranteController.resumoCobranca);
+router.post("/cobranca/:restauranteId/pix", restauranteController.gerarPixMensalidade);
 
 // configuracoes (✅ precisa vir ANTES do /:slug)
 router.put("/configuracoes", authRestaurante, restauranteController.atualizarConfiguracoes);

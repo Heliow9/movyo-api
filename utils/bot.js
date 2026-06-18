@@ -1143,6 +1143,7 @@ async function refazerPedidoComPix({ sock, restauranteId, restaurante, remote, p
     restauranteId,
     itens,
     description: `Pedido ${numeroPedido} - ${restaurante?.nome || "Movyo"}`,
+    applicationFee: Number(restaurante?.taxaConvenienciaPix ?? 0.5),
   });
 
   novo.mpPaymentId = pix.paymentId;

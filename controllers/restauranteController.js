@@ -13,6 +13,7 @@ const Mesa = require("../models/mesaModel");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { criarRecipient } = require("../services/criarRecipientPagarme");
+const { resumoCobrancaRestaurante, gerarPixMensalidade: gerarPixMensalidadeSaas } = require("../services/saasBillingService");
 const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
@@ -221,9 +222,12 @@ module.exports = {
       const licencaVencidaLogin = fimPlanoLogin && !isNaN(fimPlanoLogin.getTime()) && fimPlanoLogin < hojeLogin;
 
       if (licencaVencidaLogin) {
+        const assinaturaCobranca = await resumoCobrancaRestaurante(restaurante).catch(() => null);
         return res.status(403).json({
           mensagem: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
           code: "LICENCA_VENCIDA",
+          restauranteId: String(restaurante._id || restaurante.id || ""),
+          assinaturaCobranca,
         });
       }
 
@@ -313,7 +317,8 @@ module.exports = {
                 anotaaiStatus, anotaaiUrl, anotaaiIdentificador, anotaaiToken,
                 ifoodStatus, ifoodIdentificador, ifoodPrecisaConfirmacao, ifoodIgnorarPronto, ifood,
                 localizacao, statusBot, ativo, mensagensPersonalizadas, chavePix, recipient_id,
-                mercadoPago, pagamentoCartaoAtivo, taxaCartaoCreditoAvistaPercent, garcons,
+                mercadoPago, pagamentoCartaoAtivo, taxaCartaoCreditoAvistaPercent,
+                taxaConvenienciaPix, descontoMensalidadePercentual, valorMensalidadeCustomizado, garcons,
                 plano, statusAssinatura, dataInicioPlano, dataFimPlano, observacaoPlano,
                 dataCadastro, created_at, updated_at
            FROM restaurantes
@@ -366,6 +371,9 @@ module.exports = {
         mercadoPago: parse(restaurante.mercadoPago, {}),
         pagamentoCartaoAtivo: restaurante.pagamentoCartaoAtivo !== 0 && restaurante.pagamentoCartaoAtivo !== false,
         taxaCartaoCreditoAvistaPercent: Number(restaurante.taxaCartaoCreditoAvistaPercent ?? 3.8),
+        taxaConvenienciaPix: Number(restaurante.taxaConvenienciaPix ?? 0.5),
+        descontoMensalidadePercentual: Number(restaurante.descontoMensalidadePercentual ?? 0),
+        valorMensalidadeCustomizado: Number(restaurante.valorMensalidadeCustomizado ?? 0),
         garcons: parse(restaurante.garcons, []),
         plano: restaurante.plano || "free",
         statusAssinatura: restaurante.statusAssinatura || "ativo",
@@ -377,11 +385,46 @@ module.exports = {
         updatedAt: restaurante.updated_at || null,
       };
 
+      payload.assinaturaCobranca = await resumoCobrancaRestaurante(payload).catch(() => null);
       perfilCache.set(restauranteId, { ts: Date.now(), payload });
       return res.json(payload);
     } catch (error) {
       console.error("Erro em /api/restaurantes/me:", error);
       return res.status(500).json({ mensagem: "Erro ao buscar restaurante.", erro: error.message, code: error.code });
+    }
+  },
+
+  async resumoCobranca(req, res) {
+    try {
+      const restauranteId = String(req.restauranteId || req.params.restauranteId || req.userId || "");
+      if (!restauranteId) return res.status(400).json({ mensagem: "Restaurante nao informado." });
+      const resumo = await resumoCobrancaRestaurante(restauranteId);
+      if (!resumo) return res.status(404).json({ mensagem: "Restaurante nao encontrado." });
+      return res.json(resumo);
+    } catch (error) {
+      console.error("resumo cobranca:", error);
+      return res.status(error.status || 500).json({ mensagem: error.message || "Erro ao buscar cobranca." });
+    }
+  },
+
+  async gerarPixMensalidade(req, res) {
+    try {
+      const restauranteId = String(req.restauranteId || req.params.restauranteId || req.userId || "");
+      if (!restauranteId) return res.status(400).json({ mensagem: "Restaurante nao informado." });
+      const result = await gerarPixMensalidadeSaas(restauranteId);
+      perfilCache.delete(restauranteId);
+      return res.json({
+        ok: true,
+        reused: !!result.reused,
+        cobranca: result.cobranca,
+        resumo: result.resumo,
+      });
+    } catch (error) {
+      console.error("gerar pix mensalidade:", error?.response?.data || error);
+      return res.status(error.status || error?.response?.status || 500).json({
+        mensagem: error?.response?.data?.message || error.message || "Erro ao gerar Pix da mensalidade.",
+        erro: error?.response?.data || error.message,
+      });
     }
   },
 

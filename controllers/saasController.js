@@ -413,6 +413,9 @@ module.exports = {
         observacaoPlano: req.body.observacaoPlano || '',
         ativo: req.body.ativo !== false,
         emailCobranca: String(req.body.emailCobranca || req.body.email_cobranca || req.body.email || '').trim().toLowerCase(),
+        taxaConvenienciaPix: Number(req.body.taxaConvenienciaPix ?? 0.5),
+        descontoMensalidadePercentual: Number(req.body.descontoMensalidadePercentual ?? 0),
+        valorMensalidadeCustomizado: Number(req.body.valorMensalidadeCustomizado ?? 0),
       };
       if(!payload.nome || !payload.email) return res.status(400).json({ mensagem:'Nome e email são obrigatórios.' });
       const exists = await Restaurante.findOne({ email: payload.email });
@@ -424,12 +427,18 @@ module.exports = {
   async atualizarRestaurante(req,res){
     try{
       const id = req.params.id;
-      const allowed = ['nome','email','cnpj','telefone','slugIdentificador','enderecoCidade','enderecoBairro','plano','statusAssinatura','dataInicioPlano','dataFimPlano','observacaoPlano','emailCobranca','ativo','sessaoVersao'];
+      const allowed = ['nome','email','cnpj','telefone','slugIdentificador','enderecoCidade','enderecoBairro','plano','statusAssinatura','dataInicioPlano','dataFimPlano','observacaoPlano','emailCobranca','ativo','sessaoVersao','taxaConvenienciaPix','descontoMensalidadePercentual','valorMensalidadeCustomizado'];
       const update = {};
       for (const k of allowed) if (Object.prototype.hasOwnProperty.call(req.body,k)) update[k]=req.body[k];
       if(update.plano) update.plano = normalizePlano(update.plano);
       if(update.dataInicioPlano) update.dataInicioPlano = parseDate(update.dataInicioPlano);
       if(update.dataFimPlano) update.dataFimPlano = parseDate(update.dataFimPlano);
+      ['taxaConvenienciaPix','descontoMensalidadePercentual','valorMensalidadeCustomizado'].forEach((k) => {
+        if (Object.prototype.hasOwnProperty.call(update, k)) {
+          const n = Number(String(update[k] ?? 0).replace(',', '.'));
+          update[k] = Number.isFinite(n) ? Math.max(0, n) : 0;
+        }
+      });
       if(update.plano && isPlanoFree(update.plano)){
         const inicioFree = update.dataInicioPlano || new Date();
         update.statusAssinatura = statusPadraoPlano(update.plano, update.statusAssinatura);

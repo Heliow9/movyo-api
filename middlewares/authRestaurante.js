@@ -1,6 +1,7 @@
 // middlewares/authRestaurante.js
 const jwt = require("jsonwebtoken");
 const Restaurante = require("../models/Restaurante");
+const { resumoCobrancaRestaurante } = require("../services/saasBillingService");
 require("dotenv").config();
 
 function extractToken(req) {
@@ -58,7 +59,7 @@ module.exports = async function authRestaurante(req, res, next) {
 
     // ✅ valida plano/assinatura e força logout quando o SaaS altera plano/status/vencimento.
     const restAuth = await Restaurante.findById(req.restauranteId).select(
-      "garcons ativo bloqueado nome plano statusAssinatura dataFimPlano sessaoVersao"
+      "garcons ativo bloqueado nome plano statusAssinatura dataFimPlano sessaoVersao email emailCobranca taxaConvenienciaPix descontoMensalidadePercentual valorMensalidadeCustomizado"
     );
 
     if (!restAuth) return res.status(404).json({ mensagem: "Restaurante não encontrado." });
@@ -77,9 +78,12 @@ module.exports = async function authRestaurante(req, res, next) {
     if (venceu) {
       // Licença vencida deve ser tratada como licença vencida, não como bloqueio/desativação.
       // Não derrubamos sessaoVersao aqui para evitar o falso erro “Sua sessão foi atualizada”.
+      const assinaturaCobranca = await resumoCobrancaRestaurante(restAuth).catch(() => null);
       return res.status(403).json({
         mensagem: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
-        code: "LICENCA_VENCIDA"
+        code: "LICENCA_VENCIDA",
+        restauranteId: String(restAuth._id || restAuth.id || req.restauranteId || ""),
+        assinaturaCobranca,
       });
     }
 

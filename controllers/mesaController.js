@@ -1046,7 +1046,7 @@ exports.gerarPixMesaPainel = async (req, res) => {
       return res.status(400).json({ message: "Valor PIX não pode ser maior que o total." });
     }
 
-    const restaurante = await Restaurante.findById(mesa.restauranteId).select("nome mercadoPago telefone");
+    const restaurante = await Restaurante.findById(mesa.restauranteId).select("nome mercadoPago telefone taxaConvenienciaPix");
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
     const { conectado, accessToken } = getMercadoPagoInfo(restaurante);
@@ -1067,6 +1067,7 @@ exports.gerarPixMesaPainel = async (req, res) => {
       valorTotal: valorPix,
       nomeCliente,
       telefoneCliente,
+      applicationFee: Number(restaurante?.taxaConvenienciaPix ?? 0.5),
     });
 
     pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
@@ -1358,7 +1359,7 @@ exports.gerarPixMesaApp = async (req, res) => {
       changed = true;
     }
 
-    const restaurante = await Restaurante.findById(mesa.restauranteId).select("nome mercadoPago telefone");
+    const restaurante = await Restaurante.findById(mesa.restauranteId).select("nome mercadoPago telefone taxaConvenienciaPix");
     if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
 
     const { conectado, accessToken } = getMercadoPagoInfo(restaurante);
@@ -1396,6 +1397,7 @@ exports.gerarPixMesaApp = async (req, res) => {
       valorTotal: total,
       nomeCliente,
       telefoneCliente,
+      applicationFee: Number(restaurante?.taxaConvenienciaPix ?? 0.5),
     });
 
     pedido.formadePagamento = "pix";

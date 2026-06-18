@@ -6,6 +6,7 @@ const Mesa = require("../models/mesaModel");
 const Restaurante = require("../models/Restaurante");
 
 const { consultarPagamento } = require("../services/mercadoPagoPixService");
+const { processarWebhookMensalidade } = require("../services/saasBillingService");
 const { enviarMensagem, estaConectado } = require("../utils/bot");
 const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
 
@@ -283,6 +284,21 @@ exports.mpWebhook = async (req, res) => {
     }
 
     const paymentIdStr = String(paymentId);
+
+    const mensalidade = await processarWebhookMensalidade(paymentIdStr).catch((e) => {
+      console.warn("Falha ao processar mensalidade SaaS:", e?.message || e);
+      return null;
+    });
+    if (mensalidade) {
+      return res.status(200).json({
+        ok: true,
+        mode: "mensalidade_saas",
+        paymentId: paymentIdStr,
+        mpStatus: mensalidade?.mp?.status || null,
+        paid: !!mensalidade?.result?.paid,
+        restauranteId: mensalidade?.result?.restauranteId || mensalidade?.cobranca?.restauranteId || null,
+      });
+    }
 
     // ✅ acha pedido (legado ou parcial)
     const pedido = await Pedido.findOne({
