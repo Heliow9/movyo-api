@@ -85,28 +85,56 @@ async function calcularMensalidade(restaurante) {
 }
 
 async function resumoCobrancaRestaurante(restauranteOrId) {
-  const restaurante = typeof restauranteOrId === "string"
+  let restaurante = typeof restauranteOrId === "string"
     ? await Restaurante.findById(restauranteOrId).lean()
     : restauranteOrId;
   if (!restaurante) return null;
+
+  let pagamentoConfirmado = false;
+  let pendentes = await CobrancaSaas.find({
+    restauranteId: restaurante._id || restaurante.id,
+    status: { $in: ["pendente", "pending", "aguardando_pagamento"] },
+  }).lean();
+  let cobrancaPendente = (pendentes || [])
+    .sort((a, b) => new Date(b.geradoEm || b.createdAt || 0) - new Date(a.geradoEm || a.createdAt || 0))[0] || null;
+
+  // Fallback importante: se o webhook do Mercado Pago atrasar ou estiver mal configurado,
+  // a propria consulta do resumo confirma a mensalidade assim que o MP retornar approved.
+  if (cobrancaPendente?.mpPaymentId) {
+    try {
+      const mp = await consultarPagamentoPlataforma(cobrancaPendente.mpPaymentId);
+      const result = await confirmarPagamentoMensalidade({
+        paymentId: cobrancaPendente.mpPaymentId,
+        mpStatus: mp?.status,
+      });
+      pagamentoConfirmado = !!result?.paid;
+      if (pagamentoConfirmado) {
+        restaurante = await Restaurante.findById(restaurante._id || restaurante.id).lean();
+        pendentes = await CobrancaSaas.find({
+          restauranteId: restaurante._id || restaurante.id,
+          status: { $in: ["pendente", "pending", "aguardando_pagamento"] },
+        }).lean();
+        cobrancaPendente = (pendentes || [])
+          .sort((a, b) => new Date(b.geradoEm || b.createdAt || 0) - new Date(a.geradoEm || a.createdAt || 0))[0] || null;
+      } else if (mp?.status && mp.status !== cobrancaPendente.status) {
+        cobrancaPendente = { ...cobrancaPendente, status: mp.status };
+      }
+    } catch (err) {
+      console.warn("Falha ao sincronizar mensalidade com Mercado Pago:", err?.message || err);
+    }
+  }
 
   const mensalidade = await calcularMensalidade(restaurante);
   const vencimento = restaurante.dataFimPlano || null;
   const diasParaVencer = daysUntil(vencimento);
   const mostrarPix = mensalidade.valorFinal > 0 && diasParaVencer !== null && diasParaVencer <= 3;
 
-  const pendentes = await CobrancaSaas.find({
-    restauranteId: restaurante._id || restaurante.id,
-    status: { $in: ["pendente", "pending", "aguardando_pagamento"] },
-  }).lean();
-  const cobrancaPendente = (pendentes || [])
-    .sort((a, b) => new Date(b.geradoEm || b.createdAt || 0) - new Date(a.geradoEm || a.createdAt || 0))[0] || null;
-
   return {
     restauranteId: restaurante._id || restaurante.id,
     vencimento,
     diasParaVencer,
     mostrarPix,
+    pagamentoConfirmado,
     ...mensalidade,
     cobranca: cobrancaPendente
       ? {

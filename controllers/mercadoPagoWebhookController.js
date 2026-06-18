@@ -266,14 +266,19 @@ exports.mpWebhook = async (req, res) => {
   try {
     const paymentId =
       req.query?.["data.id"] ||
+      req.query?.id ||
       req.query?.data?.id ||
       req.body?.data?.id ||
+      req.body?.resource?.id ||
+      (String(req.body?.resource || "").match(/\/payments\/([^/?#]+)/)?.[1]) ||
       req.body?.id ||
       null;
 
-    const type = (req.query?.type || req.body?.type || "").toLowerCase();
+    const type = String(req.query?.type || req.query?.topic || req.body?.type || req.body?.topic || "").toLowerCase();
+    const action = String(req.body?.action || "").toLowerCase();
+    const isPaymentEvent = type === "payment" || action.startsWith("payment.");
 
-    if (!paymentId || type !== "payment") {
+    if (!paymentId || !isPaymentEvent) {
       return res.status(200).json({ ok: true, ignored: true });
     }
 
