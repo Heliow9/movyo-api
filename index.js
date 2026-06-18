@@ -15,6 +15,7 @@ const Restaurante = require("./models/Restaurante");
 const { testConnection } = require("./db/mysql");
 const { syncAllModels } = require("./lib/mysqlModelFactory");
 const apiMonitor = require("./utils/apiMonitor");
+const { cancelarPedidosVitrineExpirados } = require("./services/pedidoCancelamentoService");
 
 const mercadoPagoPublicoRoutes = require("./routes/mercadoPagoPublicoRoutes");
 const garcomRoutes = require("./routes/garcomRoutes");
@@ -22,7 +23,7 @@ const rateLimitPublico = require("./middlewares/rateLimitPublico");
 
 // Middlewares de segurança HTTP sem novas dependências.
 // Mantém compatibilidade com app/mobile e restringe navegador por CORS quando configurado.
-const allowedOrigins = String(process.env.CORS_ORIGINS || "https://app.movyo.delivery,https://movyo.delivery,http://localhost:5173,http://localhost:5174,http://localhost:3000,https://hub.movyo.delivery ")
+const allowedOrigins = String(process.env.CORS_ORIGINS || "https://app.movyo.delivery,https://movyo.delivery,http://localhost:5173,http://localhost:3000,https://hub.movyo.delivery ")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -182,6 +183,17 @@ app.get("/api/health", (req, res) => {
 });
 
 
+
+if (String(process.env.DISABLE_AUTO_CANCEL_VITRINE || "").toLowerCase() !== "true") {
+  const autoCancelMs = Math.max(15000, Number(process.env.AUTO_CANCEL_VITRINE_INTERVAL_MS || 30000));
+  setInterval(() => {
+    cancelarPedidosVitrineExpirados({ io })
+      .then((r) => {
+        if (r?.cancelados) console.log(`Auto-cancelamento vitrine: ${r.cancelados} pedido(s) cancelado(s).`);
+      })
+      .catch((err) => console.error("Auto-cancelamento vitrine falhou:", err?.message || err));
+  }, autoCancelMs);
+}
 
 /* =========================================================
    ✅ ANTI-CRASH: HANDLERS GLOBAIS

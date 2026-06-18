@@ -15,6 +15,7 @@ const Frete = require("../models/Frete");
 const { enviarMensagem } = require("../utils/bot");
 const { todayYmd } = require("../utils/operationalDate");
 const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
+const { cancelarPedidoComAuditoria } = require("../services/pedidoCancelamentoService");
 
 /* =========================================================
    HELPERS DE PERFORMANCE - APP GARÇOM / HUB
@@ -35,6 +36,8 @@ function rowToPedidoLean(row = {}) {
   pedido.total = Number(row.total ?? row.valorTotal ?? 0) || 0;
   pedido.valorPago = Number(row.valorPago ?? 0) || 0;
   pedido.valorPendente = Number(row.valorPendente ?? 0) || 0;
+  pedido.valorCancelado = Number(row.valorCancelado ?? 0) || 0;
+  pedido.estornoValor = Number(row.estornoValor ?? 0) || 0;
   pedido.taxaEntrega = Number(row.taxaEntrega ?? 0) || 0;
   pedido.descontoValor = Number(row.descontoValor ?? 0) || 0;
   pedido.valorDesconto = Number(row.valorDesconto ?? 0) || 0;
@@ -44,6 +47,7 @@ function rowToPedidoLean(row = {}) {
   pedido.itens = parseJsonSafe(row.itens, []);
   pedido.pagamentos = parseJsonSafe(row.pagamentos, []);
   pedido.pagamento = parseJsonSafe(row.pagamento, null);
+  pedido.pedidoOriginalSnapshot = parseJsonSafe(row.pedidoOriginalSnapshot, null);
   // Normaliza aliases do MySQL para os nomes usados pelos clientes.
   pedido.createdAt = row.createdAt || row.created_at || row.criadoEm || null;
   pedido.updatedAt = row.updatedAt || row.updated_at || row.statusAtualizadoEm || null;
@@ -69,7 +73,9 @@ const PEDIDOS_LIST_COLUMNS = `
   totalBruto, valorPago, valorPendente, mpPaymentId, garcomId, garcomNome, recebidoPor,
   recebidoPorNome, fechadoPor, fechadoPorNome, criadoPor, criadoPorNome, criadoEm, pagoEm,
   aceitoEm, emProducaoEm, emEntregaEm, statusAtualizadoEm, entregueEm, canceladoEm,
-  dataOperacional, caixaSessaoId, operadorCaixaId, operadorCaixaNome, created_at, updated_at
+  motivoCancelamento, cancelamentoTipo, valorCancelado, estornoStatus, estornoValor, estornoEm,
+  estornoErro, pedidoOriginalSnapshot, dataOperacional, caixaSessaoId, operadorCaixaId,
+  operadorCaixaNome, created_at, updated_at
 `;
 
 function getPedidosCountCache(key) {
@@ -1605,6 +1611,17 @@ const atualizarStatusPedido = async (req, res) => {
     }
 
     const statusAnterior = pedido.status;
+    if (String(status || "").toLowerCase() === "cancelado") {
+      const result = await cancelarPedidoComAuditoria(pedido, {
+        motivo: req.body?.motivo || "Pedido recusado/cancelado pelo restaurante.",
+        tipo: req.body?.tipoCancelamento || "recusa_restaurante",
+        role: "restaurante",
+        canceladoPor: req.userId || req.restauranteId || null,
+        io: req.io,
+      });
+      return res.json({ sucesso: true, pedido: result.pedido, estorno: result.estorno });
+    }
+
     pedido.status = status;
     const agoraStatus = new Date();
     pedido.statusAtualizadoEm = agoraStatus;
@@ -2015,6 +2032,38 @@ const cancelarPedido = async (req, res) => {
     const motivo = (req.body?.motivo || req.body?.descricao || "").toString().trim() || null;
     const role = req.user?.role === "garcom" ? "garcom" : "restaurante";
     const canceladoPor = role === "garcom" ? req.user?.garcomId || null : req.userId || null;
+
+    const result = await cancelarPedidoComAuditoria(pedido, {
+      motivo: motivo || "Cancelamento do pedido",
+      tipo: req.body?.tipoCancelamento || "manual",
+      role,
+      canceladoPor,
+      io: req.io,
+    });
+
+    let mesaAtualizadaNova = null;
+    const mesaIdNovo = result.pedido?.mesaId;
+    if (mesaIdNovo && mongoose.Types.ObjectId.isValid(String(mesaIdNovo))) {
+      mesaAtualizadaNova = await Mesa.findByIdAndUpdate(
+        mesaIdNovo,
+        {
+          $set: {
+            status: "livre",
+            pedidoAtualId: null,
+            pedidoAtualNumero: null,
+            comandaNumero: null,
+            ocupadaDesde: null,
+          },
+        },
+        { new: true }
+      );
+      if (req.io && mesaAtualizadaNova) {
+        req.io.to(`restaurante-${restauranteId}`).emit("mesaAtualizada", mesaAtualizadaNova);
+        req.io.to(`mesa-${String(mesaAtualizadaNova._id)}`).emit("mesaAtualizada", mesaAtualizadaNova);
+      }
+    }
+
+    return res.json({ ok: true, pedido: result.pedido, mesa: mesaAtualizadaNova, estorno: result.estorno });
 
     const itensAtuais = Array.isArray(pedido.itens) ? pedido.itens : [];
     if (itensAtuais.length > 0) {

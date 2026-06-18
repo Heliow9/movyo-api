@@ -38,6 +38,7 @@ const {
   marcarItemPronto,
   marcarItemEntregueMesa,
   marcarItemEntregueCliente,
+  cancelarPedido,
 } = require("../controllers/pedidoController");
 
 function aplicarDataNoPath(req, res, next) {
@@ -87,6 +88,7 @@ module.exports = (io) => {
   router.get("/status/:id", getStatusPedido);
   router.put("/status/:id", authRestaurante, matchRestaurante, atualizarStatusPedido);
   router.get("/pedido/:id", authRestaurante, matchRestaurante, obterPedidoPorId);
+  router.post("/:pedidoId/cancelar", authRestaurante, matchRestaurante, cancelarPedido);
 
   // =========================================================
   // ✅ COZINHA — ANTES do catch-all

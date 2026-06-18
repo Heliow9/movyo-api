@@ -888,6 +888,72 @@ module.exports = {
       });
     }catch(e){ console.error('relatorio vendas saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatório de vendas.', erro:e.message }); }
   },
+  async relatorioCancelamentos(req,res){
+    try{
+      const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';
+      const inicio = startOfDayValue(req.query.dataInicio || req.query.data || new Date());
+      const fim = endOfDayValue(req.query.dataFim || req.query.data || new Date());
+      const [restaurantesRaw, pedidosRaw] = await Promise.all([
+        Restaurante.find({}).lean(),
+        Pedido.find({}).sort({canceladoEm:-1}).lean()
+      ]);
+      const restMap = new Map((restaurantesRaw || []).map(r => [String(docId(r)), r.nome || 'Restaurante']));
+      const pedidos = (pedidosRaw || []).filter((p) => {
+        if (restauranteId && String(p.restaurante) !== restauranteId && String(p.restauranteId) !== restauranteId) return false;
+        const st = String(p.status || '').toLowerCase();
+        const sp = String(p.statusPagamento || '').toLowerCase();
+        if (!['cancelado','estornado'].includes(st) && !['cancelado','estornado'].includes(sp) && !p.canceladoEm) return false;
+        const d = new Date(p.canceladoEm || p.updatedAt || p.updated_at || p.criadoEm || 0);
+        return d >= inicio && d <= fim;
+      });
+      const porRestaurante = {};
+      let valorCancelado = 0;
+      let valorEstornado = 0;
+      let estornosConcluidos = 0;
+      for (const p of pedidos) {
+        const rid = String(p.restaurante || p.restauranteId || '');
+        const nome = restMap.get(rid) || rid || 'Sem restaurante';
+        const cancelado = Number(p.valorCancelado || p.pedidoOriginalSnapshot?.valorTotal || p.pedidoOriginalSnapshot?.total || p.total || p.valorTotal || 0);
+        const estornado = Number(p.estornoValor || 0);
+        valorCancelado += cancelado;
+        valorEstornado += estornado;
+        if (String(p.estornoStatus || '').toLowerCase() === 'concluido') estornosConcluidos += 1;
+        porRestaurante[rid] = porRestaurante[rid] || { restauranteId: rid, restaurante: nome, cancelados:0, estornosConcluidos:0, valorCancelado:0, valorEstornado:0 };
+        porRestaurante[rid].cancelados += 1;
+        porRestaurante[rid].valorCancelado += cancelado;
+        porRestaurante[rid].valorEstornado += estornado;
+        if (String(p.estornoStatus || '').toLowerCase() === 'concluido') porRestaurante[rid].estornosConcluidos += 1;
+      }
+      return res.json({
+        restauranteId: restauranteId || null,
+        dataInicio: dateOnlyISO(inicio),
+        dataFim: dateOnlyISO(fim),
+        cancelados: pedidos.length,
+        estornosConcluidos,
+        valorCancelado,
+        valorEstornado,
+        porRestaurante: Object.values(porRestaurante).sort((a,b)=>b.cancelados-a.cancelados),
+        pedidos: pedidos.slice(0,150).map(p=>({
+          id: docId(p),
+          numeroPedido: p.numeroPedido,
+          restauranteId: String(p.restaurante || p.restauranteId || ''),
+          restaurante: restMap.get(String(p.restaurante || p.restauranteId || '')) || '',
+          cliente: p.nomeCliente,
+          formaPagamento: p.formaPagamento || p.formadePagamento,
+          status: p.status,
+          statusPagamento: p.statusPagamento,
+          motivoCancelamento: p.motivoCancelamento,
+          cancelamentoTipo: p.cancelamentoTipo,
+          valorCancelado: Number(p.valorCancelado || p.pedidoOriginalSnapshot?.valorTotal || p.pedidoOriginalSnapshot?.total || 0),
+          estornoStatus: p.estornoStatus || 'nao_aplicavel',
+          estornoValor: Number(p.estornoValor || 0),
+          estornoEm: p.estornoEm || null,
+          estornoErro: p.estornoErro || '',
+          canceladoEm: p.canceladoEm || null,
+        }))
+      });
+    }catch(e){ console.error('relatorio cancelamentos saas:', e); return res.status(500).json({ mensagem:'Erro ao gerar relatorio de cancelamentos.', erro:e.message }); }
+  },
   async relatorioCaixa(req,res){
     try{
       const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';

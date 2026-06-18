@@ -72,6 +72,12 @@ function normalizeConfiguracoesPayload(clean) {
   if (out.tempoMedioEntregaMin === undefined) delete out.tempoMedioEntregaMin;
   if (out.maxPedidosPorEntregador === undefined) delete out.maxPedidosPorEntregador;
 
+  if (Object.prototype.hasOwnProperty.call(out, "tempoAutoCancelamentoVitrineMin")) {
+    const n = Number(out.tempoAutoCancelamentoVitrineMin);
+    out.tempoAutoCancelamentoVitrineMin = Number.isFinite(n) ? Math.min(6, Math.max(1, Math.round(n))) : undefined;
+  }
+  if (out.tempoAutoCancelamentoVitrineMin === undefined) delete out.tempoAutoCancelamentoVitrineMin;
+
   return out;
 }
 
@@ -313,7 +319,7 @@ module.exports = {
       const [rows] = await queryWithRetry(
         `SELECT id, nome, email, cnpj, telefone, enderecoCep, enderecoRua, enderecoNumero,
                 enderecoBairro, enderecoCidade, enderecoEstado, logoUrl, logoSlug, slugIdentificador,
-                horariosFuncionamento, tempoMedioEntregaMin, maxPedidosPorEntregador, pedidosPorEntregador,
+                horariosFuncionamento, tempoMedioEntregaMin, tempoAutoCancelamentoVitrineMin, maxPedidosPorEntregador, pedidosPorEntregador,
                 anotaaiStatus, anotaaiUrl, anotaaiIdentificador, anotaaiToken,
                 ifoodStatus, ifoodIdentificador, ifoodPrecisaConfirmacao, ifoodIgnorarPronto, ifood,
                 localizacao, statusBot, ativo, mensagensPersonalizadas, chavePix, recipient_id,
@@ -351,6 +357,7 @@ module.exports = {
         slugIdentificador: restaurante.slugIdentificador || "",
         horariosFuncionamento: parse(restaurante.horariosFuncionamento, {}),
         tempoMedioEntregaMin: restaurante.tempoMedioEntregaMin ?? 45,
+        tempoAutoCancelamentoVitrineMin: Number(restaurante.tempoAutoCancelamentoVitrineMin ?? 6),
         maxPedidosPorEntregador: restaurante.maxPedidosPorEntregador ?? restaurante.pedidosPorEntregador ?? 3,
         pedidosPorEntregador: restaurante.pedidosPorEntregador ?? restaurante.maxPedidosPorEntregador ?? 3,
         anotaaiStatus: restaurante.anotaaiStatus === 1 || restaurante.anotaaiStatus === true,

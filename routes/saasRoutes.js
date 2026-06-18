@@ -26,6 +26,7 @@ router.get('/saude-api', authSaas, controller.saudeApi);
 router.get('/erros-api', authSaas, controller.errosApi);
 router.get('/auditoria', authSaas, controller.listarAuditoria);
 router.get('/relatorios/vendas', authSaas, controller.relatorioVendas);
+router.get('/relatorios/cancelamentos', authSaas, controller.relatorioCancelamentos);
 router.get('/relatorios/caixa', authSaas, controller.relatorioCaixa);
 router.get('/relatorios/estoque', authSaas, controller.relatorioEstoque);
 router.get('/relatorios/entregas', authSaas, controller.relatorioEntregas);
