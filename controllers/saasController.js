@@ -347,7 +347,7 @@ async function pedidosPeriodoQuery(restauranteId, inicio, fim, caixaIds=[]){
 module.exports = {
   async login(req,res){
     try{
-      await ensureAdminInicial();
+     
       const email = String(req.body?.email || '').trim().toLowerCase();
       const senha = String(req.body?.senha || req.body?.password || '');
       const admin = await AdminSaas.findOne({ email });
