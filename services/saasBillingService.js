@@ -73,6 +73,21 @@ function getPlatformAccessToken() {
   ).trim();
 }
 
+function mercadoPagoErrorInfo(err) {
+  const data = err?.response?.data || {};
+  const message = String(data.message || data.error || err?.message || "Erro ao solicitar estorno no Mercado Pago.");
+  const friendly =
+    message === "Collector hasn't enough available money"
+      ? "Mercado Pago recusou o estorno: a conta recebedora nao possui saldo disponivel suficiente."
+      : message;
+
+  return {
+    message: friendly,
+    status: err?.response?.status || data.status || null,
+    data,
+  };
+}
+
 async function getPlano(planoCodigo) {
   return PlanoSaas.findOne({ codigo: String(planoCodigo || "free").toLowerCase() }).lean();
 }
@@ -371,20 +386,32 @@ async function cancelarPlanoComEstornoProporcional(restauranteId, opts = {}) {
       estornoErro = "Cobranca paga sem mpPaymentId; estorno automatico indisponivel.";
       estornoDetalhes = { motivo: estornoErro };
     } else {
-      estornoDetalhes = await estornarMensalidadeParcial({
-        paymentId: String(cobranca.mpPaymentId),
-        valor: valorEstorno,
-        cobrancaId: cobranca._id || cobranca.id,
-      });
-      estornoStatus = "concluido";
+      try {
+        estornoDetalhes = await estornarMensalidadeParcial({
+          paymentId: String(cobranca.mpPaymentId),
+          valor: valorEstorno,
+          cobrancaId: cobranca._id || cobranca.id,
+        });
+        estornoStatus = "concluido";
+      } catch (err) {
+        const mpError = mercadoPagoErrorInfo(err);
+        estornoStatus = "erro";
+        estornoErro = mpError.message;
+        estornoDetalhes = {
+          motivo: estornoErro,
+          httpStatus: mpError.status,
+          mercadoPago: mpError.data,
+          precisaAcaoManual: true,
+        };
+      }
     }
 
     await CobrancaSaas.findByIdAndUpdate(cobranca._id || cobranca.id, {
       $set: {
         status: "cancelado",
         estornoStatus,
-        estornoValor: valorEstorno,
-        estornoEm: new Date(),
+        estornoValor: estornoStatus === "concluido" ? valorEstorno : 0,
+        estornoEm: estornoStatus === "concluido" ? new Date() : null,
         estornoErro,
         estornoDetalhes: {
           ...(estornoDetalhes && typeof estornoDetalhes === "object" ? estornoDetalhes : {}),
@@ -407,7 +434,7 @@ async function cancelarPlanoComEstornoProporcional(restauranteId, opts = {}) {
       cancelamentoPlanoEm: new Date(),
       cancelamentoPlanoMotivo: motivo,
       cancelamentoPlanoEstornoStatus: estornoStatus,
-      cancelamentoPlanoEstornoValor: valorEstorno,
+      cancelamentoPlanoEstornoValor: estornoStatus === "concluido" ? valorEstorno : 0,
       cancelamentoPlanoDetalhes: {
         cobrancaId: cobranca ? String(cobranca._id || cobranca.id) : null,
         paymentId: cobranca?.mpPaymentId || null,
@@ -434,6 +461,7 @@ async function cancelarPlanoComEstornoProporcional(restauranteId, opts = {}) {
       totalDias,
       valorPago,
       erro: estornoErro || null,
+      precisaAcaoManual: estornoStatus === "erro" || estornoStatus === "manual",
       automatico: estornoStatus === "concluido",
     },
   };

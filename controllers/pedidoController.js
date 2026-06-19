@@ -2019,7 +2019,8 @@ const cancelarPedido = async (req, res) => {
     }
 
     const st = String(pedido.status || "");
-    if (st === "entregue") {
+    const tipoCancelamento = String(req.body?.tipoCancelamento || req.body?.tipo || "").trim();
+    if (st === "entregue" && tipoCancelamento !== "devolucao_cliente") {
       return res.status(409).json({
         message: `Não é possível cancelar pedido com status '${pedido.status}'.`,
       });
@@ -2035,7 +2036,7 @@ const cancelarPedido = async (req, res) => {
 
     const result = await cancelarPedidoComAuditoria(pedido, {
       motivo: motivo || "Cancelamento do pedido",
-      tipo: req.body?.tipoCancelamento || "manual",
+      tipo: tipoCancelamento || "manual",
       role,
       canceladoPor,
       io: req.io,
