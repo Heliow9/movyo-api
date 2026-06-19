@@ -21,6 +21,7 @@ const { pool, testConnection } = require('../db/mysql');
 const apiMonitor = require('../utils/apiMonitor');
 const AuditLog = require('../models/AuditLog');
 const { registrarAuditoria } = require('../utils/audit');
+const { cancelarPlanoComEstornoProporcional } = require('../services/saasBillingService');
 
 const PLANOS_PADRAO = [
   { codigo:'free', nome:'Free', valorMensal:0, ordem:1, descricao:'Plano gratuito inicial para novos restaurantes.', recursos:['Cadastro inicial','Teste controlado','Recursos limitados'] },
@@ -347,7 +348,7 @@ async function pedidosPeriodoQuery(restauranteId, inicio, fim, caixaIds=[]){
 module.exports = {
   async login(req,res){
     try{
-     
+      await ensureAdminInicial();
       const email = String(req.body?.email || '').trim().toLowerCase();
       const senha = String(req.body?.senha || req.body?.password || '');
       const admin = await AdminSaas.findOne({ email });
@@ -781,6 +782,19 @@ module.exports = {
   async ativarRestaurante(req,res){
     try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:true,statusAssinatura:req.body.statusAssinatura || 'ativo'}, $inc:{ sessaoVersao:1 }}); await registrarAuditoria(req,'saas.restaurante_ativado','restaurante',req.params.id,{restauranteId:req.params.id}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
     catch(e){ res.status(500).json({mensagem:'Erro ao ativar restaurante.', erro:e.message}); }
+  },
+  async cancelarPlanoRestaurante(req,res){
+    try{
+      const result = await cancelarPlanoComEstornoProporcional(req.params.id, {
+        motivo: req.body?.motivo || req.body?.observacao,
+        canceladoPor: req.saasAdmin?.email || req.saasAdmin?.adminId || 'saas-admin',
+      });
+      await registrarAuditoria(req,'saas.restaurante_plano_cancelado','restaurante',req.params.id,{restauranteId:req.params.id, estorno:result.estorno});
+      return res.json({ ok:true, restaurante:publicRestaurante(result.restaurante), cobranca:result.cobranca, estorno:result.estorno });
+    }catch(e){
+      console.error('cancelar plano restaurante:', e);
+      return res.status(e.status || 500).json({ mensagem:'Erro ao cancelar plano do restaurante.', erro:e.message });
+    }
   },
   async excluirRestaurante(req,res){
     try{ const r=await Restaurante.findByIdAndDelete(req.params.id); await registrarAuditoria(req,'saas.restaurante_excluido','restaurante',req.params.id,{restauranteId:req.params.id,nome:r?.nome}); res.json({ok:true, restaurante:publicRestaurante(r||{})}); }

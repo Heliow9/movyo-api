@@ -721,11 +721,12 @@ module.exports = {
             ativo: p.ativo,
             ativoVitrine: p.ativoVitrine !== false,
 
-            categoriaType: tipoCategoria,
-            pizzaMultisabor: Boolean(pizzaMultisabor),
-            calculoPrecoPor: calculoPrecoPor || "maior",
+            tipoItem: String(p.tipoItem || p.tipo || tipoCategoria).toLowerCase().includes("pizza") ? "pizza" : "comum",
+            categoriaType: String(p.tipoItem || p.tipo || tipoCategoria).toLowerCase().includes("pizza") ? "pizza" : "simple_item",
+            pizzaMultisabor: String(p.tipoItem || p.tipo || tipoCategoria).toLowerCase().includes("pizza") && (Boolean(p.pizzaMultisabor) || Number(p.maxSabores || 0) > 1 || (!p.tipoItem && Boolean(pizzaMultisabor))),
+            calculoPrecoPor: p.calculoPrecoPor || calculoPrecoPor || "maior",
             tiposExtras: tiposExtras || [],
-            maxSabores,
+            maxSabores: String(p.tipoItem || p.tipo || tipoCategoria).toLowerCase().includes("pizza") ? (Number(p.maxSabores || 0) || maxSabores) : 1,
           }));
 
         return {
@@ -841,11 +842,12 @@ module.exports = {
             ativo: p.ativo,
             ativoVitrine: p.ativoVitrine !== false,
 
-            categoriaType: tipoCategoria,
-            pizzaMultisabor: Boolean(pizzaMultisabor),
-            calculoPrecoPor: calculoPrecoPor || "maior",
+            tipoItem: String(p.tipoItem || p.tipo || tipoCategoria).toLowerCase().includes("pizza") ? "pizza" : "comum",
+            categoriaType: String(p.tipoItem || p.tipo || tipoCategoria).toLowerCase().includes("pizza") ? "pizza" : "simple_item",
+            pizzaMultisabor: String(p.tipoItem || p.tipo || tipoCategoria).toLowerCase().includes("pizza") && (Boolean(p.pizzaMultisabor) || Number(p.maxSabores || 0) > 1 || (!p.tipoItem && Boolean(pizzaMultisabor))),
+            calculoPrecoPor: p.calculoPrecoPor || calculoPrecoPor || "maior",
             tiposExtras: tiposExtras || [],
-            maxSabores,
+            maxSabores: String(p.tipoItem || p.tipo || tipoCategoria).toLowerCase().includes("pizza") ? (Number(p.maxSabores || 0) || maxSabores) : 1,
           }));
 
         return {

@@ -34,6 +34,17 @@ function parseMoney(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function normalizeTipoItem(value) {
+  const s = String(value || "").trim().toLowerCase();
+  return s.includes("pizza") ? "pizza" : "comum";
+}
+
+function normalizeMaxSabores(value, fallback = 1) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(12, Math.round(n)));
+}
+
 function normalizeProdutoBody(body = {}, { partial = false } = {}) {
   // ✅ aceita:
   // - imprimeNaCozinha (novo)
@@ -78,6 +89,23 @@ function normalizeProdutoBody(body = {}, { partial = false } = {}) {
     normalized.precoBase = normalized.preco;
   }
 
+  const rawTipoItem = normalized.tipoItem ?? normalized.tipo;
+  if (rawTipoItem !== undefined || !partial) {
+    const tipoItem = normalizeTipoItem(rawTipoItem || "comum");
+    normalized.tipoItem = tipoItem;
+    normalized.tipo = tipoItem;
+    if (tipoItem === "comum") {
+      normalized.pizzaMultisabor = false;
+      normalized.maxSabores = 1;
+      normalized.calculoPrecoPor = "maior";
+    } else {
+      const maxSabores = normalizeMaxSabores(normalized.maxSabores, 1);
+      normalized.maxSabores = maxSabores;
+      normalized.pizzaMultisabor = maxSabores > 1 || toBool(normalized.pizzaMultisabor, false);
+      normalized.calculoPrecoPor = String(normalized.calculoPrecoPor || "maior").toLowerCase() === "media" ? "media" : "maior";
+    }
+  }
+
   return normalized;
 }
 
@@ -88,6 +116,12 @@ function normalizeProdutoResponse(produto) {
   const preco = parseMoney(plain.preco ?? plain.precoBase ?? 0);
   plain.preco = preco;
   plain.precoBase = preco;
+  const tipoItem = normalizeTipoItem(plain.tipoItem || plain.tipo || "comum");
+  plain.tipoItem = tipoItem;
+  plain.tipo = plain.tipo || tipoItem;
+  plain.maxSabores = normalizeMaxSabores(plain.maxSabores, 1);
+  plain.pizzaMultisabor = tipoItem === "pizza" && (toBool(plain.pizzaMultisabor, false) || plain.maxSabores > 1);
+  plain.calculoPrecoPor = String(plain.calculoPrecoPor || "maior").toLowerCase() === "media" ? "media" : "maior";
   // ✅ compatibilidade: produtos já cadastrados antes desse campo entram como ativos na vitrine.
   if (plain.ativoVitrine === undefined || plain.ativoVitrine === null) plain.ativoVitrine = true;
   return plain;
@@ -201,6 +235,11 @@ const getProdutosPorRestaurante = async (req, res) => {
         disponivel: boolFromDb(row.disponivel, true),
         destaque: boolFromDb(row.destaque, false),
         imprimeNaCozinha: boolFromDb(row.imprimeNaCozinha, true),
+        tipoItem: normalizeTipoItem(row.tipoItem || row.tipo || produto.tipoItem),
+        tipo: normalizeTipoItem(row.tipoItem || row.tipo || produto.tipoItem),
+        pizzaMultisabor: boolFromDb(row.pizzaMultisabor, produto.pizzaMultisabor),
+        maxSabores: normalizeMaxSabores(row.maxSabores, produto.maxSabores || 1),
+        calculoPrecoPor: String(row.calculoPrecoPor || produto.calculoPrecoPor || "maior").toLowerCase() === "media" ? "media" : "maior",
         categoria: categoriaExiste ? {
           _id: row.categoriaJoinId,
           id: row.categoriaJoinId,

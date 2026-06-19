@@ -39,6 +39,19 @@ function daysUntil(value) {
   return Math.ceil((dueStart.getTime() - startOfToday().getTime()) / 86400000);
 }
 
+function startOfDay(value) {
+  const d = value ? parseDate(value) : new Date();
+  if (!d) return null;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function diffDaysCeil(inicio, fim) {
+  const a = startOfDay(inicio);
+  const b = startOfDay(fim);
+  if (!a || !b) return 0;
+  return Math.ceil((b.getTime() - a.getTime()) / 86400000);
+}
+
 function addDays(date, days) {
   const d = new Date(date || Date.now());
   d.setDate(d.getDate() + Number(days || 0));
@@ -303,10 +316,134 @@ async function processarWebhookMensalidade(paymentId) {
   return { cobranca, mp, result };
 }
 
+async function estornarMensalidadeParcial({ paymentId, valor, cobrancaId }) {
+  const token = getPlatformAccessToken();
+  if (!token) {
+    const err = new Error("Credencial Mercado Pago da Movyo nao configurada.");
+    err.status = 500;
+    throw err;
+  }
+  const response = await axios.post(`${MP_API}/v1/payments/${paymentId}/refunds`, { amount: valor }, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-Idempotency-Key": `saas_refund_${cobrancaId}_${dateKey(new Date())}`,
+    },
+    timeout: 20000,
+  });
+  return response.data || {};
+}
+
+async function cancelarPlanoComEstornoProporcional(restauranteId, opts = {}) {
+  const restaurante = await Restaurante.findById(restauranteId).lean();
+  if (!restaurante) {
+    const err = new Error("Restaurante nao encontrado.");
+    err.status = 404;
+    throw err;
+  }
+
+  const rid = String(restaurante._id || restaurante.id);
+  const cobrancas = await CobrancaSaas.find({
+    restauranteId: rid,
+    status: { $in: ["pago", "paid", "approved"] },
+  }).sort({ pagoEm: -1, geradoEm: -1, createdAt: -1 }).lean();
+  const cobranca = (cobrancas || [])[0] || null;
+
+  const hoje = startOfToday();
+  const inicio = startOfDay(restaurante.dataInicioPlano || cobranca?.pagoEm || cobranca?.geradoEm || hoje) || hoje;
+  const fim = startOfDay(restaurante.dataFimPlano || cobranca?.vencimento || addDays(inicio, 30)) || addDays(inicio, 30);
+  const totalDias = Math.max(1, diffDaysCeil(inicio, fim));
+  const diasRestantes = Math.max(0, Math.min(totalDias, diffDaysCeil(hoje, fim)));
+  const diasUsados = Math.max(0, totalDias - diasRestantes);
+  const valorPago = round2(cobranca?.valorFinal || 0);
+  const valorEstorno = round2(valorPago * (diasRestantes / totalDias));
+
+  let estornoStatus = "sem_cobranca_paga";
+  let estornoDetalhes = null;
+  let estornoErro = "";
+
+  if (cobranca) {
+    if (valorEstorno < 0.01 || diasRestantes <= 0) {
+      estornoStatus = "sem_valor";
+      estornoDetalhes = { motivo: "Nao ha dias restantes para estorno proporcional." };
+    } else if (!cobranca.mpPaymentId) {
+      estornoStatus = "manual";
+      estornoErro = "Cobranca paga sem mpPaymentId; estorno automatico indisponivel.";
+      estornoDetalhes = { motivo: estornoErro };
+    } else {
+      estornoDetalhes = await estornarMensalidadeParcial({
+        paymentId: String(cobranca.mpPaymentId),
+        valor: valorEstorno,
+        cobrancaId: cobranca._id || cobranca.id,
+      });
+      estornoStatus = "concluido";
+    }
+
+    await CobrancaSaas.findByIdAndUpdate(cobranca._id || cobranca.id, {
+      $set: {
+        status: "cancelado",
+        estornoStatus,
+        estornoValor: valorEstorno,
+        estornoEm: new Date(),
+        estornoErro,
+        estornoDetalhes: {
+          ...(estornoDetalhes && typeof estornoDetalhes === "object" ? estornoDetalhes : {}),
+          diasUsados,
+          diasRestantes,
+          totalDias,
+          valorPago,
+          valorEstorno,
+        },
+      },
+    });
+  }
+
+  const motivo = String(opts.motivo || opts.observacao || "Plano cancelado pelo SaaS").trim();
+  await Restaurante.findByIdAndUpdate(rid, {
+    $set: {
+      ativo: false,
+      statusAssinatura: "cancelado",
+      dataFimPlano: hoje,
+      cancelamentoPlanoEm: new Date(),
+      cancelamentoPlanoMotivo: motivo,
+      cancelamentoPlanoEstornoStatus: estornoStatus,
+      cancelamentoPlanoEstornoValor: valorEstorno,
+      cancelamentoPlanoDetalhes: {
+        cobrancaId: cobranca ? String(cobranca._id || cobranca.id) : null,
+        paymentId: cobranca?.mpPaymentId || null,
+        diasUsados,
+        diasRestantes,
+        totalDias,
+        valorPago,
+        valorEstorno,
+        canceladoPor: opts.canceladoPor || null,
+      },
+      observacaoPlano: motivo,
+    },
+    $inc: { sessaoVersao: 1 },
+  });
+
+  return {
+    restaurante: await Restaurante.findById(rid).lean(),
+    cobranca: cobranca ? await CobrancaSaas.findById(cobranca._id || cobranca.id).lean() : null,
+    estorno: {
+      status: estornoStatus,
+      valor: valorEstorno,
+      diasUsados,
+      diasRestantes,
+      totalDias,
+      valorPago,
+      erro: estornoErro || null,
+      automatico: estornoStatus === "concluido",
+    },
+  };
+}
+
 module.exports = {
   calcularMensalidade,
   resumoCobrancaRestaurante,
   gerarPixMensalidade,
   confirmarPagamentoMensalidade,
   processarWebhookMensalidade,
+  cancelarPlanoComEstornoProporcional,
 };

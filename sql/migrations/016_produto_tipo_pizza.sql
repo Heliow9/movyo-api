@@ -1,0 +1,5 @@
+ALTER TABLE produtos
+  ADD COLUMN tipoItem VARCHAR(255) NULL,
+  ADD COLUMN pizzaMultisabor TINYINT(1) NULL,
+  ADD COLUMN maxSabores DOUBLE NULL,
+  ADD COLUMN calculoPrecoPor VARCHAR(255) NULL;

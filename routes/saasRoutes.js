@@ -38,6 +38,7 @@ router.post('/restaurantes/:id/resetar-senha', authSaas, controller.resetarSenha
 router.put('/restaurantes/:id/email-cobranca', authSaas, controller.atualizarEmailCobranca);
 router.post('/restaurantes/:id/bloquear', authSaas, controller.bloquearRestaurante);
 router.post('/restaurantes/:id/ativar', authSaas, controller.ativarRestaurante);
+router.post('/restaurantes/:id/cancelar-plano', authSaas, controller.cancelarPlanoRestaurante);
 router.delete('/restaurantes/:id', authSaas, controller.excluirRestaurante);
 router.get('/admins', authSaas, controller.listarAdmins);
 router.post('/admins', authSaas, controller.salvarAdmin);
