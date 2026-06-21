@@ -2,6 +2,7 @@
 const express = require("express");
 const Pedido = require("../models/Pedido");
 const authRestaurante = require("../middlewares/authRestaurante");
+const authMotoristas = require("../middlewares/authMotoristas");
 const matchRestaurante = require("../middlewares/requireRestaurantMatch");
 
 const {
@@ -26,6 +27,9 @@ const {
   // ENTREGA
   // =========================
   enviarParaEntregador,
+  aceitarPedidoEntregador,
+  recusarPedidoEntregador,
+  obterPedidoEntregador,
   iniciarEntrega,
   concluirEntrega,
   listarPedidosAtivos,
@@ -118,6 +122,9 @@ module.exports = (io) => {
   // 🔹 ENTREGA
   // =========================================================
   router.post("/enviar/:idPedido/:idEntregador", authRestaurante, matchRestaurante, enviarParaEntregador);
+  router.get("/entregador/:pedidoId", authMotoristas, obterPedidoEntregador);
+  router.post("/entregador/:pedidoId/aceitar", authMotoristas, aceitarPedidoEntregador);
+  router.post("/entregador/:pedidoId/recusar", authMotoristas, recusarPedidoEntregador);
   router.post("/iniciar-entrega/:id", authRestaurante, matchRestaurante, iniciarEntrega);
   router.post("/concluir-entrega/:id", authRestaurante, matchRestaurante, concluirEntrega);
 
