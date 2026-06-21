@@ -1,7 +1,8 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Entregador = require('../models/Entregador');
-const { calcularDistanciaMapbox } = require('../services/distanciaService');
+const Restaurante = require('../models/Restaurante');
+const { calcularDistanciaEntrega } = require('../services/distanciaService');
 const { io } = require("../index.js"); // ou o caminho correto para onde você exportou o `io`
 
 const register = async (req, res) => {
@@ -98,8 +99,17 @@ const login = async (req, res) => {
     const senhaCorreta = await bcrypt.compare(senha, entregador.senha);
     if (!senhaCorreta) return res.status(400).json({ error: 'Senha incorreta.' });
 
-    const distancia = await calcularDistanciaMapbox(latitude, longitude);
-    if (distancia === null) return res.status(500).json({ error: 'Erro ao calcular a distância.' });
+    const restauranteId = entregador.restaurante || entregador.restauranteId;
+    const restaurante = restauranteId
+      ? await Restaurante.findById(restauranteId).lean().catch(() => null)
+      : null;
+
+    const distancia = await calcularDistanciaEntrega(
+      latitude,
+      longitude,
+      restaurante?.localizacao || {}
+    );
+    if (distancia === null) return res.status(400).json({ error: 'Localizacao invalida para calcular distancia.' });
     // comentado apenas para fins de teste aw função esta funcionando corretamente!
     // if (distancia > 500) return res.status(403).json({ error: 'Você precisa estar a até 500m da loja para fazer login.' });
 
@@ -156,9 +166,17 @@ const atualizarLocalizacao = async (req, res, io) => {
   const { email, latitude, longitude, restauranteId } = req.body;
 
   try {
-    const distancia = await calcularDistanciaORS(latitude, longitude);
+    const restaurante = restauranteId
+      ? await Restaurante.findById(restauranteId).lean().catch(() => null)
+      : null;
+
+    const distancia = await calcularDistanciaEntrega(
+      latitude,
+      longitude,
+      restaurante?.localizacao || {}
+    );
     if (distancia === null) {
-      return res.status(500).json({ message: "Erro ao calcular a distância." });
+      return res.status(400).json({ message: "Localizacao invalida para calcular distancia." });
     }
 
     const entregador = await Entregador.findOneAndUpdate(
