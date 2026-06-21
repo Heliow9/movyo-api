@@ -4,7 +4,30 @@ const timeoutsDePedidos = new Map();
 const Pedido = require("../models/Pedido");
 const Entregador = require("../models/Entregador");
 const EntregadorOnline = require("../models/EntregadorOnline");
+const Restaurante = require("../models/Restaurante");
 const axios = require("axios");
+
+const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
+
+function idString(value) {
+  return String(value?._id || value?.id || value || "");
+}
+
+async function obterLimitePedidosPorEntregador(restauranteId) {
+  const restaurante = await Restaurante.findById(restauranteId).lean();
+  const raw = restaurante?.maxPedidosPorEntregador ?? restaurante?.pedidosPorEntregador ?? 3;
+  const limite = Number(raw);
+  return Number.isFinite(limite) ? Math.max(1, Math.round(limite)) : 3;
+}
+
+async function contarEntregasAtivas(entregadorId, pedidoIdIgnorar = null) {
+  const filtro = {
+    entregador: entregadorId,
+    status: { $in: STATUS_ENTREGA_ATIVA },
+  };
+  if (pedidoIdIgnorar) filtro._id = { $ne: pedidoIdIgnorar };
+  return Pedido.countDocuments(filtro);
+}
 
 module.exports = (io) => {
   io.on("connection", (socket) => {
@@ -207,12 +230,37 @@ module.exports = (io) => {
         const pedido = await Pedido.findById(pedidoId);
         if (!pedido) return;
 
+        const entregador = await Entregador.findById(delivererId);
+        if (!entregador || idString(entregador.restaurante) !== String(restauranteId)) {
+          io.to(`restaurante-${restauranteId}`).emit("pedidoEnvioErro", {
+            pedidoId,
+            delivererId,
+            message: "Entregador invalido para este restaurante.",
+          });
+          return;
+        }
+
+        const limite = await obterLimitePedidosPorEntregador(restauranteId);
+        const ativas = await contarEntregasAtivas(delivererId, pedidoId);
+        if (ativas >= limite) {
+          io.to(`restaurante-${restauranteId}`).emit("pedidoEnvioErro", {
+            pedidoId,
+            delivererId,
+            limite,
+            entregasAtivas: ativas,
+            message: `Este entregador ja atingiu o limite de ${limite} entrega(s) ativa(s).`,
+          });
+          return;
+        }
+
         pedido.entregador = delivererId;
         pedido.status = "aguardando_resposta";
+        pedido.statusAtualizadoEm = new Date();
         await pedido.save();
 
         io.to(`entregador-${delivererId}`).emit("pedidoRecebido", pedido);
         io.to(`restaurante-${restauranteId}`).emit("pedidoEnviado", pedido);
+        io.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
 
         const timeout = setTimeout(async () => {
           const p = await Pedido.findById(pedidoId);
@@ -238,10 +286,14 @@ module.exports = (io) => {
         const pedido = await Pedido.findById(pedidoId);
         if (!pedido) return;
 
+        pedido.entregador = entregadorId;
         pedido.status = "em_rota";
+        pedido.aceitoEm = new Date();
+        pedido.statusAtualizadoEm = new Date();
         await pedido.save();
 
         io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAceito", pedido);
+        io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
         io.to(`entregador-${entregadorId}`).emit("pedidoAceito", pedido);
 
         if (timeoutsDePedidos.has(pedidoId)) {

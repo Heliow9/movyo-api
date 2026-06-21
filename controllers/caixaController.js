@@ -65,6 +65,17 @@ exports.alternarOperador = async (req, res) => {
 const caixaAtualCache = new Map();
 const CAIXA_ATUAL_CACHE_MS = Number(process.env.CAIXA_ATUAL_CACHE_MS || 5000);
 
+function invalidarCacheCaixa(restauranteId) {
+  if (restauranteId) caixaAtualCache.delete(String(restauranteId));
+}
+
+function emitirCaixa(req, restauranteId, evento, caixa) {
+  const sala = `restaurante-${restauranteId}`;
+  req.io?.to(sala).emit('caixaAtualizado', caixa);
+  req.io?.to(sala).emit(evento, { caixa });
+  req.io?.to(sala).emit(evento.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), { caixa });
+}
+
 exports.caixaAtual = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
@@ -104,7 +115,8 @@ exports.abrirCaixa = async (req, res) => {
       restauranteId: String(restauranteId), operadorId: operador._id, operadorNome: operador.nome,
       saldoInicial: round2(toNum(saldoInicial)), status: 'aberto', dataOperacional, abertoEm: new Date(), observacaoAbertura: String(observacaoAbertura || '').trim(),
     });
-    req.io?.to(`restaurante-${restauranteId}`).emit('caixaAtualizado', caixa);
+    invalidarCacheCaixa(restauranteId);
+    emitirCaixa(req, restauranteId, 'caixaAberto', caixa);
     await registrarAuditoria(req, 'caixa.aberto', 'caixa', caixa._id, { operadorId, operadorNome:operador.nome, saldoInicial:caixa.saldoInicial });
     res.status(201).json({ ok: true, caixa });
   } catch (e) { res.status(500).json({ message: 'Erro ao abrir caixa.', error: e.message }); }
@@ -122,7 +134,8 @@ exports.movimentarCaixa = async (req, res) => {
     if (valor <= 0) return res.status(400).json({ message: 'Valor inválido.' });
     const movimento = await CaixaMovimento.create({ restauranteId, caixaSessaoId: caixa._id, operadorId: caixa.operadorId, tipo, valor, formaPagamento: 'dinheiro', origem: 'caixa', descricao: String(req.body.descricao || '').trim() });
     const atualizado = await recalcularCaixa(caixa._id);
-    req.io?.to(`restaurante-${restauranteId}`).emit('caixaAtualizado', atualizado);
+    invalidarCacheCaixa(restauranteId);
+    emitirCaixa(req, restauranteId, 'caixaMovimentoRegistrado', atualizado);
     await registrarAuditoria(req, `caixa.${tipo}`, 'movimento_caixa', movimento._id, { caixaSessaoId:caixa._id, valor, descricao:movimento.descricao });
     res.json({ ok: true, movimento, caixa: atualizado });
   } catch (e) { res.status(e.status || 500).json({ message: e.message || 'Erro ao movimentar caixa.', code: e.code }); }
@@ -144,7 +157,8 @@ exports.fecharCaixa = async (req, res) => {
     doc.observacaoFechamento = String(req.body.observacaoFechamento || '').trim();
     doc.fechadoPor = req.userId || req.body.fechadoPor || '';
     await doc.save();
-    req.io?.to(`restaurante-${restauranteId}`).emit('caixaAtualizado', doc);
+    invalidarCacheCaixa(restauranteId);
+    emitirCaixa(req, restauranteId, 'caixaFechado', doc);
     await registrarAuditoria(req, 'caixa.fechado', 'caixa', doc._id, { operadorId:doc.operadorId, operadorNome:doc.operadorNome, saldoFinalInformado:doc.saldoFinalInformado, totalVendas:doc.totalVendas });
     res.json({ ok: true, caixa: doc });
   } catch (e) { res.status(e.status || 500).json({ message: e.message || 'Erro ao fechar caixa.', code: e.code }); }

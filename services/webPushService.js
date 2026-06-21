@@ -256,6 +256,26 @@ function restauranteIdOfPedido(pedido) {
   return normalizeRestauranteId(pedido?.restauranteId || pedido?.restaurante);
 }
 
+const DEFAULT_TIME_ZONE = clean(process.env.MOVYO_TIMEZONE || process.env.MOVYO_OPERATIONAL_TIMEZONE || 'America/Sao_Paulo') || 'America/Sao_Paulo';
+
+function formatTimeBR(value) {
+  if (!value) return '';
+  if (typeof value === 'string') {
+    const text = value.trim();
+    const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(text);
+    const mysqlLocal = text.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (mysqlLocal && !hasTimezone) return `${mysqlLocal[4]}:${mysqlLocal[5]}`;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString('pt-BR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: DEFAULT_TIME_ZONE,
+  });
+}
+
 function buildPedidoEmProducaoPayload(pedido = {}) {
   const pedidoId = pedidoIdOf(pedido);
   const codigo = clean(pedido.numeroPedido || pedido.numero || pedido.codigo || pedidoId.slice(-6));
@@ -308,10 +328,7 @@ async function notifyPedidoEmProducao(pedido = {}) {
 function buildCaixaAbertoPayload(caixa = {}) {
   const caixaId = clean(caixa._id || caixa.id);
   const operador = clean(caixa.operadorNome || caixa?.operador?.nome || 'Operador');
-  const abertoEm = caixa.abertoEm ? new Date(caixa.abertoEm) : new Date();
-  const hora = Number.isNaN(abertoEm.getTime())
-    ? ''
-    : abertoEm.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Recife' });
+  const hora = formatTimeBR(caixa.abertoEm || new Date());
 
   return {
     title: 'Caixa aberto na Movyo',
@@ -328,11 +345,41 @@ function buildCaixaAbertoPayload(caixa = {}) {
   };
 }
 
+function buildCaixaFechadoPayload(caixa = {}) {
+  const caixaId = clean(caixa._id || caixa.id);
+  const operador = clean(caixa.operadorNome || caixa?.operador?.nome || 'Operador');
+  const hora = formatTimeBR(caixa.fechadoEm || new Date());
+
+  return {
+    title: 'Caixa fechado na Movyo',
+    body: `${operador} fechou o caixa${hora ? ` as ${hora}` : ''}.`,
+    tag: `caixa-fechado-${caixaId || 'movyo'}`,
+    renotify: false,
+    status: 'caixa_fechado',
+    data: {
+      url: '/',
+      screen: 'Home',
+      caixaId,
+      status: 'caixa_fechado',
+    },
+  };
+}
+
 async function notifyCaixaAberto(caixa = {}) {
   const restId = normalizeRestauranteId(caixa.restauranteId || caixa.restaurante);
   const caixaId = clean(caixa._id || caixa.id);
   return sendToRestaurant(restId, buildCaixaAbertoPayload(caixa), {
     eventKey: `caixa:${caixaId}:aberto`,
+    ttl: 120,
+    urgency: 'high',
+  });
+}
+
+async function notifyCaixaFechado(caixa = {}) {
+  const restId = normalizeRestauranteId(caixa.restauranteId || caixa.restaurante);
+  const caixaId = clean(caixa._id || caixa.id);
+  return sendToRestaurant(restId, buildCaixaFechadoPayload(caixa), {
+    eventKey: `caixa:${caixaId}:fechado`,
     ttl: 120,
     urgency: 'high',
   });
@@ -364,5 +411,7 @@ module.exports = {
   notifyPedidoEmProducao,
   buildCaixaAbertoPayload,
   notifyCaixaAberto,
+  buildCaixaFechadoPayload,
+  notifyCaixaFechado,
   getRestaurantStatus,
 };

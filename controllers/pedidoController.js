@@ -1,4 +1,4 @@
-// controllers/pedidoController.js
+﻿// controllers/pedidoController.js
 const mongoose = require("../lib/mongoId");
 const { pool } = require("../db/mysql");
 const { queryWithRetry } = require("../lib/mysqlRetry");
@@ -8,6 +8,7 @@ const { MercadoPagoConfig, Payment } = require("mercadopago");
 const Pedido = require("../models/Pedido");
 const Cliente = require("../models/Cliente");
 const Restaurante = require("../models/Restaurante");
+const Entregador = require("../models/Entregador");
 const Mesa = require("../models/mesaModel");
 const Produto = require("../models/Produto");
 const Frete = require("../models/Frete");
@@ -17,10 +18,32 @@ const { todayYmd } = require("../utils/operationalDate");
 const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
 const { cancelarPedidoComAuditoria } = require("../services/pedidoCancelamentoService");
 
+const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
+
+function idString(value) {
+  return String(value?._id || value?.id || value || "");
+}
+
+async function obterLimitePedidosPorEntregador(restauranteId) {
+  const restaurante = await Restaurante.findById(restauranteId).lean();
+  const raw = restaurante?.maxPedidosPorEntregador ?? restaurante?.pedidosPorEntregador ?? 3;
+  const limite = Number(raw);
+  return Number.isFinite(limite) ? Math.max(1, Math.round(limite)) : 3;
+}
+
+async function contarEntregasAtivas(entregadorId, pedidoIdIgnorar = null) {
+  const filtro = {
+    entregador: entregadorId,
+    status: { $in: STATUS_ENTREGA_ATIVA },
+  };
+  if (pedidoIdIgnorar) filtro._id = { $ne: pedidoIdIgnorar };
+  return Pedido.countDocuments(filtro);
+}
+
 /* =========================================================
-   HELPERS DE PERFORMANCE - APP GARÇOM / HUB
+   HELPERS DE PERFORMANCE - APP GARÃ‡OM / HUB
    Evita Pedido.find({ restaurante }) via adapter MySQL, que carrega
-   a tabela inteira em memória antes de filtrar.
+   a tabela inteira em memÃ³ria antes de filtrar.
 ========================================================= */
 function parseJsonSafe(value, fallback) {
   if (value === null || value === undefined || value === "") return fallback;
@@ -119,15 +142,15 @@ function canReuseBalcaoPedido(pedido) {
   const st = String(pedido.status || "");
   const pend = Number(pedido.valorPendente ?? 0);
 
-  // ✅ só reaproveita pedido realmente aberto
+  // âœ… sÃ³ reaproveita pedido realmente aberto
   return st === "aguardando_pagamento" && pend > 0.00001;
 }
 
 async function gerarProximoNumeroBalcao(restauranteId, debugLog = null) {
-  // PERFORMANCE CRÍTICA:
-  // A versão antiga fazia Pedido.find({ restaurante, numeroPedido: /^BK/ }) e o factory MySQL
-  // carregava a tabela inteira de pedidos em memória antes de filtrar. Em bases grandes isso
-  // passava de 15s e estourava timeout no Movyo Hub Garçom > Pedido Balcão.
+  // PERFORMANCE CRÃTICA:
+  // A versÃ£o antiga fazia Pedido.find({ restaurante, numeroPedido: /^BK/ }) e o factory MySQL
+  // carregava a tabela inteira de pedidos em memÃ³ria antes de filtrar. Em bases grandes isso
+  // passava de 15s e estourava timeout no Movyo Hub GarÃ§om > Pedido BalcÃ£o.
   const prefixo = "BK";
   const log = typeof debugLog === "function" ? debugLog : () => {};
 
@@ -151,8 +174,8 @@ async function gerarProximoNumeroBalcao(restauranteId, debugLog = null) {
     log("SQL gerarProximoNumeroBalcao:fim", { maior, numero });
     return numero;
   } catch (err) {
-    // Fallback seguro: se o MySQL antigo não aceitar REGEXP/CAST por algum motivo,
-    // ainda evita buscar a tabela inteira. Busca só os últimos candidatos do restaurante.
+    // Fallback seguro: se o MySQL antigo nÃ£o aceitar REGEXP/CAST por algum motivo,
+    // ainda evita buscar a tabela inteira. Busca sÃ³ os Ãºltimos candidatos do restaurante.
     log("SQL gerarProximoNumeroBalcao:fallback", { erro: err?.message });
 
     const [rows] = await pool.query(
@@ -217,7 +240,7 @@ function aplicarStatusPorPagamentoTotal(pedido) {
   if (valorPendente <= 0) {
     if (!pedido.pagoEm) pedido.pagoEm = new Date();
 
-    // ✅ ao quitar, vai pra produção
+    // âœ… ao quitar, vai pra produÃ§Ã£o
     pedido.status = "em_producao";
     pedido.statusPagamento = "pago";
 
@@ -236,10 +259,10 @@ function aplicarStatusPorPagamentoTotal(pedido) {
     return pedido;
   }
 
-  // ❗ pendente > 0
+  // â— pendente > 0
   pedido.statusPagamento = "pendente";
 
-  // ✅ não deixa “voltar” status se já está em produção/entrega
+  // âœ… nÃ£o deixa â€œvoltarâ€ status se jÃ¡ estÃ¡ em produÃ§Ã£o/entrega
   if (!statusIrreversivel) {
     pedido.status = "aguardando_pagamento";
   }
@@ -266,8 +289,8 @@ function calcUnitPriceFromItem(it) {
 
 /**
  * statement_descriptor:
- * - máximo 22 caracteres
- * - geralmente: A-Z 0-9 e espaço
+ * - mÃ¡ximo 22 caracteres
+ * - geralmente: A-Z 0-9 e espaÃ§o
  */
 function toStatementDescriptor(input) {
   const raw = String(input || "")
@@ -393,7 +416,7 @@ async function buildMpItemsFromPedidoItens(itens = []) {
 }
 
 /* =========================================================
-   REGRAS DO BALCÃO (compat pagamento parcial)
+   REGRAS DO BALCÃƒO (compat pagamento parcial)
 ========================================================= */
 function isOrigemBalcao(origem) {
   return String(origem || "").toLowerCase() === "balcao";
@@ -402,7 +425,7 @@ function isOrigemBalcao(origem) {
 function normalizeFormaPagamento(fpRaw) {
   const fp = String(fpRaw || "").toLowerCase().trim();
   const isPix = fp === "pix";
-  const isCard = fp === "cartaocredito" || fp === "cartao" || fp === "cartão" || fp === "credito" || fp === "debito" || fp === "crédito" || fp === "débito";
+  const isCard = fp === "cartaocredito" || fp === "cartao" || fp === "cartÃ£o" || fp === "credito" || fp === "debito" || fp === "crÃ©dito" || fp === "dÃ©bito";
   return { fp, isPix, isCard };
 }
 
@@ -472,8 +495,8 @@ async function recalcularItensPublicos({ itens = [], restauranteId }) {
     throw err;
   }
 
-  // Itens auxiliares antigos (frete/taxa) já foram enviados por versões anteriores da vitrine.
-  // Eles nunca devem ser tratados como produtos: frete e taxas são recalculados no backend.
+  // Itens auxiliares antigos (frete/taxa) jÃ¡ foram enviados por versÃµes anteriores da vitrine.
+  // Eles nunca devem ser tratados como produtos: frete e taxas sÃ£o recalculados no backend.
   const itensProduto = entrada.filter((item) => {
     if (getItemProdutoId(item)) return true;
     const nome = normalizeText(item?.nome || item?.description || item?.title || "");
@@ -496,19 +519,19 @@ async function recalcularItensPublicos({ itens = [], restauranteId }) {
     const produtoId = getItemProdutoId(item);
     const produto = produtoId ? produtos.get(produtoId) : null;
     if (!produto) {
-      const err = new Error("Um dos produtos do carrinho não foi encontrado.");
+      const err = new Error("Um dos produtos do carrinho nÃ£o foi encontrado.");
       err.statusCode = 400;
       throw err;
     }
 
     if (String(produto.restaurante || "") !== String(restauranteId || "")) {
-      const err = new Error("Produto não pertence ao restaurante informado.");
+      const err = new Error("Produto nÃ£o pertence ao restaurante informado.");
       err.statusCode = 400;
       throw err;
     }
 
     if (produto.ativo === false || produto.ativoVitrine === false || produto.disponivel === false) {
-      const err = new Error(`Produto indisponível: ${produto.nome || "item"}.`);
+      const err = new Error(`Produto indisponÃ­vel: ${produto.nome || "item"}.`);
       err.statusCode = 400;
       throw err;
     }
@@ -574,12 +597,12 @@ function findAreaFrete(areas = [], bairroRaw = "") {
 async function validarFretePublico({ restauranteDoc, restauranteId, origem, enderecoCliente, residenciaBairro, latitudeCliente, longitudeCliente, taxaEntregaPayload }) {
   const origemNormalizada = String(origem || "").toLowerCase();
   const isBalcao = isOrigemBalcao(origemNormalizada);
-  const retirada = ["retirada", "balcao", "balcão"].some((v) => String(enderecoCliente || "").toLowerCase().includes(v));
+  const retirada = ["retirada", "balcao", "balcÃ£o"].some((v) => String(enderecoCliente || "").toLowerCase().includes(v));
   if (isBalcao || retirada) return { taxaEntrega: 0, entregaDisponivel: true, distanciaKm: null };
 
   const frete = await Frete.findOne({ restaurante: restauranteId }).lean();
   if (!frete || frete.ativo === false) {
-    return { taxaEntrega: round2(taxaEntregaPayload || 0), entregaDisponivel: true, distanciaKm: null, aviso: "Frete sem configuração ativa; mantida compatibilidade." };
+    return { taxaEntrega: round2(taxaEntregaPayload || 0), entregaDisponivel: true, distanciaKm: null, aviso: "Frete sem configuraÃ§Ã£o ativa; mantida compatibilidade." };
   }
 
   const areas = Array.isArray(frete.areas) ? frete.areas : [];
@@ -601,14 +624,14 @@ async function validarFretePublico({ restauranteDoc, restauranteId, origem, ende
     const faixa = faixas.find((f) => distanciaKm <= f.ate);
     if (faixa) return { taxaEntrega: faixa.valor, entregaDisponivel: true, distanciaKm };
 
-    const err = new Error("Não temos entrega disponível para este endereço.");
+    const err = new Error("NÃ£o temos entrega disponÃ­vel para este endereÃ§o.");
     err.statusCode = 422;
     err.securityReason = "FORA_AREA_ENTREGA";
     throw err;
   }
 
   if (areas.length || faixas.length || frete.raioKm) {
-    const err = new Error("Não foi possível validar a entrega para este endereço. Confira o bairro/localização e tente novamente.");
+    const err = new Error("NÃ£o foi possÃ­vel validar a entrega para este endereÃ§o. Confira o bairro/localizaÃ§Ã£o e tente novamente.");
     err.statusCode = 422;
     err.securityReason = "ENTREGA_NAO_VALIDADA";
     throw err;
@@ -643,11 +666,11 @@ function upsertPagamentoPedido(pedido, pagamentoNovo = {}) {
 }
 
 /* =========================================================
-   ✅ COZINHA: helpers
+   âœ… COZINHA: helpers
 ========================================================= */
 
-// o que é "item de cozinha"?
-// - se o item já vem com categoriaType === "cozinha" (melhor)
+// o que Ã© "item de cozinha"?
+// - se o item jÃ¡ vem com categoriaType === "cozinha" (melhor)
 // - OU se o produto tem imprimeNaCozinha === true
 async function isItemDeCozinha(it) {
   const cat = String(it?.categoriaType || "").toLowerCase();
@@ -672,14 +695,14 @@ const COZINHA_STATUS = {
 };
 
 function ensureItemCozinhaState(item) {
-  // ⚠️ esses campos precisam existir no schema do ItemSchema para persistir
+  // âš ï¸ esses campos precisam existir no schema do ItemSchema para persistir
   if (!item.cozinha) item.cozinha = {};
   if (!item.cozinha.status) item.cozinha.status = COZINHA_STATUS.PENDENTE;
   if (!item.cozinha.criadoEm) item.cozinha.criadoEm = new Date();
   return item;
 }
 
-// aplica estado inicial pra itens que já vêm marcados como cozinha no payload
+// aplica estado inicial pra itens que jÃ¡ vÃªm marcados como cozinha no payload
 function seedCozinhaOnItens(itens) {
   const arr = Array.isArray(itens) ? itens : [];
   for (const it of arr) {
@@ -690,10 +713,10 @@ function seedCozinhaOnItens(itens) {
 }
 
 /* =========================================================
-   CRIAR PEDIDO (balcão ou vitrine/salão)
+   CRIAR PEDIDO (balcÃ£o ou vitrine/salÃ£o)
 ========================================================= */
 const criarPedido = async (req, res) => {
-  console.log("🟠 Criando pedido com status:", req.body.status);
+  console.log("ðŸŸ  Criando pedido com status:", req.body.status);
 
   const {
     restaurante,
@@ -721,7 +744,7 @@ const criarPedido = async (req, res) => {
   const origem = (req.body.origem || "balcao").toLowerCase();
 
   if (!restaurante) {
-    return res.status(400).json({ message: "Restaurante é obrigatório." });
+    return res.status(400).json({ message: "Restaurante Ã© obrigatÃ³rio." });
   }
 
   try {
@@ -729,7 +752,7 @@ const criarPedido = async (req, res) => {
     const restauranteDoc = await Restaurante.findById(restaurante);
 
     if (!restauranteDoc) {
-      return res.status(404).json({ message: "Restaurante não encontrado." });
+      return res.status(404).json({ message: "Restaurante nÃ£o encontrado." });
     }
 
     const mpConectado =
@@ -737,7 +760,7 @@ const criarPedido = async (req, res) => {
 
     let totalNumber = Number(String(valorTotal).replace(",", "."));
     if (!Number.isFinite(totalNumber) || totalNumber <= 0) {
-      return res.status(400).json({ message: "valorTotal inválido." });
+      return res.status(400).json({ message: "valorTotal invÃ¡lido." });
     }
 
     // =========================
@@ -785,7 +808,7 @@ const criarPedido = async (req, res) => {
         : null;
 
     // =========================
-    // 3) Gera número do pedido
+    // 3) Gera nÃºmero do pedido
     // =========================
     let novoNumeroPedido = numeroPedido;
 
@@ -824,8 +847,8 @@ const criarPedido = async (req, res) => {
     const formaRelatorio = formaPagamentoRelatorio(formadePagamento);
     const isBalcao = isOrigemBalcao(origem);
 
-    // Pedido da vitrine nunca entra direto em produção: após pagamento fica em
-    // "pago" (Recebidos) até o restaurante aceitar manualmente.
+    // Pedido da vitrine nunca entra direto em produÃ§Ã£o: apÃ³s pagamento fica em
+    // "pago" (Recebidos) atÃ© o restaurante aceitar manualmente.
     const statusInicial = isBalcao
       ? "aguardando_pagamento"
       : isPix || isCard
@@ -835,8 +858,8 @@ const criarPedido = async (req, res) => {
     let itensSeed = seedCozinhaOnItens(Array.isArray(itens) ? itens : []);
     let taxaEntregaSegura = round2(taxaEntrega || req.body.taxaEntrega || 0);
 
-    // Segurança crítica da vitrine: para pedidos públicos, o backend não confia no total/preços do navegador.
-    // Balcão/desktop permanece no fluxo antigo para não quebrar operação interna.
+    // SeguranÃ§a crÃ­tica da vitrine: para pedidos pÃºblicos, o backend nÃ£o confia no total/preÃ§os do navegador.
+    // BalcÃ£o/desktop permanece no fluxo antigo para nÃ£o quebrar operaÃ§Ã£o interna.
     if (!isBalcao) {
       const freteValidado = await validarFretePublico({
         restauranteDoc,
@@ -860,7 +883,7 @@ const criarPedido = async (req, res) => {
       totalNumber = round2(subtotalSeguro + taxaCartaoSegura);
 
       if (!Number.isFinite(totalNumber) || totalNumber <= 0) {
-        return res.status(400).json({ message: "Total do pedido inválido após validação." });
+        return res.status(400).json({ message: "Total do pedido invÃ¡lido apÃ³s validaÃ§Ã£o." });
       }
 
       if (freteValidado?.securityReason) {
@@ -883,7 +906,7 @@ const criarPedido = async (req, res) => {
       total: round2(totalNumber),
       taxaEntrega: taxaEntregaSegura,
 
-      // ✅ balcão (e geral) inicia SEM PAGAMENTO
+      // âœ… balcÃ£o (e geral) inicia SEM PAGAMENTO
       valorPago: 0,
       valorPendente: round2(totalNumber),
 
@@ -902,9 +925,9 @@ const criarPedido = async (req, res) => {
       pagamentos: [],
     });
 
-    // Para relatórios futuros, pedidos offline da vitrine/salão também ficam com
-    // a forma e o lançamento financeiro salvos no banco.
-    // PIX/cartão online entram como pendentes/confirmados nos blocos do Mercado Pago.
+    // Para relatÃ³rios futuros, pedidos offline da vitrine/salÃ£o tambÃ©m ficam com
+    // a forma e o lanÃ§amento financeiro salvos no banco.
+    // PIX/cartÃ£o online entram como pendentes/confirmados nos blocos do Mercado Pago.
     if (!isBalcao && !isPix && !isCard && formaRelatorio !== "pendente") {
       const agora = new Date();
       upsertPagamentoPedido(novoPedido, {
@@ -915,7 +938,7 @@ const criarPedido = async (req, res) => {
         confirmadoEm: agora,
         recebidoPor: null,
         recebidoPorRole: "cliente",
-        obs: "Pagamento offline informado na vitrine/salão",
+        obs: "Pagamento offline informado na vitrine/salÃ£o",
       });
       novoPedido.valorPago = round2(totalNumber);
       novoPedido.valorPendente = 0;
@@ -923,14 +946,14 @@ const criarPedido = async (req, res) => {
       if (!novoPedido.pagoEm) novoPedido.pagoEm = agora;
     }
 
-    // Vincula o pedido ao caixa que estava aberto no instante da criação.
-    // Isso faz os KPIs representarem exatamente o turno (abertura → fechamento).
+    // Vincula o pedido ao caixa que estava aberto no instante da criaÃ§Ã£o.
+    // Isso faz os KPIs representarem exatamente o turno (abertura â†’ fechamento).
     const caixaAbertoCriacao = await getCaixaAberto(restaurante).catch(() => null);
     if (caixaAbertoCriacao) await vincularPedidoAoCaixa(novoPedido, caixaAbertoCriacao);
 
     await novoPedido.save();
 
-    // Pagamentos offline da vitrine já chegam confirmados; registra a venda no caixa.
+    // Pagamentos offline da vitrine jÃ¡ chegam confirmados; registra a venda no caixa.
     if (caixaAbertoCriacao && !isBalcao && !isPix && !isCard && novoPedido.statusPagamento === "pago") {
       await registrarMovimentoVenda({ pedido: novoPedido, caixa: caixaAbertoCriacao, restauranteId: restaurante }).catch((e) =>
         console.warn("Falha ao registrar venda da vitrine no caixa:", e?.message || e)
@@ -939,10 +962,10 @@ const criarPedido = async (req, res) => {
     }
 
     // =========================================================
-    // ✅ BALCÃO: encerra aqui
+    // âœ… BALCÃƒO: encerra aqui
     // =========================================================
     if (isBalcao) {
-      // Balcão com pagamento pendente não deve notificar o desktop como novo pedido.
+      // BalcÃ£o com pagamento pendente nÃ£o deve notificar o desktop como novo pedido.
       req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
       return res.status(201).json({
         pedidoId: novoPedido._id,
@@ -953,12 +976,12 @@ const criarPedido = async (req, res) => {
         valorPago: novoPedido.valorPago,
         valorPendente: novoPedido.valorPendente,
         message:
-          "Pedido criado (balcão). Pagamento parcial/misto deve ser registrado via pagamentos[].",
+          "Pedido criado (balcÃ£o). Pagamento parcial/misto deve ser registrado via pagamentos[].",
       });
     }
 
     // =========================================================
-    // ✅ VITRINE/SALÃO: fluxo antigo (PIX/CARTÃO cria cobrança)
+    // âœ… VITRINE/SALÃƒO: fluxo antigo (PIX/CARTÃƒO cria cobranÃ§a)
     // =========================================================
 
     // =========================
@@ -967,7 +990,7 @@ const criarPedido = async (req, res) => {
     if (isPix) {
       if (!mpConectado) {
         await Pedido.findByIdAndUpdate(novoPedido._id, { $set: { status: "cancelado" } });
-        return res.status(400).json({ message: "Restaurante não conectado ao Mercado Pago (OAuth)." });
+        return res.status(400).json({ message: "Restaurante nÃ£o conectado ao Mercado Pago (OAuth)." });
       }
 
       const fee = Number(process.env.MP_PLATFORM_FEE || 0.5);
@@ -1030,7 +1053,7 @@ const criarPedido = async (req, res) => {
           recebidoEm: new Date(),
           recebidoPor: null,
           recebidoPorRole: "mercadopago",
-          obs: "PIX Mercado Pago aguardando aprovação",
+          obs: "PIX Mercado Pago aguardando aprovaÃ§Ã£o",
           mpPaymentId: novoPedido.mpPaymentId,
           mpStatus: String(pagamento?.status || "pending").toLowerCase(),
           pixQrCode: novoPedido.pixQrCode,
@@ -1044,7 +1067,7 @@ const criarPedido = async (req, res) => {
 
         await novoPedido.save();
 
-        // PIX pendente ainda não é pedido confirmado; não dispara notificação de novo pedido.
+        // PIX pendente ainda nÃ£o Ã© pedido confirmado; nÃ£o dispara notificaÃ§Ã£o de novo pedido.
         req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
 
         return res.status(201).json({
@@ -1057,7 +1080,7 @@ const criarPedido = async (req, res) => {
         });
       } catch (err) {
         const mp = extractMpError(err);
-        console.error("❌ MP PIX ERROR:", mp);
+        console.error("âŒ MP PIX ERROR:", mp);
 
         await Pedido.findByIdAndUpdate(novoPedido._id, {
           $set: { status: "cancelado", statusPagamento: "error", mpError: mp },
@@ -1071,18 +1094,18 @@ const criarPedido = async (req, res) => {
     }
 
     // =========================
-    // 5B) CARTÃO (Mercado Pago)
+    // 5B) CARTÃƒO (Mercado Pago)
     // =========================
     if (isCard) {
       if (!mpConectado) {
         await Pedido.findByIdAndUpdate(novoPedido._id, { $set: { status: "cancelado" } });
-        return res.status(400).json({ message: "Restaurante não conectado ao Mercado Pago (OAuth)." });
+        return res.status(400).json({ message: "Restaurante nÃ£o conectado ao Mercado Pago (OAuth)." });
       }
 
       if (!mpCard?.token || !mpCard?.payment_method_id) {
         await Pedido.findByIdAndUpdate(novoPedido._id, { $set: { status: "cancelado" } });
         return res.status(400).json({
-          message: "Dados do cartão ausentes (token/payment_method_id).",
+          message: "Dados do cartÃ£o ausentes (token/payment_method_id).",
         });
       }
 
@@ -1158,7 +1181,7 @@ const criarPedido = async (req, res) => {
           recebidoEm: agora,
           recebidoPor: null,
           recebidoPorRole: "mercadopago",
-          obs: "Cartão Mercado Pago",
+          obs: "CartÃ£o Mercado Pago",
           mpPaymentId: novoPedido.mpPaymentId,
           mpStatus: st,
           ...(cartaoConfirmado ? { confirmadoEm: agora } : {}),
@@ -1191,11 +1214,11 @@ const criarPedido = async (req, res) => {
             },
             caixa: caixaAbertoCriacao,
             restauranteId: restaurante,
-          }).catch((e) => console.warn("Falha ao registrar cartão no caixa:", e?.message || e));
+          }).catch((e) => console.warn("Falha ao registrar cartÃ£o no caixa:", e?.message || e));
           await recalcularCaixa(caixaAbertoCriacao._id || caixaAbertoCriacao.id).catch(() => null);
         }
 
-        // Cartão só vira novo pedido quando aprovado. Se ficar pendente, não notifica desktop.
+        // CartÃ£o sÃ³ vira novo pedido quando aprovado. Se ficar pendente, nÃ£o notifica desktop.
         if (novoPedido.status === "aguardando_pagamento" || novoPedido.statusPagamento === "pendente") {
           req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
         } else {
@@ -1212,14 +1235,14 @@ const criarPedido = async (req, res) => {
         });
       } catch (err) {
         const mp = extractMpError(err);
-        console.error("❌ MP CARD ERROR:", mp);
+        console.error("âŒ MP CARD ERROR:", mp);
 
         await Pedido.findByIdAndUpdate(novoPedido._id, {
           $set: { status: "cancelado", statusPagamento: "error", mpError: mp },
         }).catch(() => {});
 
         return res.status(400).json({
-          message: "Falha ao processar cartão (Mercado Pago).",
+          message: "Falha ao processar cartÃ£o (Mercado Pago).",
           mp,
         });
       }
@@ -1237,7 +1260,7 @@ const criarPedido = async (req, res) => {
       return res.status(statusCode).json({
         ok: false,
         code: error?.securityReason || "CHECKOUT_VALIDATION_ERROR",
-        message: error.message || "Pedido recusado por validação de segurança.",
+        message: error.message || "Pedido recusado por validaÃ§Ã£o de seguranÃ§a.",
       });
     }
 
@@ -1264,7 +1287,7 @@ const listarPedidosPorRestaurante = async (req, res) => {
       req.query;
 
     if (!restauranteId) {
-      return res.status(400).json({ message: "Restaurante é obrigatório." });
+      return res.status(400).json({ message: "Restaurante Ã© obrigatÃ³rio." });
     }
 
     const pageNum = Math.max(1, Number(page) || 1);
@@ -1312,7 +1335,7 @@ const listarPedidosPorRestaurante = async (req, res) => {
       : Promise.resolve(cachedTotal);
 
     // Executa contagem e listagem em paralelo. Antes eram sequenciais e a
-    // latência do MySQL externo era somada, aumentando o risco de timeout.
+    // latÃªncia do MySQL externo era somada, aumentando o risco de timeout.
     const [total, rowsResult] = await Promise.all([
       countPromise,
       queryWithRetry(
@@ -1345,7 +1368,7 @@ const listarPedidosPorRestaurante = async (req, res) => {
 };
 
 /* =========================================================
-   ✅ COZINHA: LISTAR FILA (itens achatados)
+   âœ… COZINHA: LISTAR FILA (itens achatados)
 ========================================================= */
 const listarFilaCozinha = async (req, res) => {
   const { restauranteId } = req.params;
@@ -1371,7 +1394,7 @@ const listarFilaCozinha = async (req, res) => {
         const cozinha = it?.cozinha || {};
         const st = String(cozinha?.status || COZINHA_STATUS.PENDENTE);
 
-        // não mostra finalizados
+        // nÃ£o mostra finalizados
         if (
           [COZINHA_STATUS.PRONTO, COZINHA_STATUS.ENTREGUE_MESA, COZINHA_STATUS.ENTREGUE_CLIENTE, COZINHA_STATUS.CANCELADO].includes(
             st
@@ -1380,7 +1403,7 @@ const listarFilaCozinha = async (req, res) => {
           continue;
         }
 
-        // prioridade automática:
+        // prioridade automÃ¡tica:
         // - se for mesa ou entrega => prioridade
         const isMesa = !!p.mesaId;
         const isEntrega = String(p.status || "") === "em_entrega";
@@ -1419,7 +1442,7 @@ const listarFilaCozinha = async (req, res) => {
       }
     }
 
-    // ordena: prioridade primeiro, depois mais antigo (tempo maior), depois número
+    // ordena: prioridade primeiro, depois mais antigo (tempo maior), depois nÃºmero
     fila.sort((a, b) => {
       if (a.prioridade !== b.prioridade) return a.prioridade ? -1 : 1;
       if (a.tempoMin !== b.tempoMin) return b.tempoMin - a.tempoMin;
@@ -1434,7 +1457,7 @@ const listarFilaCozinha = async (req, res) => {
 };
 
 /* =========================================================
-   ✅ COZINHA: atualizar status por item
+   âœ… COZINHA: atualizar status por item
 ========================================================= */
 async function atualizarStatusItemCozinha(req, res, nextStatus) {
   try {
@@ -1442,19 +1465,19 @@ async function atualizarStatusItemCozinha(req, res, nextStatus) {
     const itemIndex = req.params.itemIndex ?? req.params.itemId ?? req.body?.itemIndex;
 
     if (!mongoose.Types.ObjectId.isValid(String(pedidoId))) {
-      return res.status(400).json({ message: "pedidoId inválido." });
+      return res.status(400).json({ message: "pedidoId invÃ¡lido." });
     }
 
     const idx = Number(itemIndex);
     if (!Number.isInteger(idx) || idx < 0) {
-      return res.status(400).json({ message: "itemIndex inválido." });
+      return res.status(400).json({ message: "itemIndex invÃ¡lido." });
     }
 
     const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
 
     const itens = Array.isArray(pedido.itens) ? pedido.itens : [];
-    if (idx >= itens.length) return res.status(404).json({ message: "Item não encontrado." });
+    if (idx >= itens.length) return res.status(404).json({ message: "Item nÃ£o encontrado." });
 
     const it = itens[idx];
 
@@ -1471,10 +1494,10 @@ async function atualizarStatusItemCozinha(req, res, nextStatus) {
     }
 
     // persistir
-    // Compatível com Mongoose e com o model MySQL usado nesta API.
+    // CompatÃ­vel com Mongoose e com o model MySQL usado nesta API.
     if (typeof pedido.markModified === "function") pedido.markModified("itens");
     await pedido.save();
-    // reforço para MySQL/model JSON: garante persistência do array itens atualizado
+    // reforÃ§o para MySQL/model JSON: garante persistÃªncia do array itens atualizado
     try { await Pedido.findByIdAndUpdate(pedido._id, { $set: { itens: pedido.itens } }); } catch (_) {}
 
     // eventos realtime
@@ -1506,19 +1529,53 @@ const enviarParaEntregador = async (req, res) => {
   const { idPedido, idEntregador } = req.params;
 
   try {
-    const pedido = await Pedido.findById(idPedido).populate("restaurante");
-    if (!pedido) return res.status(404).json({ erro: "Pedido não encontrado" });
+    const pedido = await Pedido.findById(idPedido);
+    if (!pedido) return res.status(404).json({ erro: "Pedido nao encontrado" });
 
-    req.io?.to(`entregador-${idEntregador}`).emit("pedidoRecebido", pedido);
-    console.log(`📦 Emitido pedido para sala entregador-${idEntregador}`);
+    const restauranteId = idString(pedido.restaurante || req.restauranteId || req.user?.restauranteId);
+    const restauranteAutenticado = idString(req.restauranteId || req.user?.restauranteId);
+    if (restauranteAutenticado && restauranteId !== restauranteAutenticado) {
+      return res.status(403).json({ erro: "Pedido pertence a outro restaurante." });
+    }
+    const entregador = await Entregador.findById(idEntregador);
+    if (!entregador) {
+      return res.status(404).json({ erro: "Entregador nao encontrado" });
+    }
+
+    if (idString(entregador.restaurante) !== restauranteId) {
+      return res.status(403).json({ erro: "Entregador pertence a outro restaurante." });
+    }
+
+    const limite = await obterLimitePedidosPorEntregador(restauranteId);
+    const ativas = await contarEntregasAtivas(idEntregador, idPedido);
+    if (ativas >= limite) {
+      return res.status(409).json({
+        erro: `Este entregador ja atingiu o limite de ${limite} entrega(s) ativa(s).`,
+        limite,
+        entregasAtivas: ativas,
+      });
+    }
 
     pedido.entregador = idEntregador;
     pedido.status = "aguardando_resposta";
+    pedido.statusAtualizadoEm = new Date();
     await pedido.save();
 
-    res.status(200).json({ sucesso: true, mensagem: "Pedido enviado para o entregador" });
+    req.io?.to(`entregador-${idEntregador}`).emit("pedidoRecebido", pedido);
+    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoEnviado", pedido);
+    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
+    console.log(`Pedido ${idPedido} enviado para entregador ${idEntregador}`);
+
+    res.status(200).json({
+      sucesso: true,
+      mensagem: "Pedido enviado para o entregador",
+      pedido,
+      entregador: { _id: idEntregador, nome: entregador.nome, email: entregador.email },
+      limite,
+      entregasAtivas: ativas + 1,
+    });
   } catch (err) {
-    console.error("❌ Erro ao enviar pedido:", err);
+    console.error("Erro ao enviar pedido:", err);
     res.status(500).json({ erro: "Erro ao enviar pedido" });
   }
 };
@@ -1530,7 +1587,7 @@ const buscarClientePorTelefone = async (req, res) => {
   const { telefone } = req.params;
   try {
     const cliente = await Cliente.findOne({ telefone });
-    if (!cliente) return res.status(404).json({ message: "Cliente não encontrado" });
+    if (!cliente) return res.status(404).json({ message: "Cliente nÃ£o encontrado" });
     res.json(cliente);
   } catch (err) {
     res.status(500).json({ error: "Erro ao buscar cliente", details: err.message });
@@ -1542,7 +1599,7 @@ const criarOuAtualizarCliente = async (req, res) => {
 
   if (!telefone || !nome || !enderecos.length) {
     return res.status(400).json({
-      error: "Nome, telefone e pelo menos um endereço são obrigatórios.",
+      error: "Nome, telefone e pelo menos um endereÃ§o sÃ£o obrigatÃ³rios.",
     });
   }
 
@@ -1574,7 +1631,7 @@ const listarPedidosDoCliente = async (req, res) => {
 
   try {
     if (!telefone || telefone.length < 8) {
-      return res.status(400).json({ message: "Telefone inválido." });
+      return res.status(400).json({ message: "Telefone invÃ¡lido." });
     }
 
     const filtro = { telefoneCliente: telefone };
@@ -1595,19 +1652,25 @@ const atualizarStatusPedido = async (req, res) => {
   const { id } = req.params;
   const status = req.body.status || req.body.novoStatus;
 
-  console.log("🟡 Pedido ID recebido:", id);
-  console.log("🟡 Novo status recebido:", status);
+  console.log("ðŸŸ¡ Pedido ID recebido:", id);
+  console.log("ðŸŸ¡ Novo status recebido:", status);
 
   if (!status) {
-    console.warn("⚠️ Nenhum status enviado no body.");
-    return res.status(400).json({ erro: "Status é obrigatório." });
+    console.warn("âš ï¸ Nenhum status enviado no body.");
+    return res.status(400).json({ erro: "Status Ã© obrigatÃ³rio." });
   }
 
   try {
     const pedido = await Pedido.findById(id).populate("restaurante");
     if (!pedido) {
-      console.log(`❌ Pedido não encontrado com ID: ${id}`);
-      return res.status(404).json({ erro: "Pedido não encontrado." });
+      console.log(`âŒ Pedido nÃ£o encontrado com ID: ${id}`);
+      return res.status(404).json({ erro: "Pedido nÃ£o encontrado." });
+    }
+
+    const restauranteAutenticado = req.restauranteId || req.user?.restauranteId || req.userId || req.body.restauranteId;
+    const pedidoRestauranteId = String(pedido.restaurante?._id || pedido.restaurante || "");
+    if (restauranteAutenticado && pedidoRestauranteId && String(restauranteAutenticado) !== pedidoRestauranteId) {
+      return res.status(403).json({ erro: "Pedido pertence a outro restaurante." });
     }
 
     const statusAnterior = pedido.status;
@@ -1650,13 +1713,13 @@ const atualizarStatusPedido = async (req, res) => {
     await pedido.save();
 
     if (status === "em_producao" && caixaAbertoStatus) {
-      // O movimento financeiro é criado na confirmação do pagamento. Aqui apenas
+      // O movimento financeiro Ã© criado na confirmaÃ§Ã£o do pagamento. Aqui apenas
       // recalculamos o caixa, evitando duplicar vendas em pedidos mistos/parciais.
       await recalcularCaixa(caixaAbertoStatus._id || caixaAbertoStatus.id).catch(() => null);
     }
 
     req.io?.to(`restaurante-${pedido.restaurante._id}`).emit("pedidoAtualizado", pedido);
-    console.log(`📦 Status atualizado: ${statusAnterior} → ${status}`);
+    console.log(`ðŸ“¦ Status atualizado: ${statusAnterior} â†’ ${status}`);
 
     const telefone = pedido.telefoneCliente;
     const nomeRestaurante = pedido.restaurante?.nome || "nosso restaurante";
@@ -1666,10 +1729,10 @@ const atualizarStatusPedido = async (req, res) => {
         await enviarMensagem(
           pedido.restaurante._id,
           telefone,
-          `🍽️ Olá! Seu pedido foi aceito pelo restaurante *${nomeRestaurante}*. Em breve estará a caminho!`
+          `ðŸ½ï¸ OlÃ¡! Seu pedido foi aceito pelo restaurante *${nomeRestaurante}*. Em breve estarÃ¡ a caminho!`
         );
       } catch (e) {
-        console.error("❌ Falha ao enviar mensagem em_producao:", e.message);
+        console.error("âŒ Falha ao enviar mensagem em_producao:", e.message);
       }
     }
 
@@ -1678,25 +1741,25 @@ const atualizarStatusPedido = async (req, res) => {
         await enviarMensagem(
           pedido.restaurante._id,
           telefone,
-          `🛵 O entregador retirou seu pedido da loja! Em breve você receberá o link para acompanhar a entrega em tempo real.`
+          `ðŸ›µ O entregador retirou seu pedido da loja! Em breve vocÃª receberÃ¡ o link para acompanhar a entrega em tempo real.`
         );
         req.io?.to(`restaurante-${pedido.restaurante._id}`).emit("pedidoParaEntrega", pedido);
       } catch (e) {
-        console.error("❌ Falha ao enviar mensagem em_entrega:", e.message);
+        console.error("âŒ Falha ao enviar mensagem em_entrega:", e.message);
       }
     }
 
     if (telefone && status === "entregue") {
       try {
-        await enviarMensagem(pedido.restaurante._id, telefone, `✅ Seu pedido foi entregue! Obrigado pela preferência 🛵`);
+        await enviarMensagem(pedido.restaurante._id, telefone, `âœ… Seu pedido foi entregue! Obrigado pela preferÃªncia ðŸ›µ`);
       } catch (e) {
-        console.error("❌ Falha ao enviar mensagem entregue:", e.message);
+        console.error("âŒ Falha ao enviar mensagem entregue:", e.message);
       }
     }
 
     return res.json({ sucesso: true, pedido });
   } catch (error) {
-    console.error("❌ Erro geral ao atualizar status:", error);
+    console.error("âŒ Erro geral ao atualizar status:", error);
     return res.status(500).json({
       erro: "Erro interno ao atualizar status",
       detalhes: error.message,
@@ -1709,7 +1772,7 @@ const getStatusPedido = async (req, res) => {
 
   try {
     const pedido = await Pedido.findById(id);
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
     return res.json({ status: pedido.status });
   } catch (err) {
     console.error("Erro ao buscar status do pedido:", err);
@@ -1720,7 +1783,12 @@ const getStatusPedido = async (req, res) => {
 const obterPedidoPorId = async (req, res) => {
   try {
     const pedido = await Pedido.findById(req.params.id);
-    if (!pedido) return res.status(404).json({ error: "Pedido não encontrado" });
+    if (!pedido) return res.status(404).json({ error: "Pedido nÃ£o encontrado" });
+    const restauranteAutenticado = req.restauranteId || req.user?.restauranteId || req.body?.restauranteId || req.query?.restauranteId;
+    const pedidoRestauranteId = String(pedido.restaurante?._id || pedido.restaurante || pedido.restauranteId || "");
+    if (restauranteAutenticado && pedidoRestauranteId && String(restauranteAutenticado) !== pedidoRestauranteId) {
+      return res.status(403).json({ error: "Pedido pertence a outro restaurante." });
+    }
     res.json(pedido);
   } catch (err) {
     console.error("Erro ao buscar pedido:", err);
@@ -1729,11 +1797,11 @@ const obterPedidoPorId = async (req, res) => {
 };
 
 /* =========================================================
-   ENTREGA (link + conclusão)
+   ENTREGA (link + conclusÃ£o)
 ========================================================= */
 async function iniciarEntrega(req, res) {
   const pedido = await Pedido.findById(req.params.id).populate("restaurante");
-  if (!pedido) return res.status(404).send("Pedido não encontrado");
+  if (!pedido) return res.status(404).send("Pedido nÃ£o encontrado");
 
   const token = crypto.randomBytes(16).toString("hex");
   const expiracao = Date.now() + 1000 * 60 * 60; // 1h
@@ -1750,7 +1818,7 @@ async function iniciarEntrega(req, res) {
     await enviarMensagem(
       pedido.restaurante._id,
       pedido.telefoneCliente,
-      `🛵 O entregador está a caminho!\nAcompanhe em tempo real: ${link}`
+      `ðŸ›µ O entregador estÃ¡ a caminho!\nAcompanhe em tempo real: ${link}`
     );
   }
 
@@ -1759,7 +1827,7 @@ async function iniciarEntrega(req, res) {
 
 async function concluirEntrega(req, res) {
   const pedido = await Pedido.findById(req.params.id).populate("restaurante");
-  if (!pedido) return res.status(404).send("Pedido não encontrado");
+  if (!pedido) return res.status(404).send("Pedido nÃ£o encontrado");
 
   pedido.status = "entregue";
   await pedido.save();
@@ -1794,7 +1862,7 @@ async function listarPedidosAtivos(req, res) {
 
     res.json(entregadoresComPedido);
   } catch (err) {
-    console.error("❌ Erro no listarPedidosAtivos:", err.message);
+    console.error("âŒ Erro no listarPedidosAtivos:", err.message);
     res.status(500).json({ message: "Erro ao buscar entregadores com pedido." });
   }
 }
@@ -1828,12 +1896,12 @@ async function resumoDoDia(req, res) {
 const listarPedidos = async (req, res) => {
   try {
     const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
-    if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
+    if (!restauranteId) return res.status(401).json({ message: "Restaurante nÃ£o autenticado." });
 
     const role = String(req.user?.role || req.role || "").toLowerCase();
 
-    // ✅ App do garçom: por padrão mostra somente pedidos do dia.
-    // Evita histórico antigo poluindo a tela e mantém produção/pronto/entrega visíveis.
+    // âœ… App do garÃ§om: por padrÃ£o mostra somente pedidos do dia.
+    // Evita histÃ³rico antigo poluindo a tela e mantÃ©m produÃ§Ã£o/pronto/entrega visÃ­veis.
     if (role === "garcom") {
       const hojeStr = todayYmd();
 
@@ -1854,23 +1922,23 @@ const listarPedidos = async (req, res) => {
 
 
 /* =========================================================
-   GARÇOM APP: MARCAR PEDIDO DO BALCÃO COMO ENTREGUE
+   GARÃ‡OM APP: MARCAR PEDIDO DO BALCÃƒO COMO ENTREGUE
 ========================================================= */
 const marcarPedidoEntregueApp = async (req, res) => {
   try {
     const { pedidoId } = req.params;
     const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
-    if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
+    if (!restauranteId) return res.status(401).json({ message: "Restaurante nÃ£o autenticado." });
 
     if (!mongoose.Types.ObjectId.isValid(String(pedidoId))) {
-      return res.status(400).json({ message: "pedidoId inválido." });
+      return res.status(400).json({ message: "pedidoId invÃ¡lido." });
     }
 
     const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
 
     if (String(pedido.restaurante) !== String(restauranteId)) {
-      return res.status(403).json({ message: "Pedido não pertence a este restaurante." });
+      return res.status(403).json({ message: "Pedido nÃ£o pertence a este restaurante." });
     }
 
     const norm = (v) => String(v || "").trim().toLowerCase();
@@ -1878,12 +1946,12 @@ const marcarPedidoEntregueApp = async (req, res) => {
     const isDinheiro = pagamento.includes("dinheiro") || pagamento.includes("cash") || norm(pedido.statusPagamento) === "pago_dinheiro";
 
     if (!isDinheiro) {
-      return res.status(409).json({ message: "A entrega pelo app do garçom está liberada apenas para pagamento em dinheiro." });
+      return res.status(409).json({ message: "A entrega pelo app do garÃ§om estÃ¡ liberada apenas para pagamento em dinheiro." });
     }
 
     const statusAtual = norm(pedido.status);
     if (["cancelado", "entregue", "finalizado"].includes(statusAtual)) {
-      return res.json({ ok: true, message: "Pedido já está finalizado.", pedido });
+      return res.json({ ok: true, message: "Pedido jÃ¡ estÃ¡ finalizado.", pedido });
     }
 
     const agora = new Date();
@@ -1923,7 +1991,7 @@ const marcarPedidoEntregueApp = async (req, res) => {
 
     return res.json({ ok: true, message: "Pedido marcado como entregue.", pedido });
   } catch (error) {
-    console.error("Erro ao marcar pedido como entregue no app do garçom:", error);
+    console.error("Erro ao marcar pedido como entregue no app do garÃ§om:", error);
     return res.status(500).json({ message: "Erro ao marcar pedido como entregue.", error: error.message });
   }
 };
@@ -1933,22 +2001,22 @@ const marcarItemPedidoEntregueApp = async (req, res) => {
   try {
     const { pedidoId, itemIndex } = req.params;
     const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
-    if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
+    if (!restauranteId) return res.status(401).json({ message: "Restaurante nÃ£o autenticado." });
 
     if (!mongoose.Types.ObjectId.isValid(String(pedidoId))) {
-      return res.status(400).json({ message: "pedidoId inválido." });
+      return res.status(400).json({ message: "pedidoId invÃ¡lido." });
     }
 
     const idx = Number(itemIndex);
     if (!Number.isInteger(idx) || idx < 0) {
-      return res.status(400).json({ message: "itemIndex inválido." });
+      return res.status(400).json({ message: "itemIndex invÃ¡lido." });
     }
 
     const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
 
     if (String(pedido.restaurante) !== String(restauranteId)) {
-      return res.status(403).json({ message: "Pedido não pertence a este restaurante." });
+      return res.status(403).json({ message: "Pedido nÃ£o pertence a este restaurante." });
     }
 
     const norm = (v) => String(v || "").trim().toLowerCase();
@@ -1957,7 +2025,7 @@ const marcarItemPedidoEntregueApp = async (req, res) => {
     if (!isDinheiro) return res.status(409).json({ message: "Entrega manual liberada apenas para pagamento em dinheiro." });
 
     const itens = Array.isArray(pedido.itens) ? pedido.itens : [];
-    if (idx >= itens.length) return res.status(404).json({ message: "Item não encontrado." });
+    if (idx >= itens.length) return res.status(404).json({ message: "Item nÃ£o encontrado." });
 
     const agora = new Date();
     const it = itens[idx];
@@ -1992,7 +2060,7 @@ const marcarItemPedidoEntregueApp = async (req, res) => {
 
     return res.json({ ok: true, message: "Item marcado como entregue.", pedido });
   } catch (error) {
-    console.error("Erro ao marcar item como entregue no app do garçom:", error);
+    console.error("Erro ao marcar item como entregue no app do garÃ§om:", error);
     return res.status(500).json({ message: "Erro ao marcar item como entregue.", error: error.message });
   }
 };
@@ -2005,29 +2073,29 @@ const cancelarPedido = async (req, res) => {
     const { pedidoId } = req.params;
 
     const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
-    if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
+    if (!restauranteId) return res.status(401).json({ message: "Restaurante nÃ£o autenticado." });
 
     if (!mongoose.Types.ObjectId.isValid(pedidoId)) {
-      return res.status(400).json({ message: "pedidoId inválido." });
+      return res.status(400).json({ message: "pedidoId invÃ¡lido." });
     }
 
     const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
 
     if (String(pedido.restaurante) !== String(restauranteId)) {
-      return res.status(403).json({ message: "Pedido não pertence a este restaurante." });
+      return res.status(403).json({ message: "Pedido nÃ£o pertence a este restaurante." });
     }
 
     const st = String(pedido.status || "");
     const tipoCancelamento = String(req.body?.tipoCancelamento || req.body?.tipo || "").trim();
     if (st === "entregue" && tipoCancelamento !== "devolucao_cliente") {
       return res.status(409).json({
-        message: `Não é possível cancelar pedido com status '${pedido.status}'.`,
+        message: `NÃ£o Ã© possÃ­vel cancelar pedido com status '${pedido.status}'.`,
       });
     }
 
     if (st === "cancelado") {
-      return res.json({ ok: true, message: "Pedido já estava cancelado.", pedido });
+      return res.json({ ok: true, message: "Pedido jÃ¡ estava cancelado.", pedido });
     }
 
     const motivo = (req.body?.motivo || req.body?.descricao || "").toString().trim() || null;
@@ -2094,19 +2162,19 @@ const cancelarPedido = async (req, res) => {
     pedido.canceladoPorRole = role;
     pedido.canceladoPor = canceladoPor;
 
-    // ✅ zera itens e total
+    // âœ… zera itens e total
     pedido.itens = [];
     pedido.valorTotal = 0;
 
-    // ✅ zera pagamentos
+    // âœ… zera pagamentos
     pedido.pagamentos = [];
 
-    // ✅ zera mp/pix antigo
+    // âœ… zera mp/pix antigo
     pedido.mpPaymentId = null;
     pedido.pixQrCode = "";
     pedido.pixQrCodeBase64 = "";
 
-    // ✅ recalcula coerência
+    // âœ… recalcula coerÃªncia
     aplicarStatusPorPagamentoTotal(pedido);
 
     await pedido.save();
@@ -2159,29 +2227,29 @@ const cancelarItemPedido = async (req, res) => {
     const itemIndex = Number(req.params.itemIndex);
 
     const restauranteId = req.restauranteId || req.user?.restauranteId || req.userId;
-    if (!restauranteId) return res.status(401).json({ message: "Restaurante não autenticado." });
+    if (!restauranteId) return res.status(401).json({ message: "Restaurante nÃ£o autenticado." });
 
     if (!Number.isInteger(itemIndex) || itemIndex < 0) {
-      return res.status(400).json({ message: "itemIndex inválido." });
+      return res.status(400).json({ message: "itemIndex invÃ¡lido." });
     }
 
     const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
 
     if (String(pedido.restaurante) !== String(restauranteId)) {
-      return res.status(403).json({ message: "Pedido não pertence a este restaurante." });
+      return res.status(403).json({ message: "Pedido nÃ£o pertence a este restaurante." });
     }
 
     const st = String(pedido.status || "");
     if (["entregue", "cancelado"].includes(st)) {
       return res.status(409).json({
-        message: `Não é possível cancelar item com status '${pedido.status}'.`,
+        message: `NÃ£o Ã© possÃ­vel cancelar item com status '${pedido.status}'.`,
       });
     }
 
     const itensArr = Array.isArray(pedido.itens) ? pedido.itens : [];
     if (itemIndex >= itensArr.length) {
-      return res.status(404).json({ message: "Item não encontrado (índice fora da lista)." });
+      return res.status(404).json({ message: "Item nÃ£o encontrado (Ã­ndice fora da lista)." });
     }
 
     const motivo = req.body?.motivo || null;
@@ -2215,7 +2283,7 @@ const cancelarItemPedido = async (req, res) => {
 
     pedido.valorTotal = Number.isFinite(novoTotal) ? novoTotal : 0;
 
-    // ✅ após alterar itens e valorTotal
+    // âœ… apÃ³s alterar itens e valorTotal
     aplicarStatusPorPagamentoTotal(pedido);
 
     await pedido.save();
@@ -2237,7 +2305,7 @@ const cancelarItemPedido = async (req, res) => {
 };
 
 /* =========================================================
-   REGISTRAR PAGAMENTO (BALCÃO)
+   REGISTRAR PAGAMENTO (BALCÃƒO)
 ========================================================= */
 const registrarPagamentoPedido = async (req, res) => {
   try {
@@ -2245,19 +2313,19 @@ const registrarPagamentoPedido = async (req, res) => {
     const { metodo, valor, obs } = req.body;
 
     if (!["dinheiro", "cartao", "pix"].includes(String(metodo || "").toLowerCase())) {
-      return res.status(400).json({ message: "Método inválido." });
+      return res.status(400).json({ message: "MÃ©todo invÃ¡lido." });
     }
 
     const valorNum = Number(valor);
     if (!Number.isFinite(valorNum) || valorNum <= 0) {
-      return res.status(400).json({ message: "Valor inválido." });
+      return res.status(400).json({ message: "Valor invÃ¡lido." });
     }
 
     const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
 
     if (["cancelado", "entregue"].includes(String(pedido.status))) {
-      return res.status(409).json({ message: `Não é possível pagar pedido com status '${pedido.status}'.` });
+      return res.status(409).json({ message: `NÃ£o Ã© possÃ­vel pagar pedido com status '${pedido.status}'.` });
     }
 
     pedido.pagamentos = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
@@ -2279,8 +2347,8 @@ const registrarPagamentoPedido = async (req, res) => {
 
     const room = `restaurante-${pedido.restaurante}`;
     req.io?.to(room).emit("pedidoAtualizado", pedido);
-    // Quando pedido do balcão/garçom é quitado, o desktop precisa receber como pedido novo
-    // para o Auto Print disparar mesmo se ele ainda não estava na lista local.
+    // Quando pedido do balcÃ£o/garÃ§om Ã© quitado, o desktop precisa receber como pedido novo
+    // para o Auto Print disparar mesmo se ele ainda nÃ£o estava na lista local.
     if (String(pedido.origem || "").toLowerCase() === "balcao" && String(pedido.statusPagamento || "").toLowerCase() === "pago") {
       req.io?.to(room).emit("novoPedido", pedido);
     }
@@ -2293,14 +2361,14 @@ const registrarPagamentoPedido = async (req, res) => {
 };
 
 /* =========================================================
-   PIX PARCIAL (BALCÃO)
+   PIX PARCIAL (BALCÃƒO)
 ========================================================= */
 
 function boolLikeMP(v) {
   if (typeof v === "boolean") return v;
   const s = String(v ?? "").trim().toLowerCase();
   if (["true", "1", "sim", "yes", "on", "connected", "conectado"].includes(s)) return true;
-  if (["false", "0", "nao", "não", "no", "off", "desconectado"].includes(s)) return false;
+  if (["false", "0", "nao", "nÃ£o", "no", "off", "desconectado"].includes(s)) return false;
   return !!v;
 }
 
@@ -2334,11 +2402,11 @@ const gerarPixPedido = async (req, res) => {
 
     const valorNum = Number(valor);
     if (!Number.isFinite(valorNum) || valorNum <= 0) {
-      return res.status(400).json({ message: "Valor inválido." });
+      return res.status(400).json({ message: "Valor invÃ¡lido." });
     }
 
     const pedido = await Pedido.findById(pedidoId).populate("restaurante");
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
 
     const restaurante = pedido.restaurante;
     const accessToken = getMercadoPagoAccessToken(restaurante);
@@ -2400,12 +2468,12 @@ const consultarStatusPixPedido = async (req, res) => {
     const { pedidoId, paymentId } = req.params;
 
     const pedido = await Pedido.findById(pedidoId).populate("restaurante");
-    if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+    if (!pedido) return res.status(404).json({ message: "Pedido nÃ£o encontrado." });
 
     const pagamento = (pedido.pagamentos || []).find((p) => p.mpPaymentId === paymentId);
 
     if (!pagamento) {
-      return res.status(404).json({ message: "Pagamento PIX não encontrado." });
+      return res.status(404).json({ message: "Pagamento PIX nÃ£o encontrado." });
     }
 
     const client = new MercadoPagoConfig({
@@ -2438,7 +2506,7 @@ const consultarStatusPixPedido = async (req, res) => {
 };
 
 /* =========================================================
-   CRIAR/ATUALIZAR PEDIDO BALCÃO (CORRIGIDO!)
+   CRIAR/ATUALIZAR PEDIDO BALCÃƒO (CORRIGIDO!)
 ========================================================= */
 const criarOuAtualizarPedidoBalcao = async (req, res) => {
   try {
@@ -2460,13 +2528,13 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
     } = req.body;
 
     if (!restaurante) {
-      return res.status(400).json({ message: "Restaurante é obrigatório." });
+      return res.status(400).json({ message: "Restaurante Ã© obrigatÃ³rio." });
     }
 
     const telefoneNormalizado = (telefoneCliente || "").replace(/\D/g, "");
     const restDoc = await Restaurante.findById(restaurante).select("_id").lean();
     if (!restDoc) {
-      return res.status(404).json({ message: "Restaurante não encontrado." });
+      return res.status(404).json({ message: "Restaurante nÃ£o encontrado." });
     }
 
     const itensArr = seedCozinhaOnItens(Array.isArray(itens) ? itens.filter(Boolean) : []);
@@ -2481,7 +2549,7 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
     );
 
     if (!Number.isFinite(total) || total < 0) {
-      return res.status(400).json({ message: "Total inválido." });
+      return res.status(400).json({ message: "Total invÃ¡lido." });
     }
 
     if (telefoneNormalizado) {
@@ -2521,12 +2589,12 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
     if (pedidoId && mongoose.Types.ObjectId.isValid(String(pedidoId))) {
       const pedidoInformado = await Pedido.findById(pedidoId);
       if (pedidoInformado && String(pedidoInformado.restaurante) !== String(restaurante)) {
-        return res.status(403).json({ message: "Pedido não pertence a este restaurante." });
+        return res.status(403).json({ message: "Pedido nÃ£o pertence a este restaurante." });
       }
 
-      // Segurança: o front pode manter o último pedido em memória.
-      // Só atualiza/reaproveita se ainda for uma comanda de balcão aberta e pendente.
-      // Se já foi pago/enviado para produção, cria um novo BK automaticamente.
+      // SeguranÃ§a: o front pode manter o Ãºltimo pedido em memÃ³ria.
+      // SÃ³ atualiza/reaproveita se ainda for uma comanda de balcÃ£o aberta e pendente.
+      // Se jÃ¡ foi pago/enviado para produÃ§Ã£o, cria um novo BK automaticamente.
       if (canReuseBalcaoPedido(pedidoInformado)) {
         pedido = pedidoInformado;
       } else {
@@ -2605,7 +2673,7 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
         );
       }
 
-      // Pedido de balcão recém-criado ainda não está pago; não toca notificação no desktop.
+      // Pedido de balcÃ£o recÃ©m-criado ainda nÃ£o estÃ¡ pago; nÃ£o toca notificaÃ§Ã£o no desktop.
       req.io?.to(`restaurante-${restaurante}`).emit("pedidoAtualizado", novoPedido);
       return res.status(201).json({ ok: true, criado: true, pedido: novoPedido });
     }
@@ -2613,12 +2681,12 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
     const st = String(pedido.status || "");
     if (["cancelado", "entregue"].includes(st)) {
       return res.status(409).json({
-        message: `Não é possível alterar pedido com status '${pedido.status}'.`,
+        message: `NÃ£o Ã© possÃ­vel alterar pedido com status '${pedido.status}'.`,
       });
     }
 
     if (String(pedido.origem || "") !== "balcao") {
-      return res.status(409).json({ message: "Este endpoint é exclusivo para pedidos de balcão." });
+      return res.status(409).json({ message: "Este endpoint Ã© exclusivo para pedidos de balcÃ£o." });
     }
 
     pedido.nomeCliente = nomeCliente ?? pedido.nomeCliente;
@@ -2664,9 +2732,9 @@ const criarOuAtualizarPedidoBalcao = async (req, res) => {
 
     return res.json({ ok: true, criado: false, pedido });
   } catch (error) {
-    console.error("Erro ao abrir/atualizar pedido balcão:", error);
+    console.error("Erro ao abrir/atualizar pedido balcÃ£o:", error);
     return res.status(500).json({
-      message: "Erro ao abrir/atualizar pedido balcão.",
+      message: "Erro ao abrir/atualizar pedido balcÃ£o.",
       error: error.message,
     });
   }
@@ -2696,9 +2764,11 @@ module.exports = {
   gerarPixPedido,
   consultarStatusPixPedido,
 
-  // ✅ COZINHA
+  // âœ… COZINHA
   listarFilaCozinha,
   marcarItemPronto,
   marcarItemEntregueMesa,
   marcarItemEntregueCliente,
 };
+
+
