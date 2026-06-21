@@ -1559,17 +1559,40 @@ const enviarParaEntregador = async (req, res) => {
     pedido.entregador = idEntregador;
     pedido.status = "aguardando_resposta";
     pedido.statusAtualizadoEm = new Date();
+    pedido.direcionadoEm = new Date();
     await pedido.save();
 
-    req.io?.to(`entregador-${idEntregador}`).emit("pedidoRecebido", pedido);
-    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoEnviado", pedido);
-    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
-    console.log(`Pedido ${idPedido} enviado para entregador ${idEntregador}`);
+    const pedidoPayload = await Pedido.findById(idPedido).populate("entregador").lean().catch(() => pedido);
+
+    req.io?.to(`entregador-${idEntregador}`).emit("pedidoRecebido", pedidoPayload);
+    req.io?.to(`entregador-${idEntregador}`).emit("pedidoDirecionado", pedidoPayload);
+    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoEnviado", pedidoPayload);
+    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedidoPayload);
+
+    const timeout = setTimeout(async () => {
+      try {
+        const p = await Pedido.findById(idPedido);
+        const mesmoEntregador = idString(p?.entregador) === idString(idEntregador);
+        if (p?.status === "aguardando_resposta" && mesmoEntregador) {
+          p.status = "em_entrega";
+          p.entregador = null;
+          p.statusAtualizadoEm = new Date();
+          await p.save();
+          req.io?.to(`restaurante-${restauranteId}`).emit("pedidoNaoAceito", p);
+          req.io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", p);
+        }
+      } catch (timeoutErr) {
+        console.warn("Timeout ao aguardar resposta do entregador:", timeoutErr?.message || timeoutErr);
+      }
+    }, 2 * 60 * 1000);
+    if (typeof timeout.unref === "function") timeout.unref();
+
+    console.log(`Pedido ${idPedido} direcionado para entregador ${idEntregador}`);
 
     res.status(200).json({
       sucesso: true,
-      mensagem: "Pedido enviado para o entregador",
-      pedido,
+      mensagem: "Pedido direcionado para o entregador",
+      pedido: pedidoPayload,
       entregador: { _id: idEntregador, nome: entregador.nome, email: entregador.email },
       limite,
       entregasAtivas: ativas + 1,

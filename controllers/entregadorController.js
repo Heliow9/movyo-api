@@ -343,9 +343,12 @@ const listarDisponiveis = async (req, res) => {
 
   try {
     const entregadores = await Entregador.find({
-      restauranteId,
-      disponivel: true,
-    });
+      $or: [{ restaurante: restauranteId }, { restauranteId }],
+      $and: [
+        { $or: [{ disponivel: true }, { status: true }] },
+        { $or: [{ statusConta: { $exists: false } }, { statusConta: { $ne: 'bloqueado' } }] },
+      ],
+    }).sort({ atualizadoEm: -1, nome: 1 });
 
     res.json(entregadores);
   } catch (error) {
