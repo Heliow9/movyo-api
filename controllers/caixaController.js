@@ -1,9 +1,9 @@
 const OperadorCaixa = require('../models/OperadorCaixa');
 const CaixaSessao = require('../models/CaixaSessao');
 const CaixaMovimento = require('../models/CaixaMovimento');
-const Pedido = require('../models/Pedido');
 const { registrarAuditoria } = require('../utils/audit');
 const { getCaixaAberto, exigirCaixaAberto, recalcularCaixa, montarCaixaComTotais, round2, toNum, normalizeFormaPagamento } = require('../services/caixaService');
+const { queryWithRetry } = require('../lib/mysqlRetry');
 
 function restauranteIdFromReq(req) {
   return req.params.restauranteId || req.body.restauranteId || req.query.restauranteId || req.userId || req.restauranteId;
@@ -203,38 +203,127 @@ function inRangeDataOperacional(c, start, end) {
   return (!start || k >= start) && (!end || k <= end);
 }
 
+function withId(row = {}) {
+  const id = row._id || row.id;
+  return { ...row, _id: id, id };
+}
+
+function inClause(values = []) {
+  return values.map(() => '?').join(',');
+}
+
+async function buscarCaixasRelatorio(restauranteId, start, end) {
+  const [rows] = await queryWithRetry(
+    `SELECT *
+       FROM caixa_sessoes
+      WHERE restauranteId = ?
+      ORDER BY COALESCE(abertoEm, created_at) DESC`,
+    [String(restauranteId)],
+    { label: 'caixa.relatorios.caixas' }
+  );
+
+  return (rows || [])
+    .map(withId)
+    .filter((caixa) => inRangeDataOperacional(caixa, start, end));
+}
+
+async function contarPedidosPorCaixa(restauranteId, caixaIds) {
+  const ids = Array.from(new Set((caixaIds || []).map(String).filter(Boolean)));
+  if (!ids.length) return new Map();
+
+  const cancelados = ['cancelado', 'cancelada', 'canceled', 'cancelled', 'expirado', 'estornado'];
+  const [rows] = await queryWithRetry(
+    `SELECT caixaSessaoId, COUNT(*) AS pedidos
+       FROM pedidos
+      WHERE restaurante = ?
+        AND caixaSessaoId IN (${inClause(ids)})
+        AND LOWER(COALESCE(status, '')) NOT IN (${inClause(cancelados)})
+      GROUP BY caixaSessaoId`,
+    [String(restauranteId), ...ids, ...cancelados],
+    { label: 'caixa.relatorios.pedidosCount' }
+  );
+
+  return new Map((rows || []).map((row) => [String(row.caixaSessaoId || ''), Number(row.pedidos || 0)]));
+}
+
+async function listarPedidosRelatorio(restauranteId, caixaIds) {
+  const ids = Array.from(new Set((caixaIds || []).map(String).filter(Boolean)));
+  if (!ids.length) return [];
+
+  const [rows] = await queryWithRetry(
+    `SELECT id, numeroPedido, nomeCliente, formaPagamento, status, statusPagamento,
+            total, valorPago, criadoEm, pagoEm, caixaSessaoId
+       FROM pedidos
+      WHERE restaurante = ?
+        AND caixaSessaoId IN (${inClause(ids)})
+      ORDER BY COALESCE(pagoEm, criadoEm, created_at) DESC
+      LIMIT 300`,
+    [String(restauranteId), ...ids],
+    { label: 'caixa.relatorios.pedidosPreview' }
+  );
+
+  return (rows || []).map(withId);
+}
+
+async function listarMovimentosRelatorio(restauranteId, caixaIds) {
+  const ids = Array.from(new Set((caixaIds || []).map(String).filter(Boolean)));
+  if (!ids.length) return [];
+
+  const [rows] = await queryWithRetry(
+    `SELECT *
+       FROM caixa_movimentos
+      WHERE restauranteId = ?
+        AND caixaSessaoId IN (${inClause(ids)})
+      ORDER BY COALESCE(data, created_at) DESC
+      LIMIT 500`,
+    [String(restauranteId), ...ids],
+    { label: 'caixa.relatorios.movimentosPreview' }
+  );
+
+  return (rows || []).map(withId);
+}
+
 exports.relatorios = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
+    if (!restauranteId) return res.status(400).json({ message: 'restauranteId e obrigatorio.' });
     const tipo = String(req.query.tipo || 'data').toLowerCase();
     const { start, end } = rangeDatas(req.query);
-    let caixas = await CaixaSessao.find({ restauranteId: String(restauranteId) }).sort({ abertoEm: -1 }).lean();
-    caixas = (caixas || []).filter(c => inRangeDataOperacional(c, start, end));
-    for (const c of caixas) await recalcularCaixa(c._id);
-    caixas = await CaixaSessao.find({ restauranteId: String(restauranteId) }).sort({ abertoEm: -1 }).lean();
-    caixas = (caixas || []).filter(c => inRangeDataOperacional(c, start, end));
-    let pedidos = await Pedido.find({ restaurante: String(restauranteId) }).lean();
-    pedidos = (pedidos || []).filter(p => p.caixaSessaoId && caixas.some(c => String(c._id) === String(p.caixaSessaoId)));
-    const movimentos = await CaixaMovimento.find({ restauranteId: String(restauranteId) }).lean();
-    const resumo = { totalVendas:0, dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangrias:0, suprimentos:0, pedidos: pedidos.length, caixas: caixas.length };
+    let caixas = await buscarCaixasRelatorio(restauranteId, start, end);
+    for (const c of caixas) {
+      try {
+        await recalcularCaixa(c._id || c.id);
+      } catch (error) {
+        console.warn('caixa.relatorios.recalcular:', c._id || c.id, error?.message || error);
+      }
+    }
+
+    caixas = await buscarCaixasRelatorio(restauranteId, start, end);
+    const caixaIds = caixas.map((c) => String(c._id || c.id)).filter(Boolean);
+    const [pedidosPorCaixa, pedidos, movimentos] = await Promise.all([
+      contarPedidosPorCaixa(restauranteId, caixaIds),
+      listarPedidosRelatorio(restauranteId, caixaIds),
+      listarMovimentosRelatorio(restauranteId, caixaIds),
+    ]);
+
+    const resumo = { totalVendas:0, dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangrias:0, suprimentos:0, pedidos:0, caixas: caixas.length };
     const by = new Map();
     const keyFor = (c) => {
-      if (tipo === 'caixa') return String(c._id);
+      if (tipo === 'caixa') return String(c._id || c.id);
       if (tipo === 'operador') return String(c.operadorId || 'sem_operador');
-      return dataOperacionalCaixa(c);
+      return dataOperacionalCaixa(c) || 'sem_data';
     };
-    const labelFor = (c) => tipo === 'caixa' ? `Caixa ${String(c._id).slice(-6)}` : tipo === 'operador' ? (c.operadorNome || 'Sem operador') : labelDataBR(dataOperacionalCaixa(c));
+    const labelFor = (c) => tipo === 'caixa' ? `Caixa ${String(c._id || c.id).slice(-6)}` : tipo === 'operador' ? (c.operadorNome || 'Sem operador') : (labelDataBR(dataOperacionalCaixa(c)) || 'Sem data');
     for (const c of caixas) {
       const k = keyFor(c);
       if (!by.has(k)) by.set(k, { chave:k, label:labelFor(c), caixas:0, pedidos:0, totalVendas:0, dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangrias:0, suprimentos:0 });
       const row = by.get(k); row.caixas += 1;
+      const totalPedidosCaixa = Number(pedidosPorCaixa.get(String(c._id || c.id)) || 0);
+      row.pedidos += totalPedidosCaixa;
+      resumo.pedidos += totalPedidosCaixa;
       const vals = { totalVendas:c.totalVendas, dinheiro:c.totalDinheiro, pix:c.totalPix, credito:c.totalCredito, debito:c.totalDebito, online:c.totalOnline, outros:c.totalOutros, sangrias:c.totalSangrias, suprimentos:c.totalSuprimentos };
       for (const [kk,v] of Object.entries(vals)) { row[kk] = round2(row[kk]+toNum(v)); resumo[kk] = round2(resumo[kk]+toNum(v)); }
     }
-    for (const p of pedidos) {
-      const c = caixas.find(x => String(x._id) === String(p.caixaSessaoId));
-      if (c) by.get(keyFor(c)).pedidos += 1;
-    }
-    res.json({ tipo, resumo, linhas: [...by.values()], caixas, pedidos, movimentos: movimentos.filter(m => caixas.some(c => String(c._id) === String(m.caixaSessaoId))) });
+    res.json({ tipo, resumo, linhas: [...by.values()], caixas, pedidos, movimentos });
   } catch (e) { res.status(500).json({ message: 'Erro ao gerar relatório de caixa.', error: e.message }); }
 };
