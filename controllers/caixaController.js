@@ -64,6 +64,7 @@ exports.alternarOperador = async (req, res) => {
 
 const caixaAtualCache = new Map();
 const CAIXA_ATUAL_CACHE_MS = Number(process.env.CAIXA_ATUAL_CACHE_MS || 5000);
+const CAIXA_ATUAL_STALE_MS = Number(process.env.CAIXA_ATUAL_STALE_MS || 30000);
 
 function invalidarCacheCaixa(restauranteId) {
   if (restauranteId) caixaAtualCache.delete(String(restauranteId));
@@ -90,9 +91,25 @@ exports.caixaAtual = async (req, res) => {
     const caixa = await getCaixaAberto(restauranteId);
     const atualizado = caixa?._id ? await montarCaixaComTotais(caixa) : null;
     const payload = { aberto: !!atualizado, caixa: atualizado || null };
+
+    // Se uma consulta isolada voltar sem caixa por instabilidade do MySQL/rede,
+    // não derruba o painel para "Fechado" imediatamente. Mantém o último
+    // caixa aberto por uma janela curta. Fechamentos/aberturas feitos pela API
+    // invalidam o cache, então o estado real continua prevalecendo.
+    if (!payload.aberto && cached?.data?.aberto && Date.now() - cached.ts < CAIXA_ATUAL_STALE_MS) {
+      return res.json({ ...cached.data, cache: true, stale: true });
+    }
+
     caixaAtualCache.set(cacheKey, { ts: Date.now(), data: payload });
     res.json(payload);
-  } catch (e) { res.status(500).json({ message: 'Erro ao consultar caixa atual.', error: e.message }); }
+  } catch (e) {
+    const restauranteId = restauranteIdFromReq(req);
+    const cached = restauranteId ? caixaAtualCache.get(String(restauranteId)) : null;
+    if (cached?.data?.aberto && Date.now() - cached.ts < CAIXA_ATUAL_STALE_MS) {
+      return res.json({ ...cached.data, cache: true, stale: true, warning: e.message });
+    }
+    res.status(500).json({ message: 'Erro ao consultar caixa atual.', error: e.message });
+  }
 };
 
 exports.abrirCaixa = async (req, res) => {

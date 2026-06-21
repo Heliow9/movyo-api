@@ -142,6 +142,8 @@ try {
 // -------------------------------
 // ROTAS PADRONIZADAS
 // -------------------------------
+app.use("/api/endereco", require("./routes/enderecoRoutes"));
+app.use("/api/enderecos", require("./routes/enderecoRoutes"));
 app.use("/api/restaurantes", require("./routes/restauranteRoutes"));
 app.use("/api/saas", require("./routes/saasRoutes"));
 app.use("/api/auditoria", require("./routes/auditoriaRoutes"));
