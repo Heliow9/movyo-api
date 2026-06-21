@@ -204,13 +204,14 @@ const login = async (req, res) => {
 };
 
 
-const atualizarStatus = async (req, res) => {
-  const { email, status } = req.body;
+const atualizarStatus = async (req, res, io = null) => {
+  const { email, status, online } = req.body;
 
   try {
+    const estaDisponivel = online !== undefined ? Boolean(online) : status === 'online';
     const entregador = await Entregador.findOneAndUpdate(
       { email },
-      { status: status === 'online' },
+      { status: estaDisponivel, disponivel: estaDisponivel },
       { new: true }
     );
 
@@ -218,7 +219,31 @@ const atualizarStatus = async (req, res) => {
       return res.status(404).json({ message: 'Entregador não encontrado' });
     }
 
-    res.json({ message: 'Status atualizado', entregador });
+    const restauranteId = String(entregador.restaurante || entregador.restauranteId || '');
+    const agoraIso = new Date().toISOString();
+    const localizacao = entregador.localizacao
+      ? { ...entregador.localizacao, atualizadoEm: entregador.localizacao.atualizadoEm || agoraIso }
+      : null;
+    const payloadSocket = {
+      id: String(entregador._id || entregador.id),
+      _id: String(entregador._id || entregador.id),
+      entregadorId: String(entregador._id || entregador.id),
+      nome: entregador.nome,
+      email: entregador.email,
+      restauranteId,
+      localizacao,
+      status: estaDisponivel,
+      disponivel: estaDisponivel,
+      atualizadoEm: agoraIso,
+    };
+
+    if (io && restauranteId) {
+      io.to(`restaurante-${restauranteId}`).emit('delivererStatusUpdated', payloadSocket);
+      io.to(`restaurante-${restauranteId}`).emit('localizacaoAtualizada', payloadSocket);
+      io.to(`restaurante-${restauranteId}`).emit('delivererLocationUpdated', payloadSocket);
+    }
+
+    res.json({ message: 'Status atualizado', entregador, ...payloadSocket });
   } catch (error) {
     console.error('Erro ao atualizar status:', error);
     res.status(500).json({ message: 'Erro interno' });
@@ -230,13 +255,18 @@ const atualizarStatus = async (req, res) => {
 
 
 const atualizarLocalizacao = async (req, res, io) => {
-  const { email, latitude, longitude, restauranteId } = req.body;
+  const { email, latitude, longitude, restauranteId, online, status } = req.body;
 
   try {
-    const localizacaoMotorista = normalizarCoordenadas({ latitude, longitude });
-    if (!email || !localizacaoMotorista) {
+    const localizacaoBase = normalizarCoordenadas({ latitude, longitude });
+    if (!email || !localizacaoBase) {
       return res.status(400).json({ message: "Email ou localizacao do motorista invalida." });
     }
+    const agoraIso = new Date().toISOString();
+    const localizacaoMotorista = { ...localizacaoBase, atualizadoEm: agoraIso };
+    const statusPayload = online !== undefined ? online : status;
+    const temStatusPayload = statusPayload !== undefined;
+    const estaDisponivel = String(statusPayload).toLowerCase() === 'online' || statusPayload === true || statusPayload === 1 || statusPayload === 'true';
 
     const restaurante = restauranteId
       ? await Restaurante.findById(restauranteId).lean().catch(() => null)
@@ -252,9 +282,15 @@ const atualizarLocalizacao = async (req, res, io) => {
       : null;
     const distanciaInfo = montarPayloadDistancia(distancia, localizacaoLojaInfo);
 
+    const updateEntregador = { localizacao: localizacaoMotorista };
+    if (temStatusPayload) {
+      updateEntregador.status = estaDisponivel;
+      updateEntregador.disponivel = estaDisponivel;
+    }
+
     const entregador = await Entregador.findOneAndUpdate(
       { email },
-      { localizacao: localizacaoMotorista },
+      updateEntregador,
       { new: true }
     );
 
@@ -273,7 +309,9 @@ const atualizarLocalizacao = async (req, res, io) => {
       latitude: localizacaoMotorista.latitude,
       longitude: localizacaoMotorista.longitude,
       localizacao: localizacaoMotorista,
-      atualizadoEm: new Date().toISOString(),
+      status: temStatusPayload ? estaDisponivel : entregador.status !== false,
+      disponivel: temStatusPayload ? estaDisponivel : entregador.disponivel !== false,
+      atualizadoEm: agoraIso,
       ...distanciaInfo,
     };
 
@@ -282,6 +320,7 @@ const atualizarLocalizacao = async (req, res, io) => {
     if (restauranteDoEntregador) {
       io.to(`restaurante-${restauranteDoEntregador}`).emit("localizacaoAtualizada", payloadSocket);
       io.to(`restaurante-${restauranteDoEntregador}`).emit("delivererLocationUpdated", payloadSocket);
+      io.to(`restaurante-${restauranteDoEntregador}`).emit("delivererStatusUpdated", payloadSocket);
     }
 
     res.json({

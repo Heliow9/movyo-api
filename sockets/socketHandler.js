@@ -38,22 +38,32 @@ function normalizarLocalizacaoPayload(payload = {}) {
 
 function emitirEntregadoresOnline(io, restauranteId) {
   if (!restauranteId) return;
-  io.to(`restaurante-${restauranteId}`).emit(
-    "deliverersOnline",
-    entregadoresOnline.filter((e) => e.restauranteId === String(restauranteId))
-  );
+  const lista = entregadoresOnline.filter((e) => e.restauranteId === String(restauranteId));
+  // Mantem os dois nomes porque o Desktop usa deliverersOnline e o app motorista
+  // tambem ja teve versoes ouvindo entregadoresOnline.
+  io.to(`restaurante-${restauranteId}`).emit("deliverersOnline", lista);
+  io.to(`restaurante-${restauranteId}`).emit("entregadoresOnline", lista);
 }
 
 async function atualizarLocalizacaoEntregadorSocket(io, payload = {}) {
   try {
     const entregadorId = payload.entregadorId || payload.id || payload._id;
-    const loc = normalizarLocalizacaoPayload(payload);
-    if (!entregadorId || !loc) return;
+    const locBase = normalizarLocalizacaoPayload(payload);
+    if (!entregadorId || !locBase) return;
 
     const entregador = await Entregador.findById(entregadorId);
     if (!entregador) return;
 
+    const agoraIso = new Date().toISOString();
+    const loc = { ...locBase, atualizadoEm: agoraIso };
+    const statusPayload = payload.online ?? payload.status;
+    const estaDisponivel = statusPayload === undefined ? true : Boolean(statusPayload);
+
     entregador.localizacao = loc;
+    if (statusPayload !== undefined) {
+      entregador.status = estaDisponivel;
+      entregador.disponivel = estaDisponivel;
+    }
     await entregador.save();
 
     const restauranteId = String(payload.restauranteId || entregador.restaurante || entregador.restauranteId || "");
@@ -68,12 +78,26 @@ async function atualizarLocalizacaoEntregadorSocket(io, payload = {}) {
       latitude: loc.latitude,
       longitude: loc.longitude,
       localizacao: loc,
-      atualizadoEm: new Date().toISOString(),
+      status: estaDisponivel,
+      disponivel: estaDisponivel,
+      atualizadoEm: agoraIso,
     };
+
+    if (!estaDisponivel) {
+      entregadoresOnline = entregadoresOnline.filter((e) => String(e.id || e._id || e.entregadorId) !== String(entregadorId));
+      io.to(`entregador-${entregadorId}`).emit("atualizacaoLocalizacao", loc);
+      if (restauranteId) {
+        io.to(`restaurante-${restauranteId}`).emit("localizacaoAtualizada", updatePayload);
+        io.to(`restaurante-${restauranteId}`).emit("delivererLocationUpdated", updatePayload);
+        io.to(`restaurante-${restauranteId}`).emit("delivererStatusUpdated", updatePayload);
+        emitirEntregadoresOnline(io, restauranteId);
+      }
+      return;
+    }
 
     let found = false;
     entregadoresOnline = entregadoresOnline.map((e) => {
-      if (String(e.id) !== String(entregadorId)) return e;
+      if (String(e.id || e._id || e.entregadorId) !== String(entregadorId)) return e;
       found = true;
       return { ...e, ...updatePayload, socketId: e.socketId || payload.socketId };
     });
@@ -83,13 +107,14 @@ async function atualizarLocalizacaoEntregadorSocket(io, payload = {}) {
         entregador: entregadorId,
         status: { $in: STATUS_ENTREGA_ATIVA },
       });
-      entregadoresOnline.push({ ...updatePayload, status: true, pedidosAtivos });
+      entregadoresOnline.push({ ...updatePayload, pedidosAtivos });
     }
 
     io.to(`entregador-${entregadorId}`).emit("atualizacaoLocalizacao", loc);
     if (restauranteId) {
       io.to(`restaurante-${restauranteId}`).emit("localizacaoAtualizada", updatePayload);
       io.to(`restaurante-${restauranteId}`).emit("delivererLocationUpdated", updatePayload);
+      io.to(`restaurante-${restauranteId}`).emit("delivererStatusUpdated", updatePayload);
       emitirEntregadoresOnline(io, restauranteId);
     }
   } catch (err) {
@@ -208,6 +233,19 @@ module.exports = (io) => {
         const entregador = await Entregador.findById(entregadorId);
         if (!entregador) return;
 
+        safeJoin(`entregador-${entregadorId}`);
+
+        const restauranteId = String(entregador.restaurante || entregador.restauranteId || "");
+        const estaDisponivel = Boolean(status);
+        const agoraIso = new Date().toISOString();
+        const loc = entregador.localizacao
+          ? { ...entregador.localizacao, atualizadoEm: entregador.localizacao.atualizadoEm || agoraIso }
+          : null;
+
+        entregador.status = estaDisponivel;
+        entregador.disponivel = estaDisponivel;
+        await entregador.save();
+
         const pedidosAtivos = await Pedido.countDocuments({
           entregador: entregadorId,
           status: { $in: ["aguardando_resposta", "em_rota", "em_entrega"] },
@@ -215,22 +253,27 @@ module.exports = (io) => {
 
         const diaHoje = new Date().toISOString().split("T")[0];
 
-        if (!status) {
-          entregadoresOnline = entregadoresOnline.filter((e) => e.id !== entregadorId);
+        entregadoresOnline = entregadoresOnline.filter((e) => String(e.id || e._id || e.entregadorId) !== String(entregadorId));
+
+        const payloadStatus = {
+          id: String(entregador._id || entregador.id),
+          _id: String(entregador._id || entregador.id),
+          entregadorId: String(entregador._id || entregador.id),
+          socketId: socket.id,
+          nome: entregador.nome,
+          email: entregador.email,
+          restauranteId,
+          localizacao: loc,
+          status: estaDisponivel,
+          disponivel: estaDisponivel,
+          pedidosAtivos,
+          atualizadoEm: agoraIso,
+        };
+
+        if (!estaDisponivel) {
           await EntregadorOnline.deleteOne({ entregadorId, dia: diaHoje });
         } else {
-          entregadoresOnline = entregadoresOnline.filter((e) => e.id !== entregadorId);
-
-          entregadoresOnline.push({
-            id: entregadorId,
-            socketId: socket.id,
-            nome: entregador.nome,
-            email: entregador.email,
-            restauranteId: entregador.restaurante?.toString(),
-            localizacao: entregador.localizacao,
-            status: true,
-            pedidosAtivos,
-          });
+          entregadoresOnline.push(payloadStatus);
 
           await EntregadorOnline.findOneAndUpdate(
             { entregadorId, dia: diaHoje },
@@ -239,17 +282,17 @@ module.exports = (io) => {
               restauranteId: entregador.restaurante,
               dataEntrada: new Date(),
               dia: diaHoje,
+              online: true,
+              localizacao: loc,
             },
             { upsert: true }
           );
         }
 
-        io.to(`restaurante-${entregador.restaurante}`).emit(
-          "deliverersOnline",
-          entregadoresOnline.filter(
-            (e) => e.restauranteId === entregador.restaurante.toString()
-          )
-        );
+        if (restauranteId) {
+          io.to(`restaurante-${restauranteId}`).emit("delivererStatusUpdated", payloadStatus);
+          emitirEntregadoresOnline(io, restauranteId);
+        }
       } catch (err) {
         console.log("🔥 joinEntregador erro:", err?.message);
       }

@@ -8,7 +8,9 @@ module.exports = (io) => {
   router.post('/login', entregadorController.login);
   // router.use(authRestaurante)
   router.post('/register', entregadorController.register);
-  router.post('/atualizar-status', entregadorController.atualizarStatus);
+  router.post('/atualizar-status', (req, res) =>
+    entregadorController.atualizarStatus(req, res, io)
+  );
   router.post('/atualizar-localizacao', (req, res) =>
     entregadorController.atualizarLocalizacao(req, res, io)
   );
