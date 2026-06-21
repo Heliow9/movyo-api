@@ -5,6 +5,38 @@ const Restaurante = require('../models/Restaurante');
 const { calcularDistanciaEntrega, geocodificarEndereco, metrosParaKm, normalizarCoordenadas } = require('../services/distanciaService');
 const { io } = require("../index.js"); // ou o caminho correto para onde você exportou o `io`
 
+
+const ENTREGADOR_ONLINE_TTL_MS = Number(process.env.ENTREGADOR_ONLINE_TTL_MS || 2 * 60 * 1000);
+
+const normalizarTextoStatus = (v) => String(v ?? '').trim().toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '');
+
+const boolOnline = (v) => {
+  const n = normalizarTextoStatus(v);
+  return v === true || v === 1 || n === 'true' || n === 'online' || n === 'disponivel';
+};
+
+const atualizadoMsEntregador = (entregador = {}) => {
+  const raw =
+    entregador?.localizacao?.atualizadoEm ||
+    entregador?.localizacao?.updatedAt ||
+    entregador?.atualizadoEm ||
+    entregador?.updatedAt ||
+    entregador?.updated_at;
+  const ms = raw ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+};
+
+const entregadorOnlineParaDirecionamento = (entregador = {}) => {
+  const statusConta = normalizarTextoStatus(entregador?.statusConta || 'ativo');
+  if (['bloqueado', 'block', 'blocked', 'inativo', 'disabled'].includes(statusConta)) return false;
+  if (!boolOnline(entregador?.status) || !boolOnline(entregador?.disponivel)) return false;
+  const atualizadoMs = atualizadoMsEntregador(entregador);
+  if (!atualizadoMs) return false;
+  return Date.now() - atualizadoMs <= ENTREGADOR_ONLINE_TTL_MS;
+};
+
 const montarEnderecoRestaurante = (restaurante = {}) => {
   return [
     restaurante.enderecoRua,
@@ -337,20 +369,33 @@ const atualizarLocalizacao = async (req, res, io) => {
   }
 };
 
-// Listar entregadores disponíveis de um restaurante
+// Listar somente entregadores realmente online/disponíveis de um restaurante.
+// Regra do direcionamento: conta ativa + disponibilidade ligada + status online + GPS recente.
 const listarDisponiveis = async (req, res) => {
   const { restauranteId } = req.params;
 
   try {
-    const entregadores = await Entregador.find({
+    const candidatos = await Entregador.find({
       $or: [{ restaurante: restauranteId }, { restauranteId }],
-      $and: [
-        { $or: [{ disponivel: true }, { status: true }] },
-        { $or: [{ statusConta: { $exists: false } }, { statusConta: { $ne: 'bloqueado' } }] },
-      ],
-    }).sort({ atualizadoEm: -1, nome: 1 });
+      status: true,
+      disponivel: true,
+      statusConta: { $ne: 'bloqueado' },
+    }).sort({ nome: 1 });
 
-    res.json(entregadores);
+    const entregadoresOnline = (Array.isArray(candidatos) ? candidatos : [])
+      .filter(entregadorOnlineParaDirecionamento)
+      .sort((a, b) => {
+        const pa = Number(a?.pedidosAtivos || a?.entregasAtivas || 0);
+        const pb = Number(b?.pedidosAtivos || b?.entregasAtivas || 0);
+        if (pa !== pb) return pa - pb;
+        return String(a?.nome || '').localeCompare(String(b?.nome || ''), 'pt-BR');
+      });
+
+    res.json({
+      entregadores: entregadoresOnline,
+      total: entregadoresOnline.length,
+      ttlMs: ENTREGADOR_ONLINE_TTL_MS,
+    });
   } catch (error) {
     res.status(500).json({ message: "Erro ao buscar entregadores", error: error.message });
   }

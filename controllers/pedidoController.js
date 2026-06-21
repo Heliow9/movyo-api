@@ -24,6 +24,41 @@ function idString(value) {
   return String(value?._id || value?.id || value || "");
 }
 
+const ENTREGADOR_ONLINE_TTL_MS = Number(process.env.ENTREGADOR_ONLINE_TTL_MS || 2 * 60 * 1000);
+
+function normalizarTextoStatus(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function boolOnline(value) {
+  const v = normalizarTextoStatus(value);
+  return value === true || value === 1 || v === "true" || v === "online" || v === "disponivel";
+}
+
+function entregadorAtualizadoMs(entregador = {}) {
+  const raw =
+    entregador?.localizacao?.atualizadoEm ||
+    entregador?.localizacao?.updatedAt ||
+    entregador?.atualizadoEm ||
+    entregador?.updatedAt ||
+    entregador?.updated_at;
+  const ms = raw ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function entregadorOnlineParaDirecionamento(entregador = {}) {
+  const statusConta = normalizarTextoStatus(entregador?.statusConta || "ativo");
+  if (["bloqueado", "block", "blocked", "inativo", "disabled"].includes(statusConta)) return false;
+  if (!boolOnline(entregador?.status) || !boolOnline(entregador?.disponivel)) return false;
+  const atualizadoMs = entregadorAtualizadoMs(entregador);
+  if (!atualizadoMs) return false;
+  return Date.now() - atualizadoMs <= ENTREGADOR_ONLINE_TTL_MS;
+}
+
 async function obterLimitePedidosPorEntregador(restauranteId) {
   const restaurante = await Restaurante.findById(restauranteId).lean();
   const raw = restaurante?.maxPedidosPorEntregador ?? restaurante?.pedidosPorEntregador ?? 3;
@@ -1544,6 +1579,13 @@ const enviarParaEntregador = async (req, res) => {
 
     if (idString(entregador.restaurante) !== restauranteId) {
       return res.status(403).json({ erro: "Entregador pertence a outro restaurante." });
+    }
+
+    if (!entregadorOnlineParaDirecionamento(entregador)) {
+      return res.status(409).json({
+        erro: "Este entregador não está online no momento.",
+        detalhe: "Direcionamento permitido apenas para entregadores com disponibilidade ativa e GPS atualizado nos últimos 2 minutos.",
+      });
     }
 
     const limite = await obterLimitePedidosPorEntregador(restauranteId);
