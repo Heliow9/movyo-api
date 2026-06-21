@@ -29,6 +29,74 @@ async function contarEntregasAtivas(entregadorId, pedidoIdIgnorar = null) {
   return Pedido.countDocuments(filtro);
 }
 
+function normalizarLocalizacaoPayload(payload = {}) {
+  const latitude = Number(payload.latitude ?? payload.localizacao?.latitude ?? payload.coords?.latitude);
+  const longitude = Number(payload.longitude ?? payload.localizacao?.longitude ?? payload.coords?.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return { latitude, longitude };
+}
+
+function emitirEntregadoresOnline(io, restauranteId) {
+  if (!restauranteId) return;
+  io.to(`restaurante-${restauranteId}`).emit(
+    "deliverersOnline",
+    entregadoresOnline.filter((e) => e.restauranteId === String(restauranteId))
+  );
+}
+
+async function atualizarLocalizacaoEntregadorSocket(io, payload = {}) {
+  try {
+    const entregadorId = payload.entregadorId || payload.id || payload._id;
+    const loc = normalizarLocalizacaoPayload(payload);
+    if (!entregadorId || !loc) return;
+
+    const entregador = await Entregador.findById(entregadorId);
+    if (!entregador) return;
+
+    entregador.localizacao = loc;
+    await entregador.save();
+
+    const restauranteId = String(payload.restauranteId || entregador.restaurante || entregador.restauranteId || "");
+    const updatePayload = {
+      id: String(entregador._id || entregador.id),
+      _id: String(entregador._id || entregador.id),
+      entregadorId: String(entregador._id || entregador.id),
+      socketId: payload.socketId,
+      nome: entregador.nome,
+      email: entregador.email,
+      restauranteId,
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      localizacao: loc,
+      atualizadoEm: new Date().toISOString(),
+    };
+
+    let found = false;
+    entregadoresOnline = entregadoresOnline.map((e) => {
+      if (String(e.id) !== String(entregadorId)) return e;
+      found = true;
+      return { ...e, ...updatePayload, socketId: e.socketId || payload.socketId };
+    });
+
+    if (!found && restauranteId) {
+      const pedidosAtivos = await Pedido.countDocuments({
+        entregador: entregadorId,
+        status: { $in: STATUS_ENTREGA_ATIVA },
+      });
+      entregadoresOnline.push({ ...updatePayload, status: true, pedidosAtivos });
+    }
+
+    io.to(`entregador-${entregadorId}`).emit("atualizacaoLocalizacao", loc);
+    if (restauranteId) {
+      io.to(`restaurante-${restauranteId}`).emit("localizacaoAtualizada", updatePayload);
+      io.to(`restaurante-${restauranteId}`).emit("delivererLocationUpdated", updatePayload);
+      emitirEntregadoresOnline(io, restauranteId);
+    }
+  } catch (err) {
+    console.log("🔥 atualizarLocalizacaoEntregadorSocket erro:", err?.message);
+  }
+}
+
 module.exports = (io) => {
   io.on("connection", (socket) => {
     console.log("🔌 Socket conectado:", socket.id);
@@ -192,33 +260,14 @@ module.exports = (io) => {
       safeJoin(`entregador-${entregadorId}`);
     });
 
-    socket.on("localizacaoAtualizada", async ({ entregadorId, latitude, longitude } = {}) => {
-      try {
-        if (!entregadorId) return;
+    const receberLocalizacaoMotorista = async (payload = {}) => {
+      await atualizarLocalizacaoEntregadorSocket(io, { ...payload, socketId: socket.id });
+    };
 
-        const entregador = await Entregador.findById(entregadorId);
-        if (!entregador) return;
-
-        entregador.localizacao = { latitude, longitude };
-        await entregador.save();
-
-        io.to(`entregador-${entregadorId}`).emit("atualizacaoLocalizacao", {
-          latitude,
-          longitude,
-        });
-
-        io.to(`restaurante-${entregador.restaurante}`).emit(
-          "deliverersOnline",
-          entregadoresOnline.map((e) =>
-            e.id === entregadorId
-              ? { ...e, localizacao: { latitude, longitude } }
-              : e
-          )
-        );
-      } catch (err) {
-        console.log("🔥 localizacaoAtualizada erro:", err?.message);
-      }
-    });
+    // O app motorista antigo emitia "atualizarLocalizacao" e algumas versões
+    // emitem "localizacaoAtualizada". Mantemos os dois para não perder rastreio.
+    socket.on("atualizarLocalizacao", receberLocalizacaoMotorista);
+    socket.on("localizacaoAtualizada", receberLocalizacaoMotorista);
 
     /* =========================================================
      * 📦 PEDIDOS DELIVERY (EXISTENTE)
@@ -307,7 +356,9 @@ module.exports = (io) => {
 
     socket.on("disconnect", () => {
       console.log("🔌 Desconectado:", socket.id);
+      const afetados = entregadoresOnline.filter((e) => e.socketId === socket.id).map((e) => e.restauranteId).filter(Boolean);
       entregadoresOnline = entregadoresOnline.filter((e) => e.socketId !== socket.id);
+      [...new Set(afetados)].forEach((restauranteId) => emitirEntregadoresOnline(io, restauranteId));
     });
   });
 };

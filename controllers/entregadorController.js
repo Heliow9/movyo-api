@@ -2,8 +2,67 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Entregador = require('../models/Entregador');
 const Restaurante = require('../models/Restaurante');
-const { calcularDistanciaEntrega } = require('../services/distanciaService');
+const { calcularDistanciaEntrega, geocodificarEndereco, metrosParaKm, normalizarCoordenadas } = require('../services/distanciaService');
 const { io } = require("../index.js"); // ou o caminho correto para onde você exportou o `io`
+
+const montarEnderecoRestaurante = (restaurante = {}) => {
+  return [
+    restaurante.enderecoRua,
+    restaurante.enderecoNumero,
+    restaurante.enderecoBairro,
+    restaurante.enderecoCidade,
+    restaurante.enderecoEstado,
+    restaurante.enderecoCep,
+    "Brasil",
+  ]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean)
+    .join(", ");
+};
+
+const obterLocalizacaoLoja = async (restaurante) => {
+  const cadastrada = normalizarCoordenadas(restaurante?.localizacao || {});
+  if (cadastrada) return { coords: cadastrada, fonte: "cadastro" };
+
+  const endereco = montarEnderecoRestaurante(restaurante);
+  if (!endereco) return { coords: null, fonte: "ausente" };
+
+  const geocodificada = await geocodificarEndereco(endereco);
+  const restauranteId = restaurante?._id || restaurante?.id;
+  if (geocodificada && restauranteId) {
+    Restaurante.findByIdAndUpdate(restauranteId, { localizacao: geocodificada }).catch((err) => {
+      console.warn("Nao foi possivel salvar localizacao geocodificada da loja:", err?.message || err);
+    });
+    return { coords: geocodificada, fonte: "geocodificada" };
+  }
+
+  return { coords: null, fonte: "nao_encontrada" };
+};
+
+const montarPayloadDistancia = (distanciaMetros, localizacaoLojaInfo) => {
+  if (!Number.isFinite(Number(distanciaMetros))) {
+    return {
+      distancia: null,
+      distanciaKm: null,
+      distanciaMetros: null,
+      unidade: "km",
+      localizacaoLojaConfigurada: Boolean(localizacaoLojaInfo?.coords),
+      localizacaoLojaFonte: localizacaoLojaInfo?.fonte || "ausente",
+    };
+  }
+
+  const metros = Number(distanciaMetros);
+  const km = metrosParaKm(metros);
+  return {
+    distancia: km,
+    distanciaKm: km,
+    distanciaMetros: Number(metros.toFixed(2)),
+    unidade: "km",
+    localizacaoLojaConfigurada: Boolean(localizacaoLojaInfo?.coords),
+    localizacaoLojaFonte: localizacaoLojaInfo?.fonte || "cadastro",
+  };
+};
+
 
 const register = async (req, res) => {
   const { nome, email, senha, cpf, restauranteId } = req.body;
@@ -104,14 +163,22 @@ const login = async (req, res) => {
       ? await Restaurante.findById(restauranteId).lean().catch(() => null)
       : null;
 
-    const distancia = await calcularDistanciaEntrega(
-      latitude,
-      longitude,
-      restaurante?.localizacao || {}
-    );
-    if (distancia === null) return res.status(400).json({ error: 'Localizacao invalida para calcular distancia.' });
+    const localizacaoMotorista = normalizarCoordenadas({ latitude, longitude });
+    if (!localizacaoMotorista) {
+      return res.status(400).json({ error: 'Localizacao do motorista invalida.' });
+    }
+
+    const localizacaoLojaInfo = await obterLocalizacaoLoja(restaurante);
+    const distancia = localizacaoLojaInfo.coords
+      ? await calcularDistanciaEntrega(
+          localizacaoMotorista.latitude,
+          localizacaoMotorista.longitude,
+          localizacaoLojaInfo.coords
+        )
+      : null;
+    const distanciaInfo = montarPayloadDistancia(distancia, localizacaoLojaInfo);
     // comentado apenas para fins de teste aw função esta funcionando corretamente!
-    // if (distancia > 500) return res.status(403).json({ error: 'Você precisa estar a até 500m da loja para fazer login.' });
+    // if (distanciaInfo.distanciaMetros > 500) return res.status(403).json({ error: 'Você precisa estar a até 500m da loja para fazer login.' });
 
     const horaAtual = new Date();
     const horaBrasilia = horaAtual.getUTCHours() - 3;
@@ -122,14 +189,14 @@ const login = async (req, res) => {
     //   return res.status(403).json({ error: `Login permitido apenas entre 18:00 e 11:00. Hora atual: ${horaAjustada}` });
     // }
 
-    entregador.localizacao = { latitude, longitude };
+    entregador.localizacao = { latitude: localizacaoMotorista.latitude, longitude: localizacaoMotorista.longitude };
     await entregador.save();
 
     const token = jwt.sign({ id: entregador._id, restauranteId: entregador.restaurante || entregador.restauranteId }, process.env.JWT_SECRET, {
       expiresIn: '1d'
     });
 
-    res.json({ token, entregador });
+    res.json({ token, entregador, ...distanciaInfo });
    
   } catch (error) {
     res.status(500).json({ error: 'Erro no login.', details: error.message });
@@ -166,22 +233,28 @@ const atualizarLocalizacao = async (req, res, io) => {
   const { email, latitude, longitude, restauranteId } = req.body;
 
   try {
+    const localizacaoMotorista = normalizarCoordenadas({ latitude, longitude });
+    if (!email || !localizacaoMotorista) {
+      return res.status(400).json({ message: "Email ou localizacao do motorista invalida." });
+    }
+
     const restaurante = restauranteId
       ? await Restaurante.findById(restauranteId).lean().catch(() => null)
       : null;
 
-    const distancia = await calcularDistanciaEntrega(
-      latitude,
-      longitude,
-      restaurante?.localizacao || {}
-    );
-    if (distancia === null) {
-      return res.status(400).json({ message: "Localizacao invalida para calcular distancia." });
-    }
+    const localizacaoLojaInfo = await obterLocalizacaoLoja(restaurante);
+    const distancia = localizacaoLojaInfo.coords
+      ? await calcularDistanciaEntrega(
+          localizacaoMotorista.latitude,
+          localizacaoMotorista.longitude,
+          localizacaoLojaInfo.coords
+        )
+      : null;
+    const distanciaInfo = montarPayloadDistancia(distancia, localizacaoLojaInfo);
 
     const entregador = await Entregador.findOneAndUpdate(
       { email },
-      { localizacao: { latitude, longitude } },
+      { localizacao: localizacaoMotorista },
       { new: true }
     );
 
@@ -189,25 +262,33 @@ const atualizarLocalizacao = async (req, res, io) => {
       return res.status(404).json({ message: "Entregador não encontrado." });
     }
 
-    console.log(`➡️ Emitindo localização para sala restaurante-${restauranteId}:`, {
-      email,
-      latitude,
-      longitude,
-      distancia
-    });
+    const restauranteDoEntregador = restauranteId || entregador.restaurante || entregador.restauranteId;
+    const payloadSocket = {
+      id: String(entregador._id || entregador.id),
+      _id: String(entregador._id || entregador.id),
+      entregadorId: String(entregador._id || entregador.id),
+      nome: entregador.nome,
+      email: entregador.email,
+      restauranteId: String(restauranteDoEntregador || ""),
+      latitude: localizacaoMotorista.latitude,
+      longitude: localizacaoMotorista.longitude,
+      localizacao: localizacaoMotorista,
+      atualizadoEm: new Date().toISOString(),
+      ...distanciaInfo,
+    };
 
-    io.to(`restaurante-${restauranteId}`).emit("localizacaoAtualizada", {
-      email,
-      latitude,
-      longitude,
-      distancia
-    });
+    console.log(`➡️ Emitindo localização para sala restaurante-${restauranteDoEntregador}:`, payloadSocket);
+
+    if (restauranteDoEntregador) {
+      io.to(`restaurante-${restauranteDoEntregador}`).emit("localizacaoAtualizada", payloadSocket);
+      io.to(`restaurante-${restauranteDoEntregador}`).emit("delivererLocationUpdated", payloadSocket);
+    }
 
     res.json({
       message: "Localização atualizada com sucesso.",
-      distancia: distancia.toFixed(2),
+      ...distanciaInfo,
       entregador,
-      restauranteId
+      restauranteId: restauranteDoEntregador
     });
   } catch (error) {
     res.status(500).json({
