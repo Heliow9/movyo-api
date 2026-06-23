@@ -43,17 +43,10 @@ function publicAdmin(a={}){
 }
 
 async function ensureAdminInicial(){
-  // Se já existe qualquer admin cadastrado, o login SaaS não deve depender
-  // das variáveis SAAS_ADMIN_INICIAL_EMAIL/SAAS_ADMIN_INICIAL_SENHA.
-  // Essas variáveis só são obrigatórias quando o banco ainda está zerado.
   if (ADMIN_INICIAL_EMAIL) {
     const existing = await AdminSaas.findOne({ email: ADMIN_INICIAL_EMAIL });
     if (existing) return existing;
   }
-
-  const qualquerAdmin = await AdminSaas.findOne({});
-  if (qualquerAdmin) return qualquerAdmin;
-
   if (!ADMIN_INICIAL_EMAIL || !ADMIN_INICIAL_SENHA) {
     throw new Error('Configure SAAS_ADMIN_INICIAL_EMAIL e SAAS_ADMIN_INICIAL_SENHA para criar o primeiro administrador.');
   }

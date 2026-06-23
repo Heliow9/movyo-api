@@ -171,6 +171,8 @@ app.use("/api/estoque", require("./routes/estoqueRoutes"));
 app.use("/api/balcao", require("./routes/balcaoRoutes"));
 app.use("/api/caixa", require("./routes/caixaRoutes"));
 app.use("/api/push", require("./routes/pushRoutes"));
+app.use("/api/99food", require("./routes/food99Routes")());
+app.use("/api/food99", require("./routes/food99Routes")());
 
 const imagensRoutes = require("./routes/imagens.routes");
 app.use("/api/imagens", imagensRoutes);

@@ -29,6 +29,16 @@ const indexes = [
     sql: 'CREATE INDEX idx_pedidos_rest_status_pagamento_criado ON pedidos (restaurante, status(30), statusPagamento(30), criadoEm)',
   },
   {
+    table: 'pedidos',
+    name: 'idx_pedidos_external_order',
+    sql: 'CREATE INDEX idx_pedidos_external_order ON pedidos (externalOrderId(191))',
+  },
+  {
+    table: 'pedidos',
+    name: 'idx_pedidos_rest_origem_caixa',
+    sql: 'CREATE INDEX idx_pedidos_rest_origem_caixa ON pedidos (restaurante, origem(32), caixaSessaoId)',
+  },
+  {
     table: 'caixa_sessoes',
     name: 'idx_caixa_sessoes_rest_status_aberto',
     sql: 'CREATE INDEX idx_caixa_sessoes_rest_status_aberto ON caixa_sessoes (restauranteId, status(30), abertoEm)',

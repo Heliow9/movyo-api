@@ -261,6 +261,9 @@ function rowToPedidoLean(row = {}) {
   pedido.pagamentos = parseJsonSafe(row.pagamentos, []);
   pedido.pagamento = parseJsonSafe(row.pagamento, null);
   pedido.pedidoOriginalSnapshot = parseJsonSafe(row.pedidoOriginalSnapshot, null);
+  pedido.externalPayload = parseJsonSafe(row.externalPayload, null);
+  pedido.taxaMarketplace = Number(row.taxaMarketplace ?? 0) || 0;
+  pedido.valorRepasse = Number(row.valorRepasse ?? 0) || 0;
   // Normaliza aliases do MySQL para os nomes usados pelos clientes.
   pedido.createdAt = row.createdAt || row.created_at || row.criadoEm || null;
   pedido.updatedAt = row.updatedAt || row.updated_at || row.statusAtualizadoEm || null;
@@ -282,8 +285,9 @@ const pedidosListCountCache = new Map();
 const PEDIDOS_LIST_COLUMNS = `
   id, numeroPedido, restaurante, cliente, entregador, mesaId, mesaNumero, nomeCliente,
   telefoneCliente, enderecoCliente, itens, total, taxaEntrega, formaPagamento, status,
-  statusPagamento, origem, observacao, pagamento, pagamentos, descontoValor, valorDesconto,
-  totalBruto, valorPago, valorPendente, mpPaymentId, garcomId, garcomNome, recebidoPor,
+  statusPagamento, origem, canalVenda, marketplace, externalOrderId, externalMerchantId,
+  externalStatus, externalPayload, taxaMarketplace, valorRepasse, observacao, pagamento, pagamentos,
+  descontoValor, valorDesconto, totalBruto, valorPago, valorPendente, mpPaymentId, garcomId, garcomNome, recebidoPor,
   recebidoPorNome, fechadoPor, fechadoPorNome, criadoPor, criadoPorNome, criadoEm, pagoEm,
   aceitoEm, emProducaoEm, emEntregaEm, statusAtualizadoEm, entregueEm, canceladoEm,
   motivoCancelamento, cancelamentoTipo, valorCancelado, estornoStatus, estornoValor, estornoEm,
@@ -1005,6 +1009,8 @@ const criarPedido = async (req, res) => {
     if (!numeroPedido) {
       const prefixos = {
         ifood: "IF",
+        "99food": "99F",
+        food99: "99F",
         balcao: "BK",
         bot: "BT",
         vitrine: "BT",
@@ -1109,6 +1115,8 @@ const criarPedido = async (req, res) => {
       latitudeCliente,
       longitudeCliente,
       origem,
+      canalVenda: origem === "99food" || origem === "food99" ? "marketplace" : origem,
+      marketplace: origem === "99food" || origem === "food99" ? "99food" : (origem === "ifood" ? "ifood" : ""),
 
       status: statusInicial,
 

@@ -269,6 +269,7 @@ async function listarPedidosRelatorio(restauranteId, caixaIds) {
 
   const [rows] = await queryWithRetry(
     `SELECT id, numeroPedido, nomeCliente, formaPagamento, status, statusPagamento,
+            origem, canalVenda, marketplace, externalOrderId, taxaMarketplace, valorRepasse,
             total, valorPago, criadoEm, pagoEm, caixaSessaoId
        FROM pedidos
       WHERE restaurante = ?
@@ -324,6 +325,16 @@ exports.relatorios = async (req, res) => {
     ]);
 
     const resumo = { totalVendas:0, dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangrias:0, suprimentos:0, pedidos:0, caixas: caixas.length };
+    const porOrigem = new Map();
+    for (const pedido of pedidos) {
+      const origem = String(pedido.origem || pedido.marketplace || pedido.canalVenda || 'sem_origem').toLowerCase();
+      if (!porOrigem.has(origem)) porOrigem.set(origem, { origem, pedidos: 0, total: 0, taxaMarketplace: 0, valorRepasse: 0 });
+      const rowOrigem = porOrigem.get(origem);
+      rowOrigem.pedidos += 1;
+      rowOrigem.total = round2(rowOrigem.total + toNum(pedido.total || pedido.valorPago));
+      rowOrigem.taxaMarketplace = round2(rowOrigem.taxaMarketplace + toNum(pedido.taxaMarketplace));
+      rowOrigem.valorRepasse = round2(rowOrigem.valorRepasse + toNum(pedido.valorRepasse));
+    }
     const by = new Map();
     const keyFor = (c) => {
       if (tipo === 'caixa') return String(c._id || c.id);
@@ -341,6 +352,6 @@ exports.relatorios = async (req, res) => {
       const vals = { totalVendas:c.totalVendas, dinheiro:c.totalDinheiro, pix:c.totalPix, credito:c.totalCredito, debito:c.totalDebito, online:c.totalOnline, outros:c.totalOutros, sangrias:c.totalSangrias, suprimentos:c.totalSuprimentos };
       for (const [kk,v] of Object.entries(vals)) { row[kk] = round2(row[kk]+toNum(v)); resumo[kk] = round2(resumo[kk]+toNum(v)); }
     }
-    res.json({ tipo, resumo, linhas: [...by.values()], caixas, pedidos, movimentos });
+    res.json({ tipo, resumo, porOrigem: [...porOrigem.values()], linhas: [...by.values()], caixas, pedidos, movimentos });
   } catch (e) { res.status(500).json({ message: 'Erro ao gerar relatório de caixa.', error: e.message }); }
 };
