@@ -43,6 +43,17 @@ function sanitizeConfiguracoesPayload(body) {
   delete clean.email;
   delete clean.cnpj;
 
+  // 99Food/Open Delivery fica sob responsabilidade do painel SaaS/suporte Movyo.
+  // O desktop do restaurante pode visualizar o status, mas não altera APP ID, Secret,
+  // token de webhook ou ambiente para evitar quebra de pedidos e vazamento de credenciais.
+  delete clean.food99Status;
+  delete clean.food99MerchantId;
+  delete clean.food99WebhookToken;
+  delete clean.food99ClientId;
+  delete clean.food99ClientSecret;
+  delete clean.food99BaseUrl;
+  delete clean.food99;
+
   return clean;
 }
 
@@ -372,11 +383,19 @@ module.exports = {
         ifood: parse(restaurante.ifood, {}),
         food99Status: restaurante.food99Status === 1 || restaurante.food99Status === true,
         food99MerchantId: restaurante.food99MerchantId || "",
-        food99WebhookToken: restaurante.food99WebhookToken || "",
-        food99ClientId: restaurante.food99ClientId || "",
-        food99ClientSecret: restaurante.food99ClientSecret || "",
-        food99BaseUrl: restaurante.food99BaseUrl || "",
-        food99: parse(restaurante.food99, {}),
+        food99WebhookConfigurado: !!restaurante.food99WebhookToken,
+        food99ClientIdConfigurado: !!restaurante.food99ClientId,
+        food99ClientSecretConfigurado: !!restaurante.food99ClientSecret,
+        food99BaseUrlConfigurado: !!restaurante.food99BaseUrl,
+        food99: (() => {
+          const cfg = parse(restaurante.food99, {});
+          return {
+            valoresEmCentavos: cfg?.valoresEmCentavos === true || cfg?.valoresEmCentavos === 1 || String(cfg?.valoresEmCentavos || '').toLowerCase() === 'true',
+            appShopId: cfg?.appShopId || cfg?.app_shop_id || "",
+            lojaNome: cfg?.lojaNome || cfg?.storeName || cfg?.nomeLoja || "",
+            ambiente: cfg?.ambiente || cfg?.environment || "",
+          };
+        })(),
         localizacao: parse(restaurante.localizacao, null),
         statusBot: parse(restaurante.statusBot, {}),
         ativo: restaurante.ativo !== 0 && restaurante.ativo !== false,
@@ -569,6 +588,7 @@ module.exports = {
         return res.status(404).json({ mensagem: "Restaurante não encontrado." });
       }
 
+      perfilCache.delete(String(restauranteId));
       return res.status(200).json({
         mensagem: "Configurações atualizadas com sucesso.",
         restaurante,

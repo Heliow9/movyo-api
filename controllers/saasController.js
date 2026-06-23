@@ -428,10 +428,17 @@ module.exports = {
   async atualizarRestaurante(req,res){
     try{
       const id = req.params.id;
-      const allowed = ['nome','email','cnpj','telefone','slugIdentificador','enderecoCidade','enderecoBairro','plano','statusAssinatura','dataInicioPlano','dataFimPlano','observacaoPlano','emailCobranca','ativo','sessaoVersao','taxaConvenienciaPix','descontoMensalidadePercentual','valorMensalidadeCustomizado'];
+      const allowed = ['nome','email','cnpj','telefone','slugIdentificador','enderecoCidade','enderecoBairro','plano','statusAssinatura','dataInicioPlano','dataFimPlano','observacaoPlano','emailCobranca','ativo','sessaoVersao','taxaConvenienciaPix','descontoMensalidadePercentual','valorMensalidadeCustomizado','food99Status','food99MerchantId','food99WebhookToken','food99ClientId','food99ClientSecret','food99BaseUrl','food99'];
       const update = {};
       for (const k of allowed) if (Object.prototype.hasOwnProperty.call(req.body,k)) update[k]=req.body[k];
       if(update.plano) update.plano = normalizePlano(update.plano);
+      if(Object.prototype.hasOwnProperty.call(update, 'food99Status')) update.food99Status = boolLike(update.food99Status);
+      ['food99MerchantId','food99WebhookToken','food99ClientId','food99ClientSecret','food99BaseUrl'].forEach((k) => {
+        if (Object.prototype.hasOwnProperty.call(update, k)) update[k] = String(update[k] || '').trim();
+      });
+      if(Object.prototype.hasOwnProperty.call(update, 'food99')) {
+        update.food99 = safeObject(update.food99, {});
+      }
       if(update.dataInicioPlano) update.dataInicioPlano = parseDate(update.dataInicioPlano);
       if(update.dataFimPlano) update.dataFimPlano = parseDate(update.dataFimPlano);
       ['taxaConvenienciaPix','descontoMensalidadePercentual','valorMensalidadeCustomizado'].forEach((k) => {
@@ -1213,9 +1220,11 @@ module.exports = {
       const linhas = restaurantes.map((r) => {
         const mp = safeObject(r.mercadoPago);
         const ifood = safeObject(r.ifood);
+        const food99 = safeObject(r.food99);
         const bot = parseStatusBot(r);
         const mercadoPagoConectado = boolLike(mp.conectado) || !!(mp.accessToken || mp.token || mp.access_token);
         const ifoodConectado = boolLike(r.ifoodStatus) || boolLike(ifood.conectado) || !!ifood.accessToken;
+        const food99Conectado = boolLike(r.food99Status) && !!(r.food99MerchantId || food99.appShopId || food99.lojaNome);
         return {
           restauranteId: docId(r),
           nome: r.nome,
@@ -1224,21 +1233,26 @@ module.exports = {
           botLigado: boolLike(bot.ligado),
           botEstado: bot.estado || bot.status || (boolLike(bot.ligado) ? 'ligado' : 'desligado'),
           ifoodConectado,
+          food99Conectado,
           mercadoPagoConectado,
           pagamentoCartaoAtivo: boolLike(r.pagamentoCartaoAtivo, true),
           pushAtivos: pushAtivosPorRestaurante.get(docId(r)) || 0,
           mercadoPagoUserId: mp.userId || null,
-          ifoodMerchantId: ifood.merchantId || ifood.merchant_id || r.ifoodIdentificador || null
+          ifoodMerchantId: ifood.merchantId || ifood.merchant_id || r.ifoodIdentificador || null,
+          food99MerchantId: r.food99MerchantId || null,
+          food99LojaNome: food99.lojaNome || null,
+          food99Ambiente: food99.ambiente || r.food99BaseUrl || null
         };
       });
       const resumo = {
         restaurantes: linhas.length,
         botsLigados: linhas.filter((r) => r.botLigado).length,
         ifoodConectados: linhas.filter((r) => r.ifoodConectado).length,
+        food99Conectados: linhas.filter((r) => r.food99Conectado).length,
         mercadoPagoConectados: linhas.filter((r) => r.mercadoPagoConectado).length,
         cartaoAtivo: linhas.filter((r) => r.pagamentoCartaoAtivo).length,
         pushAtivos: sumValues(linhas, (r) => r.pushAtivos),
-        pendencias: linhas.filter((r) => !r.mercadoPagoConectado || !r.botLigado || !r.pagamentoCartaoAtivo).length
+        pendencias: linhas.filter((r) => !r.mercadoPagoConectado || !r.botLigado || !r.pagamentoCartaoAtivo || !r.food99Conectado).length
       };
       return res.json({
         criterio:'status consolidado de bot, marketplace, pagamentos e push',
