@@ -43,13 +43,25 @@ function publicAdmin(a={}){
 }
 
 async function ensureAdminInicial(){
+  // Se já existe qualquer administrador SaaS cadastrado, o login normal não pode
+  // depender das variáveis de seed. Elas só são necessárias para criar o primeiro admin.
+  const totalAdmins = await AdminSaas.countDocuments({});
+
   if (ADMIN_INICIAL_EMAIL) {
     const existing = await AdminSaas.findOne({ email: ADMIN_INICIAL_EMAIL });
     if (existing) return existing;
   }
+
+  if (totalAdmins > 0) {
+    // Ambiente já inicializado. Não tenta criar admin automaticamente e não bloqueia o login.
+    // Retorna um admin existente para manter o /seed-admin compatível.
+    return AdminSaas.findOne({});
+  }
+
   if (!ADMIN_INICIAL_EMAIL || !ADMIN_INICIAL_SENHA) {
     throw new Error('Configure SAAS_ADMIN_INICIAL_EMAIL e SAAS_ADMIN_INICIAL_SENHA para criar o primeiro administrador.');
   }
+
   const senhaHash = await bcrypt.hash(ADMIN_INICIAL_SENHA, 10);
   return AdminSaas.create({
     nome: 'Helio Desenvolvimento',
