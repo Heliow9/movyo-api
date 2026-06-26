@@ -21,7 +21,7 @@ CaixaSessao.setAfterPersistHook((current, previous) => {
     notify(caixa)
       .then((result) => {
         if (result?.enviados > 0) {
-          console.log(`🔔 Push caixa aberto enviado: caixa=${caixa._id || caixa.id} dispositivos=${result.enviados}`);
+          console.log(`Push caixa ${abriu ? 'aberto' : 'fechado'} enviado: caixa=${caixa._id || caixa.id} dispositivos=${result.enviados}`);
         }
       })
       .catch((error) => console.error(`Erro ao disparar push de caixa ${abriu ? 'aberto' : 'fechado'}:`, error?.message || error));

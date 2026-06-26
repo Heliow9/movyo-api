@@ -2,8 +2,8 @@
 const express = require("express");
 const Pedido = require("../models/Pedido");
 const authRestaurante = require("../middlewares/authRestaurante");
-const authMotoristas = require("../middlewares/authMotoristas");
 const matchRestaurante = require("../middlewares/requireRestaurantMatch");
+const { requirePlanFeature } = require("../middlewares/requirePlanFeature");
 
 const {
   // =========================
@@ -27,9 +27,6 @@ const {
   // ENTREGA
   // =========================
   enviarParaEntregador,
-  aceitarPedidoEntregador,
-  recusarPedidoEntregador,
-  obterPedidoEntregador,
   iniciarEntrega,
   concluirEntrega,
   listarPedidosAtivos,
@@ -98,11 +95,11 @@ module.exports = (io) => {
   // ✅ COZINHA — ANTES do catch-all
   //  - TROCA itemIndex por itemId (mais seguro)
   // =========================================================
-  router.get("/:restauranteId/fila-cozinha", authRestaurante, matchRestaurante, listarFilaCozinha);
+  router.get("/:restauranteId/fila-cozinha", authRestaurante, matchRestaurante, requirePlanFeature("production"), listarFilaCozinha);
 
-  router.put("/:pedidoId/itens/:itemIndex/cozinha/pronto", authRestaurante, matchRestaurante, marcarItemPronto);
-  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-mesa", authRestaurante, matchRestaurante, marcarItemEntregueMesa);
-  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-cliente", authRestaurante, matchRestaurante, marcarItemEntregueCliente);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/pronto", authRestaurante, matchRestaurante, requirePlanFeature("production"), marcarItemPronto);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-mesa", authRestaurante, matchRestaurante, requirePlanFeature("production"), marcarItemEntregueMesa);
+  router.put("/:pedidoId/itens/:itemIndex/cozinha/entregue-cliente", authRestaurante, matchRestaurante, requirePlanFeature("production"), marcarItemEntregueCliente);
 
   // =========================================================
   // 🔹 BALCÃO
@@ -115,18 +112,15 @@ module.exports = (io) => {
   router.post("/:pedidoId/pagamento", authRestaurante, matchRestaurante, registrarPagamentoPedido);
 
   // PIX parcial (balcão)
-  router.post("/:pedidoId/pix", authRestaurante, matchRestaurante, gerarPixPedido);
+  router.post("/:pedidoId/pix", authRestaurante, matchRestaurante, requirePlanFeature("onlinePayments"), gerarPixPedido);
   router.get("/:pedidoId/pix/:paymentId/status", authRestaurante, matchRestaurante, consultarStatusPixPedido);
 
   // =========================================================
   // 🔹 ENTREGA
   // =========================================================
-  router.post("/enviar/:idPedido/:idEntregador", authRestaurante, matchRestaurante, enviarParaEntregador);
-  router.get("/entregador/:pedidoId", authMotoristas, obterPedidoEntregador);
-  router.post("/entregador/:pedidoId/aceitar", authMotoristas, aceitarPedidoEntregador);
-  router.post("/entregador/:pedidoId/recusar", authMotoristas, recusarPedidoEntregador);
-  router.post("/iniciar-entrega/:id", authRestaurante, matchRestaurante, iniciarEntrega);
-  router.post("/concluir-entrega/:id", authRestaurante, matchRestaurante, concluirEntrega);
+  router.post("/enviar/:idPedido/:idEntregador", authRestaurante, matchRestaurante, requirePlanFeature("deliveryManagement"), enviarParaEntregador);
+  router.post("/iniciar-entrega/:id", authRestaurante, matchRestaurante, requirePlanFeature("deliveryManagement"), iniciarEntrega);
+  router.post("/concluir-entrega/:id", authRestaurante, matchRestaurante, requirePlanFeature("deliveryManagement"), concluirEntrega);
 
   // =========================================================
   // 🔹 LISTAS AUXILIARES

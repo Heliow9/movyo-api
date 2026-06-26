@@ -1,11 +1,14 @@
 const crypto = require('crypto');
+const axios = require('axios');
 const webpush = require('web-push');
 const PushSubscription = require('../models/PushSubscription');
+const { formatOperationalTimeBR } = require('../utils/operationalDateTime');
 
 let configuredSignature = '';
 let warnedMissingConfig = false;
 const recentEvents = new Map();
 const RECENT_EVENT_TTL_MS = Number(process.env.WEB_PUSH_DEDUP_TTL_MS || 20_000);
+const EXPO_PUSH_ENDPOINT = 'https://exp.host/--/api/v2/push/send';
 
 function clean(value) {
   return String(value == null ? '' : value).trim();
@@ -130,10 +133,73 @@ async function saveSubscription({
   return doc;
 }
 
+function normalizeExpoPushToken(value) {
+  const token = clean(value);
+  if (!/^Expo(?:nent)?PushToken\[[^\]]+\]$/.test(token)) {
+    const error = new Error('Token Expo Push invalido.');
+    error.status = 400;
+    error.code = 'EXPO_PUSH_TOKEN_INVALIDO';
+    throw error;
+  }
+  return token;
+}
+
+async function saveNativeSubscription({
+  restauranteId,
+  usuarioId,
+  role,
+  pushToken,
+  plataforma,
+  deviceId,
+  userAgent,
+}) {
+  const restId = normalizeRestauranteId(restauranteId);
+  if (!restId) {
+    const error = new Error('restauranteId e obrigatorio para salvar o push nativo.');
+    error.status = 400;
+    throw error;
+  }
+
+  const token = normalizeExpoPushToken(pushToken);
+  const hash = endpointHash(`expo:${token}`);
+  let doc = await PushSubscription.findOne({ endpointHash: hash });
+  if (!doc) doc = new PushSubscription({ endpointHash: hash });
+
+  doc.restauranteId = restId;
+  doc.usuarioId = clean(usuarioId);
+  doc.role = clean(role || 'restaurante');
+  doc.endpoint = '';
+  doc.p256dh = '';
+  doc.auth = '';
+  doc.pushProvider = 'expo';
+  doc.pushToken = token;
+  doc.deviceId = clean(deviceId);
+  doc.plataforma = clean(plataforma || 'android-native');
+  doc.standalone = true;
+  doc.userAgent = clean(userAgent).slice(0, 4000);
+  doc.ativo = true;
+  doc.ultimaSincronizacaoEm = new Date();
+  doc.falhasConsecutivas = 0;
+  doc.ultimoErro = '';
+  await doc.save();
+  return doc;
+}
+
 async function removeSubscription({ restauranteId, endpoint }) {
   const restId = normalizeRestauranteId(restauranteId);
   const hash = endpointHash(endpoint);
   const doc = await PushSubscription.findOne({ endpointHash: hash });
+  if (!doc || String(doc.restauranteId) !== String(restId)) return false;
+  doc.ativo = false;
+  doc.ultimaSincronizacaoEm = new Date();
+  await doc.save();
+  return true;
+}
+
+async function removeNativeSubscription({ restauranteId, pushToken }) {
+  const restId = normalizeRestauranteId(restauranteId);
+  const token = normalizeExpoPushToken(pushToken);
+  const doc = await PushSubscription.findOne({ endpointHash: endpointHash(`expo:${token}`) });
   if (!doc || String(doc.restauranteId) !== String(restId)) return false;
   doc.ativo = false;
   doc.ultimaSincronizacaoEm = new Date();
@@ -170,7 +236,8 @@ async function markSuccess(doc) {
 async function markFailure(doc, error) {
   const statusCode = Number(error?.statusCode || error?.status || 0);
   const falhas = Number(doc.falhasConsecutivas || 0) + 1;
-  const expirou = statusCode === 404 || statusCode === 410;
+  const pushCode = clean(error?.pushCode || error?.response?.data?.details?.error);
+  const expirou = statusCode === 404 || statusCode === 410 || pushCode === 'DeviceNotRegistered';
   const deveDesativar = expirou || falhas >= Number(process.env.WEB_PUSH_MAX_FAILURES || 5);
 
   await PushSubscription.findByIdAndUpdate(doc._id, {
@@ -182,7 +249,7 @@ async function markFailure(doc, error) {
     },
   }).catch((updateError) => console.warn('Falha ao registrar erro do push:', updateError?.message || updateError));
 
-  return { statusCode, expirou, desativado: deveDesativar };
+  return { statusCode, pushCode, expirou, desativado: deveDesativar };
 }
 
 function wasRecentlySent(key) {
@@ -200,9 +267,6 @@ async function sendToRestaurant(restauranteId, payload, options = {}) {
   const restId = normalizeRestauranteId(restauranteId);
   if (!restId) return { ok: false, reason: 'RESTAURANTE_AUSENTE', total: 0, enviados: 0 };
 
-  const config = configureWebPush();
-  if (!config.ok) return { ok: false, reason: 'VAPID_NAO_CONFIGURADO', total: 0, enviados: 0 };
-
   const eventKey = clean(options.eventKey);
   if (eventKey && wasRecentlySent(`${restId}:${eventKey}`)) {
     return { ok: true, deduplicado: true, total: 0, enviados: 0 };
@@ -211,15 +275,51 @@ async function sendToRestaurant(restauranteId, payload, options = {}) {
   const subscriptions = await PushSubscription.find({ restauranteId: restId, ativo: true }).lean();
   if (!subscriptions.length) return { ok: true, total: 0, enviados: 0, semInscricoes: true };
 
+  const config = configureWebPush();
   const json = JSON.stringify(payload || {});
   const ttl = Math.max(0, Number(options.ttl ?? process.env.WEB_PUSH_TTL_SECONDS ?? 120));
   const urgency = clean(options.urgency || 'high');
 
   const results = await Promise.all(subscriptions.map(async (doc) => {
     try {
-      await webpush.sendNotification(toWebPushSubscription(doc), json, { TTL: ttl, urgency });
+      const provider = clean(doc.pushProvider).toLowerCase();
+      const pushToken = clean(doc.pushToken);
+      if (provider === 'expo' || pushToken) {
+        const response = await axios.post(EXPO_PUSH_ENDPOINT, {
+          to: normalizeExpoPushToken(pushToken),
+          title: clean(payload?.title || 'Movyo'),
+          body: clean(payload?.body),
+          sound: 'default',
+          priority: urgency === 'high' ? 'high' : 'default',
+          channelId: 'movyo-operacional',
+          ttl,
+          data: {
+            ...(payload?.data && typeof payload.data === 'object' ? payload.data : {}),
+            status: payload?.status || payload?.data?.status || '',
+            tag: payload?.tag || '',
+          },
+        }, {
+          timeout: Number(process.env.EXPO_PUSH_TIMEOUT_MS || 10000),
+          headers: {
+            Accept: 'application/json',
+            'Accept-Encoding': 'gzip, deflate',
+            'Content-Type': 'application/json',
+          },
+        });
+        const ticket = Array.isArray(response?.data?.data) ? response.data.data[0] : response?.data?.data;
+        if (ticket?.status === 'error') {
+          const error = new Error(ticket?.message || 'Expo Push recusou a notificacao.');
+          error.pushCode = ticket?.details?.error || 'EXPO_PUSH_ERROR';
+          throw error;
+        }
+      } else {
+        if (!config.ok) {
+          return { ok: false, id: doc._id, reason: 'VAPID_NAO_CONFIGURADO', provider: 'web' };
+        }
+        await webpush.sendNotification(toWebPushSubscription(doc), json, { TTL: ttl, urgency });
+      }
       await markSuccess(doc);
-      return { ok: true, id: doc._id };
+      return { ok: true, id: doc._id, provider: provider || 'web' };
     } catch (error) {
       const failure = await markFailure(doc, error);
       console.warn(`🔕 Falha Web Push restaurante=${restId} status=${failure.statusCode || 'n/a'}:`, trimError(error));
@@ -229,10 +329,16 @@ async function sendToRestaurant(restauranteId, payload, options = {}) {
 
   const enviados = results.filter((item) => item.ok).length;
   const desativados = results.filter((item) => item.desativado).length;
+  const nativeEnviados = results.filter((item) => item.ok && item.provider === 'expo').length;
+  const webEnviados = results.filter((item) => item.ok && item.provider !== 'expo').length;
+  const vapidAusente = results.length > 0 && results.every((item) => item.reason === 'VAPID_NAO_CONFIGURADO');
   return {
     ok: enviados > 0,
+    reason: vapidAusente ? 'VAPID_NAO_CONFIGURADO' : undefined,
     total: subscriptions.length,
     enviados,
+    nativeEnviados,
+    webEnviados,
     falhas: subscriptions.length - enviados,
     desativados,
   };
@@ -243,7 +349,15 @@ function normalizeStatus(status) {
 }
 
 function formatMoney(value) {
-  const number = Number(String(value ?? 0).replace(',', '.'));
+  let normalized = String(value ?? 0).trim().replace(/\s/g, '').replace(/R\$/gi, '');
+  if (normalized.includes(',') && normalized.includes('.')) {
+    normalized = normalized.lastIndexOf(',') > normalized.lastIndexOf('.')
+      ? normalized.replace(/\./g, '').replace(',', '.')
+      : normalized.replace(/,/g, '');
+  } else if (normalized.includes(',')) {
+    normalized = normalized.replace(',', '.');
+  }
+  const number = Number(normalized);
   if (!Number.isFinite(number)) return '';
   return number.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -256,24 +370,8 @@ function restauranteIdOfPedido(pedido) {
   return normalizeRestauranteId(pedido?.restauranteId || pedido?.restaurante);
 }
 
-const DEFAULT_TIME_ZONE = clean(process.env.MOVYO_TIMEZONE || process.env.MOVYO_OPERATIONAL_TIMEZONE || 'America/Sao_Paulo') || 'America/Sao_Paulo';
-
 function formatTimeBR(value) {
-  if (!value) return '';
-  if (typeof value === 'string') {
-    const text = value.trim();
-    const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(text);
-    const mysqlLocal = text.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
-    if (mysqlLocal && !hasTimezone) return `${mysqlLocal[4]}:${mysqlLocal[5]}`;
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleTimeString('pt-BR', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: DEFAULT_TIME_ZONE,
-  });
+  return value ? formatOperationalTimeBR(value) : '';
 }
 
 function buildPedidoEmProducaoPayload(pedido = {}) {
@@ -349,10 +447,17 @@ function buildCaixaFechadoPayload(caixa = {}) {
   const caixaId = clean(caixa._id || caixa.id);
   const operador = clean(caixa.operadorNome || caixa?.operador?.nome || 'Operador');
   const hora = formatTimeBR(caixa.fechadoEm || new Date());
+  const valorFinal = formatMoney(
+    caixa.saldoFinalInformado ?? caixa.totalEsperadoDinheiro ?? caixa.totalVendas ?? 0
+  );
+  const totalVendas = formatMoney(caixa.totalVendas ?? 0);
+  const bodyParts = [`${operador} fechou o caixa${hora ? ` às ${hora}` : ''}.`];
+  bodyParts.push(`Valor final: R$ ${valorFinal}.`);
+  if (totalVendas !== valorFinal) bodyParts.push(`Vendas: R$ ${totalVendas}.`);
 
   return {
     title: 'Caixa fechado na Movyo',
-    body: `${operador} fechou o caixa${hora ? ` as ${hora}` : ''}.`,
+    body: bodyParts.join(' '),
     tag: `caixa-fechado-${caixaId || 'movyo'}`,
     renotify: false,
     status: 'caixa_fechado',
@@ -361,6 +466,9 @@ function buildCaixaFechadoPayload(caixa = {}) {
       screen: 'Home',
       caixaId,
       status: 'caixa_fechado',
+      saldoFinalInformado: Number(caixa.saldoFinalInformado ?? 0),
+      totalEsperadoDinheiro: Number(caixa.totalEsperadoDinheiro ?? 0),
+      totalVendas: Number(caixa.totalVendas ?? 0),
     },
   };
 }
@@ -389,7 +497,10 @@ async function getRestaurantStatus(restauranteId) {
   const restId = normalizeRestauranteId(restauranteId);
   const subscriptions = await PushSubscription.find({ restauranteId: restId }).lean();
   return {
-    configured: !!getConfig().publicKey && !!getConfig().privateKey,
+    configured: (!!getConfig().publicKey && !!getConfig().privateKey)
+      || subscriptions.some((item) => clean(item.pushToken)),
+    webConfigured: !!getConfig().publicKey && !!getConfig().privateKey,
+    nativeConfigured: subscriptions.some((item) => clean(item.pushToken) && item.ativo !== false),
     total: subscriptions.length,
     ativas: subscriptions.filter((item) => item.ativo !== false).length,
     plataformas: [...new Set(subscriptions.filter((item) => item.ativo !== false).map((item) => item.plataforma).filter(Boolean))],
@@ -405,7 +516,9 @@ module.exports = {
   isConfigured,
   normalizeSubscription,
   saveSubscription,
+  saveNativeSubscription,
   removeSubscription,
+  removeNativeSubscription,
   sendToRestaurant,
   buildPedidoEmProducaoPayload,
   notifyPedidoEmProducao,

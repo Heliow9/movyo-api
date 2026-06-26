@@ -14,6 +14,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { criarRecipient } = require("../services/criarRecipientPagarme");
 const { resumoCobrancaRestaurante, gerarPixMensalidade: gerarPixMensalidadeSaas } = require("../services/saasBillingService");
+const { getPlanSummary, planHasFeature } = require("../utils/planRules");
 const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
@@ -42,17 +43,6 @@ function sanitizeConfiguracoesPayload(body) {
   delete clean.senha;
   delete clean.email;
   delete clean.cnpj;
-
-  // 99Food/Open Delivery fica sob responsabilidade do painel SaaS/suporte Movyo.
-  // O desktop do restaurante pode visualizar o status, mas não altera APP ID, Secret,
-  // token de webhook ou ambiente para evitar quebra de pedidos e vazamento de credenciais.
-  delete clean.food99Status;
-  delete clean.food99MerchantId;
-  delete clean.food99WebhookToken;
-  delete clean.food99ClientId;
-  delete clean.food99ClientSecret;
-  delete clean.food99BaseUrl;
-  delete clean.food99;
 
   return clean;
 }
@@ -117,7 +107,8 @@ async function ensureSlugDisponivel(slug, restauranteIdAtual) {
 }
 
 function buildPublicPaymentFlags(restaurante) {
-  const mpConectado = !!restaurante?.mercadoPago?.conectado;
+  const canOnlinePayments = planHasFeature(restaurante, "onlinePayments");
+  const mpConectado = canOnlinePayments && !!restaurante?.mercadoPago?.conectado;
   const pagamentoCartaoAtivo = !!restaurante?.pagamentoCartaoAtivo && mpConectado;
   const taxaCartaoCreditoAvistaPercent = Number(restaurante?.taxaCartaoCreditoAvistaPercent || 3.8);
 
@@ -256,7 +247,11 @@ module.exports = {
       }
 
       const token = gerarToken(restaurante._id, restaurante.sessaoVersao || 1);
-      return res.status(200).json({ token, restaurante });
+      const restaurantePublico =
+        typeof restaurante.toObject === "function" ? restaurante.toObject() : { ...restaurante };
+      delete restaurantePublico.senha;
+      restaurantePublico.planoInfo = getPlanSummary(restaurantePublico);
+      return res.status(200).json({ token, restaurante: restaurantePublico });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ mensagem: "Erro ao fazer login." });
@@ -333,7 +328,6 @@ module.exports = {
                 horariosFuncionamento, tempoMedioEntregaMin, tempoAutoCancelamentoVitrineMin, maxPedidosPorEntregador, pedidosPorEntregador,
                 anotaaiStatus, anotaaiUrl, anotaaiIdentificador, anotaaiToken,
                 ifoodStatus, ifoodIdentificador, ifoodPrecisaConfirmacao, ifoodIgnorarPronto, ifood,
-                food99Status, food99MerchantId, food99WebhookToken, food99ClientId, food99ClientSecret, food99BaseUrl, food99,
                 localizacao, statusBot, ativo, mensagensPersonalizadas, chavePix, recipient_id,
                 mercadoPago, pagamentoCartaoAtivo, taxaCartaoCreditoAvistaPercent,
                 taxaConvenienciaPix, descontoMensalidadePercentual, valorMensalidadeCustomizado, garcons,
@@ -381,21 +375,6 @@ module.exports = {
         ifoodPrecisaConfirmacao: restaurante.ifoodPrecisaConfirmacao === 1 || restaurante.ifoodPrecisaConfirmacao === true,
         ifoodIgnorarPronto: restaurante.ifoodIgnorarPronto === 1 || restaurante.ifoodIgnorarPronto === true,
         ifood: parse(restaurante.ifood, {}),
-        food99Status: restaurante.food99Status === 1 || restaurante.food99Status === true,
-        food99MerchantId: restaurante.food99MerchantId || "",
-        food99WebhookConfigurado: !!restaurante.food99WebhookToken,
-        food99ClientIdConfigurado: !!restaurante.food99ClientId,
-        food99ClientSecretConfigurado: !!restaurante.food99ClientSecret,
-        food99BaseUrlConfigurado: !!restaurante.food99BaseUrl,
-        food99: (() => {
-          const cfg = parse(restaurante.food99, {});
-          return {
-            valoresEmCentavos: cfg?.valoresEmCentavos === true || cfg?.valoresEmCentavos === 1 || String(cfg?.valoresEmCentavos || '').toLowerCase() === 'true',
-            appShopId: cfg?.appShopId || cfg?.app_shop_id || "",
-            lojaNome: cfg?.lojaNome || cfg?.storeName || cfg?.nomeLoja || "",
-            ambiente: cfg?.ambiente || cfg?.environment || "",
-          };
-        })(),
         localizacao: parse(restaurante.localizacao, null),
         statusBot: parse(restaurante.statusBot, {}),
         ativo: restaurante.ativo !== 0 && restaurante.ativo !== false,
@@ -419,6 +398,7 @@ module.exports = {
         updatedAt: restaurante.updated_at || null,
       };
 
+      payload.planoInfo = getPlanSummary(payload);
       payload.assinaturaCobranca = await resumoCobrancaRestaurante(payload).catch(() => null);
       perfilCache.set(restauranteId, { ts: Date.now(), payload });
       return res.json(payload);
@@ -506,6 +486,9 @@ module.exports = {
           "taxaCartaoCreditoAvistaPercent",
           "mercadoPago.conectado",
           "ativo",
+          "plano",
+          "statusAssinatura",
+          "dataFimPlano",
 
           // ✅ novos campos
           "tempoMedioEntregaMin",
@@ -515,6 +498,10 @@ module.exports = {
 
       if (!restaurante || !restaurante.ativo) {
         return res.status(404).json({ erro: "Restaurante não encontrado ou inativo." });
+      }
+
+      if (!planHasFeature(restaurante, "digitalMenu")) {
+        return res.status(403).json({ erro: "Cardapio digital indisponivel no plano atual." });
       }
 
       const { mpConectado, pagamentoCartaoAtivo, taxaCartaoCreditoAvistaPercent } =
@@ -588,7 +575,6 @@ module.exports = {
         return res.status(404).json({ mensagem: "Restaurante não encontrado." });
       }
 
-      perfilCache.delete(String(restauranteId));
       return res.status(200).json({
         mensagem: "Configurações atualizadas com sucesso.",
         restaurante,
@@ -631,6 +617,10 @@ module.exports = {
 
       if (!restaurante) {
         return res.status(404).json({ erro: "Restaurante não encontrado.", slug: slugLimpo });
+      }
+
+      if (!planHasFeature(restaurante, "digitalMenu")) {
+        return res.status(403).json({ erro: "Cardapio digital indisponivel no plano atual." });
       }
 
       const nome = String(restaurante.nome || "Restaurante").trim();
@@ -818,6 +808,10 @@ module.exports = {
       const restaurante = await Restaurante.findById(mesa.restauranteId);
       if (!restaurante || !restaurante.ativo) {
         return res.status(404).json({ erro: "Restaurante não encontrado ou inativo." });
+      }
+
+      if (!planHasFeature(restaurante, "digitalMenu")) {
+        return res.status(403).json({ erro: "Cardapio digital indisponivel no plano atual." });
       }
 
       const categorias = await CategoriaProduto.find({

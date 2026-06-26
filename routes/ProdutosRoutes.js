@@ -3,6 +3,7 @@ const express = require("express");
 const controller = require("../controllers/produtoController");
 const authRestaurante = require("../middlewares/authRestaurante");
 const matchRestaurante = require("../middlewares/requireRestaurantMatch");
+const { requirePlanFeature } = require("../middlewares/requirePlanFeature");
 
 const router = express.Router();
 
@@ -19,11 +20,11 @@ router.post("/duplicar/:id", authRestaurante, matchRestaurante, controller.dupli
 router.put("/:id/ativar", authRestaurante, matchRestaurante, controller.ativarProduto);
 router.put("/:id/desativar", authRestaurante, matchRestaurante, controller.desativarProduto);
 
-router.put("/:id/destaque", authRestaurante, matchRestaurante, controller.setProdutoDestaque);
-router.put("/:id/vitrine", authRestaurante, matchRestaurante, controller.setProdutoAtivoVitrine);
+router.put("/:id/destaque", authRestaurante, matchRestaurante, requirePlanFeature("digitalMenu"), controller.setProdutoDestaque);
+router.put("/:id/vitrine", authRestaurante, matchRestaurante, requirePlanFeature("digitalMenu"), controller.setProdutoAtivoVitrine);
 
 // ✅ NOVO: imprime na cozinha
-router.put("/:id/imprime-cozinha", authRestaurante, matchRestaurante, controller.setProdutoImprimeCozinha);
+router.put("/:id/imprime-cozinha", authRestaurante, matchRestaurante, requirePlanFeature("autoPrint"), controller.setProdutoImprimeCozinha);
 
 // CRUD
 router.post("/", authRestaurante, matchRestaurante, controller.criarProduto);

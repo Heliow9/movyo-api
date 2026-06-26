@@ -4,6 +4,7 @@ const router = express.Router();
 const restauranteController = require("../controllers/restauranteController");
 const authRestaurante = require("../middlewares/authRestaurante");
 const rateLimitPublico = require("../middlewares/rateLimitPublico");
+const { requirePlanFeature } = require("../middlewares/requirePlanFeature");
 
 const {
   criarPedido,
@@ -52,7 +53,7 @@ router.get("/horario/:id", restauranteController.horarioPublico);
 router.get("/og/:slug", rateLimitPublico({ prefix: "og-restaurante", max: 120 }), restauranteController.ogRestaurante);
 
 // pagamento cartão
-router.patch("/pagamento-cartao", authRestaurante, restauranteController.togglePagamentoCartao);
+router.patch("/pagamento-cartao", authRestaurante, requirePlanFeature("onlinePayments"), restauranteController.togglePagamentoCartao);
 
 // pedido publico
 router.post("/pedido", rateLimitPublico({ prefix: "checkout-restaurantes", max: 25 }), criarPedido);

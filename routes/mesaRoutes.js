@@ -4,6 +4,7 @@ const router = express.Router();
 const mesaController = require("../controllers/mesaController");
 const authRestaurante = require("../middlewares/authRestaurante");
 const matchRestaurante = require("../middlewares/requireRestaurantMatch");
+const { requirePlanFeature } = require("../middlewares/requirePlanFeature");
 
 // =====================
 // Público (QR) - fixas primeiro
@@ -40,7 +41,7 @@ router.post("/:mesaId/pagamento", authRestaurante, matchRestaurante, mesaControl
  * - gera um QR para um valor
  * - consulta status (recomendado consultar por paymentId)
  */
-router.post("/:mesaId/pix", authRestaurante, matchRestaurante, mesaController.gerarPixMesaPainel);
+router.post("/:mesaId/pix", authRestaurante, matchRestaurante, requirePlanFeature("onlinePayments"), mesaController.gerarPixMesaPainel);
 
 // ✅ opção simples: consulta o "pix pendente mais recente" daquele pedido
 router.get("/:mesaId/pix/status", authRestaurante, matchRestaurante, mesaController.statusPixMesaPainel);
@@ -50,6 +51,6 @@ router.get("/:mesaId/pix/:paymentId/status", authRestaurante, matchRestaurante, 
 
 router.post("/:mesaId/fechar", authRestaurante, matchRestaurante, mesaController.fecharMesaPainel);
 
-router.post("/:mesaId/pix/enviar-whatsapp", authRestaurante, matchRestaurante, mesaController.enviarPixWhatsappMesaPainel);
+router.post("/:mesaId/pix/enviar-whatsapp", authRestaurante, matchRestaurante, requirePlanFeature("whatsappBot"), mesaController.enviarPixWhatsappMesaPainel);
 
 module.exports = router;

@@ -1,6 +1,7 @@
 const CaixaSessao = require('../models/CaixaSessao');
 const CaixaMovimento = require('../models/CaixaMovimento');
 const { queryWithRetry } = require('../lib/mysqlRetry');
+const { formatOperationalDateISO } = require('../utils/operationalDateTime');
 
 const toNum = (v) => {
   if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
@@ -28,9 +29,7 @@ function normalizeFormaPagamento(v='') {
 function dataOperacionalDoCaixa(caixa) {
   const direta = String(caixa?.dataOperacional || '').slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}$/.test(direta)) return direta;
-  const d = new Date(caixa?.abertoEm || Date.now());
-  if (Number.isNaN(d.getTime())) return '';
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  return formatOperationalDateISO(caixa?.abertoEm || new Date());
 }
 
 async function getCaixaAberto(restauranteId) {

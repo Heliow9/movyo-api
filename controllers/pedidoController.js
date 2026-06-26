@@ -1,10 +1,9 @@
-// controllers/pedidoController.js
+﻿// controllers/pedidoController.js
 const mongoose = require("../lib/mongoId");
 const { pool } = require("../db/mysql");
 const { queryWithRetry } = require("../lib/mysqlRetry");
 const crypto = require("crypto");
 const { MercadoPagoConfig, Payment } = require("mercadopago");
-const axios = require("axios");
 
 const Pedido = require("../models/Pedido");
 const Cliente = require("../models/Cliente");
@@ -18,60 +17,12 @@ const { enviarMensagem } = require("../utils/bot");
 const { todayYmd } = require("../utils/operationalDate");
 const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
 const { cancelarPedidoComAuditoria } = require("../services/pedidoCancelamentoService");
+const { planHasFeature } = require("../utils/planRules");
 
 const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
 
 function idString(value) {
   return String(value?._id || value?.id || value || "");
-}
-
-const ENTREGADOR_ONLINE_TTL_MS = Number(process.env.ENTREGADOR_ONLINE_TTL_MS || 2 * 60 * 1000);
-const ENTREGA_ACEITE_TIMEOUT_MS = Number(process.env.ENTREGA_ACEITE_TIMEOUT_MS || 180 * 1000);
-const ENTREGA_ALERT_INTERVAL_MS = Number(process.env.ENTREGA_ALERT_INTERVAL_MS || 15 * 1000);
-const timeoutsDirecionamentoPedidos = new Map();
-
-function criarSolicitacaoEntregaId() {
-  return crypto.randomBytes(8).toString("hex");
-}
-
-function limparTimeoutDirecionamento(pedidoId) {
-  const key = idString(pedidoId);
-  const timer = timeoutsDirecionamentoPedidos.get(key);
-  if (timer) clearTimeout(timer);
-  timeoutsDirecionamentoPedidos.delete(key);
-}
-
-function normalizarTextoStatus(value) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
-
-function boolOnline(value) {
-  const v = normalizarTextoStatus(value);
-  return value === true || value === 1 || v === "true" || v === "online" || v === "disponivel";
-}
-
-function entregadorAtualizadoMs(entregador = {}) {
-  const raw =
-    entregador?.localizacao?.atualizadoEm ||
-    entregador?.localizacao?.updatedAt ||
-    entregador?.atualizadoEm ||
-    entregador?.updatedAt ||
-    entregador?.updated_at;
-  const ms = raw ? new Date(raw).getTime() : NaN;
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function entregadorOnlineParaDirecionamento(entregador = {}) {
-  const statusConta = normalizarTextoStatus(entregador?.statusConta || "ativo");
-  if (["bloqueado", "block", "blocked", "inativo", "disabled"].includes(statusConta)) return false;
-  if (!boolOnline(entregador?.status) || !boolOnline(entregador?.disponivel)) return false;
-  const atualizadoMs = entregadorAtualizadoMs(entregador);
-  if (!atualizadoMs) return false;
-  return Date.now() - atualizadoMs <= ENTREGADOR_ONLINE_TTL_MS;
 }
 
 async function obterLimitePedidosPorEntregador(restauranteId) {
@@ -88,146 +39,6 @@ async function contarEntregasAtivas(entregadorId, pedidoIdIgnorar = null) {
   };
   if (pedidoIdIgnorar) filtro._id = { $ne: pedidoIdIgnorar };
   return Pedido.countDocuments(filtro);
-}
-
-
-function pedidoNumeroCurto(pedido = {}) {
-  return pedido?.numeroPedido || pedido?.numero || idString(pedido?._id || pedido?.id).slice(-6);
-}
-
-function pedidoToPlain(pedido) {
-  return pedido && typeof pedido.toObject === "function" ? pedido.toObject() : { ...(pedido || {}) };
-}
-
-function entregadorPublico(entregador = {}) {
-  if (!entregador) return null;
-  return {
-    _id: idString(entregador._id || entregador.id),
-    id: idString(entregador._id || entregador.id),
-    nome: entregador.nome,
-    email: entregador.email,
-    localizacao: entregador.localizacao || null,
-  };
-}
-
-function montarPedidoPayloadEntrega(pedido, entregador = null, extra = {}) {
-  const plain = pedidoToPlain(pedido);
-  const entregadorPayload = entregador ? entregadorPublico(entregador) : plain.entregador;
-  return {
-    ...plain,
-    _id: idString(plain._id || plain.id),
-    id: idString(plain._id || plain.id),
-    entregador: entregadorPayload || null,
-    tempoAceiteSegundos: Math.ceil(ENTREGA_ACEITE_TIMEOUT_MS / 1000),
-    alertaIntervaloSegundos: Math.ceil(ENTREGA_ALERT_INTERVAL_MS / 1000),
-    ...extra,
-  };
-}
-
-function adicionarHistoricoEntrega(pedido, evento = {}) {
-  const lista = Array.isArray(pedido.historicoEntregadores) ? pedido.historicoEntregadores : [];
-  pedido.historicoEntregadores = [
-    ...lista.slice(-20),
-    {
-      ...evento,
-      em: evento.em || new Date().toISOString(),
-    },
-  ];
-}
-
-async function enviarPushPedidoEntregador(entregador, pedidoPayload) {
-  const token = entregador?.expoPushToken;
-  if (!token || !String(token).startsWith("ExponentPushToken")) return;
-
-  try {
-    await axios.post(
-      "https://exp.host/--/api/v2/push/send",
-      {
-        to: token,
-        sound: "default",
-        title: "Nova entrega direcionada",
-        body: `Pedido #${pedidoNumeroCurto(pedidoPayload)} aguardando aceite`,
-        priority: "high",
-        ttl: Math.ceil(ENTREGA_ACEITE_TIMEOUT_MS / 1000),
-        channelId: "pedidos-urgentes",
-        data: {
-          type: "pedidoDirecionado",
-          pedidoId: idString(pedidoPayload?._id || pedidoPayload?.id),
-          entregadorSolicitacaoId: pedidoPayload?.entregadorSolicitacaoId || "",
-          expiraEm: pedidoPayload?.entregadorAceiteExpiraEm || pedidoPayload?.entregadorSolicitacao?.expiraEm || null,
-        },
-      },
-      { timeout: 8000 }
-    );
-  } catch (error) {
-    console.warn("Push entregador falhou:", error?.response?.data || error?.message || error);
-  }
-}
-
-async function liberarPedidoParaNovoDirecionamento({ pedido, entregadorId, motivo, tipo = "recusado", io, restauranteId }) {
-  if (!pedido) return null;
-  const agora = new Date();
-  const entregadorAnterior = idString(entregadorId || pedido.entregador);
-  const solicitacaoId = pedido.entregadorSolicitacaoId || pedido.entregadorSolicitacao?.id || "";
-
-  pedido.status = "em_entrega";
-  pedido.entregador = null;
-  pedido.statusEntrega = tipo === "timeout" ? "nao_aceito" : "recusado_entregador";
-  pedido.entregadorRecusadoEm = agora;
-  pedido.entregadorRecusaMotivo = motivo || (tipo === "timeout" ? "Tempo de aceite esgotado." : "Pedido recusado pelo entregador.");
-  pedido.entregadorSolicitacaoId = null;
-  pedido.entregadorSolicitacao = null;
-  pedido.entregadorAceiteExpiraEm = null;
-  pedido.statusAtualizadoEm = agora;
-  if (!pedido.emEntregaEm) pedido.emEntregaEm = agora;
-  adicionarHistoricoEntrega(pedido, {
-    tipo,
-    entregadorId: entregadorAnterior,
-    solicitacaoId,
-    motivo: pedido.entregadorRecusaMotivo,
-  });
-
-  await pedido.save();
-  limparTimeoutDirecionamento(pedido._id || pedido.id);
-
-  const payload = montarPedidoPayloadEntrega(pedido, null, {
-    entregadorAnterior,
-    motivo: pedido.entregadorRecusaMotivo,
-    tipo,
-  });
-  const roomRestaurante = restauranteId || idString(pedido.restaurante);
-  if (io && roomRestaurante) {
-    io.to(`restaurante-${roomRestaurante}`).emit("pedidoRecusado", payload);
-    io.to(`restaurante-${roomRestaurante}`).emit("pedidoNaoAceito", payload);
-    io.to(`restaurante-${roomRestaurante}`).emit("pedidoAtualizado", payload);
-  }
-  if (io && entregadorAnterior) {
-    io.to(`entregador-${entregadorAnterior}`).emit("pedidoSolicitacaoEncerrada", payload);
-    io.to(`entregador-${entregadorAnterior}`).emit("pedidoSolicitacaoExpirada", payload);
-  }
-  return payload;
-}
-
-async function expirarSolicitacaoEntrega({ pedidoId, entregadorId, solicitacaoId, io, restauranteId }) {
-  try {
-    const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return null;
-    const mesmoEntregador = idString(pedido.entregador) === idString(entregadorId);
-    const mesmaSolicitacao = !solicitacaoId || idString(pedido.entregadorSolicitacaoId) === idString(solicitacaoId);
-    if (pedido.status === "aguardando_resposta" && mesmoEntregador && mesmaSolicitacao) {
-      return liberarPedidoParaNovoDirecionamento({
-        pedido,
-        entregadorId,
-        motivo: "Motorista não aceitou em até 180 segundos.",
-        tipo: "timeout",
-        io,
-        restauranteId,
-      });
-    }
-  } catch (error) {
-    console.warn("Timeout ao aguardar resposta do entregador:", error?.message || error);
-  }
-  return null;
 }
 
 /* =========================================================
@@ -261,9 +72,6 @@ function rowToPedidoLean(row = {}) {
   pedido.pagamentos = parseJsonSafe(row.pagamentos, []);
   pedido.pagamento = parseJsonSafe(row.pagamento, null);
   pedido.pedidoOriginalSnapshot = parseJsonSafe(row.pedidoOriginalSnapshot, null);
-  pedido.externalPayload = parseJsonSafe(row.externalPayload, null);
-  pedido.taxaMarketplace = Number(row.taxaMarketplace ?? 0) || 0;
-  pedido.valorRepasse = Number(row.valorRepasse ?? 0) || 0;
   // Normaliza aliases do MySQL para os nomes usados pelos clientes.
   pedido.createdAt = row.createdAt || row.created_at || row.criadoEm || null;
   pedido.updatedAt = row.updatedAt || row.updated_at || row.statusAtualizadoEm || null;
@@ -285,9 +93,8 @@ const pedidosListCountCache = new Map();
 const PEDIDOS_LIST_COLUMNS = `
   id, numeroPedido, restaurante, cliente, entregador, mesaId, mesaNumero, nomeCliente,
   telefoneCliente, enderecoCliente, itens, total, taxaEntrega, formaPagamento, status,
-  statusPagamento, origem, canalVenda, marketplace, externalOrderId, externalMerchantId,
-  externalStatus, externalPayload, taxaMarketplace, valorRepasse, observacao, pagamento, pagamentos,
-  descontoValor, valorDesconto, totalBruto, valorPago, valorPendente, mpPaymentId, garcomId, garcomNome, recebidoPor,
+  statusPagamento, origem, observacao, pagamento, pagamentos, descontoValor, valorDesconto,
+  totalBruto, valorPago, valorPendente, mpPaymentId, garcomId, garcomNome, recebidoPor,
   recebidoPorNome, fechadoPor, fechadoPorNome, criadoPor, criadoPorNome, criadoEm, pagoEm,
   aceitoEm, emProducaoEm, emEntregaEm, statusAtualizadoEm, entregueEm, canceladoEm,
   motivoCancelamento, cancelamentoTipo, valorCancelado, estornoStatus, estornoValor, estornoEm,
@@ -949,6 +756,24 @@ const criarPedido = async (req, res) => {
       return res.status(404).json({ message: "Restaurante nÃ£o encontrado." });
     }
 
+    const isPedidoPublico = !isOrigemBalcao(origem);
+    const isEntregaPublica = isPedidoPublico && (
+      origem.includes("delivery") ||
+      origem.includes("entrega") ||
+      !!enderecoCliente ||
+      Number(taxaEntrega || req.body.taxaEntrega || 0) > 0 ||
+      latitudeCliente != null ||
+      longitudeCliente != null
+    );
+
+    if (isPedidoPublico && !planHasFeature(restauranteDoc, "digitalMenu")) {
+      return res.status(403).json({ message: "Cardapio digital indisponivel no plano atual." });
+    }
+
+    if (isEntregaPublica && !planHasFeature(restauranteDoc, "delivery")) {
+      return res.status(403).json({ message: "Delivery indisponivel no plano atual." });
+    }
+
     const mpConectado =
       !!restauranteDoc.mercadoPago?.conectado && !!restauranteDoc.mercadoPago?.accessToken;
 
@@ -1009,8 +834,6 @@ const criarPedido = async (req, res) => {
     if (!numeroPedido) {
       const prefixos = {
         ifood: "IF",
-        "99food": "99F",
-        food99: "99F",
         balcao: "BK",
         bot: "BT",
         vitrine: "BT",
@@ -1040,6 +863,9 @@ const criarPedido = async (req, res) => {
     // 4) Cria pedido base
     // =========================
     const { isPix, isCard } = normalizeFormaPagamento(formadePagamento);
+    if ((isPix || isCard) && !planHasFeature(restauranteDoc, "onlinePayments")) {
+      return res.status(403).json({ message: "PIX e cartao no cardapio estao indisponiveis no plano atual." });
+    }
     const formaRelatorio = formaPagamentoRelatorio(formadePagamento);
     const isBalcao = isOrigemBalcao(origem);
 
@@ -1115,8 +941,6 @@ const criarPedido = async (req, res) => {
       latitudeCliente,
       longitudeCliente,
       origem,
-      canalVenda: origem === "99food" || origem === "food99" ? "marketplace" : origem,
-      marketplace: origem === "99food" || origem === "food99" ? "99food" : (origem === "ifood" ? "ifood" : ""),
 
       status: statusInicial,
 
@@ -1735,22 +1559,13 @@ const enviarParaEntregador = async (req, res) => {
     if (restauranteAutenticado && restauranteId !== restauranteAutenticado) {
       return res.status(403).json({ erro: "Pedido pertence a outro restaurante." });
     }
-
     const entregador = await Entregador.findById(idEntregador);
     if (!entregador) {
       return res.status(404).json({ erro: "Entregador nao encontrado" });
     }
 
-    const entregadorRestauranteId = idString(entregador.restaurante || entregador.restauranteId);
-    if (entregadorRestauranteId !== restauranteId) {
+    if (idString(entregador.restaurante) !== restauranteId) {
       return res.status(403).json({ erro: "Entregador pertence a outro restaurante." });
-    }
-
-    if (!entregadorOnlineParaDirecionamento(entregador)) {
-      return res.status(409).json({
-        erro: "Este entregador não está online no momento.",
-        detalhe: "Direcionamento permitido apenas para entregadores com disponibilidade ativa e GPS atualizado nos últimos 2 minutos.",
-      });
     }
 
     const limite = await obterLimitePedidosPorEntregador(restauranteId);
@@ -1763,67 +1578,23 @@ const enviarParaEntregador = async (req, res) => {
       });
     }
 
-    const agora = new Date();
-    const expiraEm = new Date(agora.getTime() + ENTREGA_ACEITE_TIMEOUT_MS);
-    const solicitacaoId = criarSolicitacaoEntregaId();
-
-    limparTimeoutDirecionamento(idPedido);
     pedido.entregador = idEntregador;
     pedido.status = "aguardando_resposta";
-    pedido.statusEntrega = "aguardando_aceite";
-    pedido.statusAtualizadoEm = agora;
-    pedido.direcionadoEm = agora;
-    pedido.entregadorSolicitacaoId = solicitacaoId;
-    pedido.entregadorAceiteExpiraEm = expiraEm;
-    pedido.entregadorRecusadoEm = null;
-    pedido.entregadorRecusaMotivo = null;
-    pedido.entregadorSolicitacao = {
-      id: solicitacaoId,
-      entregadorId: idString(idEntregador),
-      entregadorNome: entregador.nome,
-      enviadoEm: agora.toISOString(),
-      expiraEm: expiraEm.toISOString(),
-      tempoAceiteSegundos: Math.ceil(ENTREGA_ACEITE_TIMEOUT_MS / 1000),
-      alertaIntervaloSegundos: Math.ceil(ENTREGA_ALERT_INTERVAL_MS / 1000),
-    };
-    adicionarHistoricoEntrega(pedido, {
-      tipo: "direcionado",
-      entregadorId: idString(idEntregador),
-      entregadorNome: entregador.nome,
-      solicitacaoId,
-    });
+    pedido.statusAtualizadoEm = new Date();
     await pedido.save();
 
-    const pedidoPayload = montarPedidoPayloadEntrega(pedido, entregador);
-
-    req.io?.to(`entregador-${idEntregador}`).emit("pedidoRecebido", pedidoPayload);
-    req.io?.to(`entregador-${idEntregador}`).emit("pedidoDirecionado", pedidoPayload);
-    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoEnviado", pedidoPayload);
-    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedidoPayload);
-    enviarPushPedidoEntregador(entregador, pedidoPayload);
-
-    const timeout = setTimeout(() => {
-      expirarSolicitacaoEntrega({
-        pedidoId: idPedido,
-        entregadorId: idEntregador,
-        solicitacaoId,
-        io: req.io,
-        restauranteId,
-      });
-    }, ENTREGA_ACEITE_TIMEOUT_MS);
-    if (typeof timeout.unref === "function") timeout.unref();
-    timeoutsDirecionamentoPedidos.set(idString(idPedido), timeout);
-
-    console.log(`Pedido ${idPedido} direcionado para entregador ${idEntregador}`);
+    req.io?.to(`entregador-${idEntregador}`).emit("pedidoRecebido", pedido);
+    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoEnviado", pedido);
+    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
+    console.log(`Pedido ${idPedido} enviado para entregador ${idEntregador}`);
 
     res.status(200).json({
       sucesso: true,
-      mensagem: "Pedido direcionado para o entregador",
-      pedido: pedidoPayload,
-      entregador: entregadorPublico(entregador),
+      mensagem: "Pedido enviado para o entregador",
+      pedido,
+      entregador: { _id: idEntregador, nome: entregador.nome, email: entregador.email },
       limite,
       entregasAtivas: ativas + 1,
-      tempoAceiteSegundos: Math.ceil(ENTREGA_ACEITE_TIMEOUT_MS / 1000),
     });
   } catch (err) {
     console.error("Erro ao enviar pedido:", err);
@@ -1831,108 +1602,6 @@ const enviarParaEntregador = async (req, res) => {
   }
 };
 
-const aceitarPedidoEntregador = async (req, res) => {
-  const { pedidoId } = req.params;
-  const entregadorId = idString(req.userId || req.body?.entregadorId);
-
-  try {
-    if (!pedidoId || !entregadorId) return res.status(400).json({ erro: "Pedido e entregador são obrigatórios." });
-    const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ erro: "Pedido não encontrado." });
-
-    if (idString(pedido.entregador) !== entregadorId || pedido.status !== "aguardando_resposta") {
-      return res.status(409).json({ erro: "Esta solicitação não está mais disponível para aceite." });
-    }
-
-    const expiraMs = pedido.entregadorAceiteExpiraEm ? new Date(pedido.entregadorAceiteExpiraEm).getTime() : 0;
-    if (expiraMs && Date.now() > expiraMs) {
-      const payloadExpirado = await liberarPedidoParaNovoDirecionamento({
-        pedido,
-        entregadorId,
-        motivo: "Motorista não aceitou em até 180 segundos.",
-        tipo: "timeout",
-        io: req.io,
-        restauranteId: idString(pedido.restaurante),
-      });
-      return res.status(409).json({ erro: "Tempo de aceite esgotado.", pedido: payloadExpirado });
-    }
-
-    const agora = new Date();
-    pedido.status = "em_rota";
-    pedido.statusEntrega = "aceito";
-    pedido.aceitoEm = agora;
-    pedido.entregadorAceitoEm = agora;
-    pedido.statusAtualizadoEm = agora;
-    pedido.entregadorSolicitacao = null;
-    pedido.entregadorAceiteExpiraEm = null;
-    adicionarHistoricoEntrega(pedido, {
-      tipo: "aceito",
-      entregadorId,
-      solicitacaoId: pedido.entregadorSolicitacaoId || "",
-    });
-    pedido.entregadorSolicitacaoId = null;
-    await pedido.save();
-    limparTimeoutDirecionamento(pedidoId);
-
-    const entregador = await Entregador.findById(entregadorId).lean().catch(() => null);
-    const payload = montarPedidoPayloadEntrega(pedido, entregador);
-    req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAceito", payload);
-    req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", payload);
-    req.io?.to(`entregador-${entregadorId}`).emit("pedidoAceito", payload);
-
-    return res.json({ sucesso: true, mensagem: "Pedido aceito pelo entregador.", pedido: payload });
-  } catch (error) {
-    console.error("Erro ao aceitar pedido pelo entregador:", error);
-    return res.status(500).json({ erro: "Erro ao aceitar pedido.", detalhes: error.message });
-  }
-};
-
-const recusarPedidoEntregador = async (req, res) => {
-  const { pedidoId } = req.params;
-  const entregadorId = idString(req.userId || req.body?.entregadorId);
-  const motivo = req.body?.motivo || "Pedido recusado pelo entregador.";
-  const tipo = req.body?.tipo === "timeout" ? "timeout" : "recusado";
-
-  try {
-    if (!pedidoId || !entregadorId) return res.status(400).json({ erro: "Pedido e entregador são obrigatórios." });
-    const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ erro: "Pedido não encontrado." });
-
-    if (idString(pedido.entregador) !== entregadorId || pedido.status !== "aguardando_resposta") {
-      return res.status(409).json({ erro: "Esta solicitação não está mais aguardando resposta." });
-    }
-
-    const payload = await liberarPedidoParaNovoDirecionamento({
-      pedido,
-      entregadorId,
-      motivo,
-      tipo,
-      io: req.io,
-      restauranteId: idString(pedido.restaurante),
-    });
-
-    return res.json({ sucesso: true, mensagem: tipo === "timeout" ? "Solicitação expirada." : "Pedido recusado pelo entregador.", pedido: payload });
-  } catch (error) {
-    console.error("Erro ao recusar pedido pelo entregador:", error);
-    return res.status(500).json({ erro: "Erro ao recusar pedido.", detalhes: error.message });
-  }
-};
-
-const obterPedidoEntregador = async (req, res) => {
-  const { pedidoId } = req.params;
-  const entregadorId = idString(req.userId || req.query?.entregadorId);
-  try {
-    const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return res.status(404).json({ erro: "Pedido não encontrado." });
-    if (idString(pedido.entregador) !== entregadorId) {
-      return res.status(403).json({ erro: "Pedido não está direcionado para este entregador." });
-    }
-    const entregador = await Entregador.findById(entregadorId).lean().catch(() => null);
-    return res.json({ pedido: montarPedidoPayloadEntrega(pedido, entregador) });
-  } catch (error) {
-    return res.status(500).json({ erro: "Erro ao buscar pedido.", detalhes: error.message });
-  }
-};
 /* =========================================================
    CLIENTE
 ========================================================= */
@@ -3097,9 +2766,6 @@ module.exports = {
   criarPedido,
   listarPedidosPorRestaurante,
   enviarParaEntregador,
-  aceitarPedidoEntregador,
-  recusarPedidoEntregador,
-  obterPedidoEntregador,
   buscarClientePorTelefone,
   criarOuAtualizarCliente,
   listarPedidosDoCliente,

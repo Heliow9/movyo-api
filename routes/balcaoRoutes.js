@@ -4,6 +4,7 @@ const router = express.Router();
 const balcaoController = require("../controllers/balcaoController");
 const authRestaurante = require("../middlewares/authRestaurante");
 const matchRestaurante = require("../middlewares/requireRestaurantMatch");
+const { requirePlanFeature } = require("../middlewares/requirePlanFeature");
 router.use(authRestaurante, matchRestaurante);
 
 // =====================
@@ -26,7 +27,7 @@ router.post("/:pedidoId/itens", balcaoController.adicionarItensBalcao);
 router.post("/:pedidoId/pagamento", balcaoController.registrarPagamentoBalcao);
 
 // pix parcial: gera QR por valor
-router.post("/:pedidoId/pix", balcaoController.gerarPixBalcao);
+router.post("/:pedidoId/pix", requirePlanFeature("onlinePayments"), balcaoController.gerarPixBalcao);
 
 // status pix: pega o pendente mais recente
 router.get("/:pedidoId/pix/status", balcaoController.statusPixBalcao);
@@ -38,6 +39,6 @@ router.get("/:pedidoId/pix/:paymentId/status", balcaoController.statusPixBalcao)
 router.post("/:pedidoId/fechar", balcaoController.fecharPedidoBalcao);
 
 // enviar pix (copia/cola + QR) via bot no WhatsApp
-router.post("/:pedidoId/pix/enviar-whatsapp", balcaoController.enviarPixWhatsappBalcao);
+router.post("/:pedidoId/pix/enviar-whatsapp", requirePlanFeature("whatsappBot"), balcaoController.enviarPixWhatsappBalcao);
 
 module.exports = router;

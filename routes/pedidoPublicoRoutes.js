@@ -1,5 +1,7 @@
 const express = require('express');
 const Pedido = require('../models/Pedido');
+const Restaurante = require('../models/Restaurante');
+const { planHasFeature } = require('../utils/planRules');
 
 module.exports = (io) => {
   const router = express.Router();
@@ -15,6 +17,12 @@ router.get('/acompanhar/:token', async (req, res) => {
 
     if (pedido.status === 'entregue' || Date.now() > pedido.linkEntrega.expiracao) {
       return res.status(410).send('Link expirado ou entrega concluída.');
+    }
+
+    const restauranteId = pedido.restaurante || pedido.restauranteId;
+    const restaurante = restauranteId ? await Restaurante.findById(restauranteId).lean() : null;
+    if (restaurante && !planHasFeature(restaurante, 'deliveryManagement')) {
+      return res.status(403).send('Acompanhamento de entrega indisponivel no plano atual.');
     }
 
 

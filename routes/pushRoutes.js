@@ -4,7 +4,9 @@ const {
   getPublicKey,
   isConfigured,
   saveSubscription,
+  saveNativeSubscription,
   removeSubscription,
+  removeNativeSubscription,
   sendToRestaurant,
   getRestaurantStatus,
 } = require('../services/webPushService');
@@ -65,6 +67,47 @@ router.post('/subscribe', async (req, res) => {
   }
 });
 
+router.post('/subscribe/native', async (req, res) => {
+  try {
+    const tokenRestauranteId = String(req.restauranteId || '');
+    const bodyRestauranteId = req.body?.restauranteId ? String(req.body.restauranteId) : tokenRestauranteId;
+    if (!tokenRestauranteId || bodyRestauranteId !== tokenRestauranteId) {
+      return res.status(403).json({
+        ok: false,
+        code: 'RESTAURANTE_MISMATCH',
+        message: 'O token push nao pertence ao restaurante autenticado.',
+      });
+    }
+
+    const doc = await saveNativeSubscription({
+      restauranteId: tokenRestauranteId,
+      usuarioId: req.userId || req.user?._id || req.user?.id,
+      role: req.role || req.user?.role,
+      pushToken: req.body?.pushToken || req.body?.expoPushToken,
+      plataforma: req.body?.plataforma,
+      deviceId: req.body?.deviceId,
+      userAgent: req.body?.userAgent || req.headers['user-agent'],
+    });
+
+    return res.status(201).json({
+      ok: true,
+      subscriptionId: doc._id,
+      restauranteId: doc.restauranteId,
+      plataforma: doc.plataforma,
+      provider: doc.pushProvider,
+      ativo: doc.ativo,
+      syncedAt: doc.ultimaSincronizacaoEm,
+    });
+  } catch (error) {
+    console.error('Erro ao salvar token push nativo:', error?.message || error);
+    return res.status(error?.status || 500).json({
+      ok: false,
+      code: error?.code || 'NATIVE_PUSH_SUBSCRIPTION_SAVE_FAILED',
+      message: error?.message || 'Erro ao salvar token push nativo.',
+    });
+  }
+});
+
 router.delete('/subscribe', async (req, res) => {
   try {
     const endpoint = req.body?.endpoint || req.body?.subscription?.endpoint;
@@ -73,6 +116,24 @@ router.delete('/subscribe', async (req, res) => {
     return res.json({ ok: true, removed });
   } catch (error) {
     return res.status(error?.status || 500).json({ ok: false, message: error?.message || 'Erro ao remover inscrição push.' });
+  }
+});
+
+router.delete('/subscribe/native', async (req, res) => {
+  try {
+    const pushToken = req.body?.pushToken || req.body?.expoPushToken;
+    if (!pushToken) return res.status(400).json({ ok: false, message: 'pushToken e obrigatorio.' });
+    const removed = await removeNativeSubscription({
+      restauranteId: req.restauranteId,
+      pushToken,
+    });
+    return res.json({ ok: true, removed });
+  } catch (error) {
+    return res.status(error?.status || 500).json({
+      ok: false,
+      code: error?.code,
+      message: error?.message || 'Erro ao remover token push nativo.',
+    });
   }
 });
 

@@ -22,14 +22,16 @@ const apiMonitor = require('../utils/apiMonitor');
 const AuditLog = require('../models/AuditLog');
 const { registrarAuditoria } = require('../utils/audit');
 const { cancelarPlanoComEstornoProporcional } = require('../services/saasBillingService');
+const { recalcularCaixa } = require('../services/caixaService');
+const { getPlanSummary, normalizePlanCode } = require('../utils/planRules');
 
 const PLANOS_PADRAO = [
-  { codigo:'free', nome:'Free', valorMensal:0, ordem:1, descricao:'Plano gratuito inicial para novos restaurantes.', recursos:['Cadastro inicial','Teste controlado','Recursos limitados'] },
-  { codigo:'starter-mobile', nome:'Start Mobile', valorMensal:69.90, ordem:2, descricao:'Gestão completa pelo celular.', recursos:['Dashboard mobile','Produtos e categorias','Mesas','Caixa','Balcão','2 garçons'] },
-  { codigo:'essencial', nome:'Essencial', valorMensal:129.90, ordem:3, descricao:'Operação profissional com desktop e caixa.', recursos:['Tudo do Start Mobile','Sistema Desktop','Controle de caixa','Relatórios avançados','Até 3 acessos'] },
-  { codigo:'professional', nome:'Professional', valorMensal:199.90, ordem:4, descricao:'Gestão completa com entregas e app motorista.', recursos:['Tudo do Essencial','App Motorista/Entregador','Gestão de entregadores','Cozinha integrada','Suporte prioritário'] },
-  { codigo:'premium', nome:'Premium', valorMensal:299.90, ordem:5, descricao:'Todas as funcionalidades comerciais liberadas.', recursos:['Todas as funcionalidades','Dashboard executivo','Relatórios corporativos','Prioridade máxima'] },
-  { codigo:'full', nome:'Full SaaS Admin', valorMensal:0, ordem:6, descricao:'Plano interno administrativo sem limitações.', recursos:['Sem limites','Administração SaaS','Demonstrações','Homologação','Suporte interno'] }
+  { codigo:'free', nome:'Teste gratis', valorMensal:0, valorAnualMensal:0, ordem:1, descricao:'7 dias gratis com recursos do plano Profissional liberados temporariamente.', recursos:['Teste por 7 dias','Recursos do Profissional durante o teste','Sem taxa de implantacao'] },
+  { codigo:'starter-mobile', nome:'Start Mobile', valorMensal:69.90, valorAnualMensal:59.90, ordem:2, descricao:'Operacao essencial pelo Movyo Hub para mesas, balcao e caixa.', recursos:['App Movyo Hub','Gestao de mesas e comandas','Pedidos no balcao','Frente de caixa','Abertura e fechamento de caixa','1 usuario garcom','Visao basica das vendas'] },
+  { codigo:'essencial', nome:'Essencial', valorMensal:129.90, valorAnualMensal:109.90, ordem:3, descricao:'Tudo do Start Mobile com cardapio digital, delivery, desktop, pagamentos e relatorios de vendas.', recursos:['Tudo do Start Mobile','Cardapio digital personalizado','Vitrine propria sem comissao','Delivery, balcao e mesas','Movyo Desktop','PIX e cartao no cardapio','Impressao automatica','Relatorios de vendas'] },
+  { codigo:'professional', nome:'Profissional', valorMensal:179.90, valorAnualMensal:149.90, ordem:4, descricao:'Automacao comercial com WhatsApp, estoque, receitas, producao e relatorios avancados.', recursos:['Tudo do Essencial','Robo no WhatsApp','Recuperador de vendas','Programa de fidelidade','Controle de estoque','Receitas e baixa automatica','Tela de producao','Relatorios avancados'] },
+  { codigo:'premium', nome:'Premium', valorMensal:229.90, valorAnualMensal:194.90, ordem:5, descricao:'Suite completa com entregas, indicadores, auditoria, relatorios gerenciais e prioridade.', recursos:['Tudo do Profissional','App motorista/entregador','Gestao completa das entregas','Indicadores em tempo real','Auditoria de operadores','Relatorios gerenciais completos','Usuarios ilimitados','Atendimento prioritario'] },
+  { codigo:'full', nome:'Full SaaS Admin', valorMensal:0, valorAnualMensal:0, ordem:6, descricao:'Plano interno administrativo sem limitações.', recursos:['Sem limites','Administração SaaS','Demonstrações','Homologação','Suporte interno'] }
 ];
 
 function signAdmin(payload){ return jwt.sign(payload, process.env.JWT_SECRET || 'movyo-dev-secret', { expiresIn:'8h' }); }
@@ -43,25 +45,13 @@ function publicAdmin(a={}){
 }
 
 async function ensureAdminInicial(){
-  // Se já existe qualquer administrador SaaS cadastrado, o login normal não pode
-  // depender das variáveis de seed. Elas só são necessárias para criar o primeiro admin.
-  const totalAdmins = await AdminSaas.countDocuments({});
-
   if (ADMIN_INICIAL_EMAIL) {
     const existing = await AdminSaas.findOne({ email: ADMIN_INICIAL_EMAIL });
     if (existing) return existing;
   }
-
-  if (totalAdmins > 0) {
-    // Ambiente já inicializado. Não tenta criar admin automaticamente e não bloqueia o login.
-    // Retorna um admin existente para manter o /seed-admin compatível.
-    return AdminSaas.findOne({});
-  }
-
   if (!ADMIN_INICIAL_EMAIL || !ADMIN_INICIAL_SENHA) {
     throw new Error('Configure SAAS_ADMIN_INICIAL_EMAIL e SAAS_ADMIN_INICIAL_SENHA para criar o primeiro administrador.');
   }
-
   const senhaHash = await bcrypt.hash(ADMIN_INICIAL_SENHA, 10);
   return AdminSaas.create({
     nome: 'Helio Desenvolvimento',
@@ -84,7 +74,7 @@ function parseLocalDateInput(v, endOfDay=false){
   return isNaN(d.getTime()) ? null : d;
 }
 function parseDate(v){ return parseLocalDateInput(v, false); }
-function normalizePlano(v){ return String(v || 'free').trim().toLowerCase(); }
+function normalizePlano(v){ return normalizePlanCode(v || 'free'); }
 function isPlanoFree(plano){ return normalizePlano(plano) === 'free'; }
 function prazoPlanoDias(plano, fallback=30){ return isPlanoFree(plano) ? 7 : Number(fallback || 30); }
 function statusPadraoPlano(plano, informado){ return informado || (isPlanoFree(plano) ? 'teste' : 'ativo'); }
@@ -165,10 +155,28 @@ function num(v){ return Number(v || 0); }
 function docId(v){ return String(v?._id || v?.id || v || ''); }
 function belongsToRestaurante(doc, rid){ return String(doc.restaurante || doc.restauranteId || doc.restaurante_id || '') === String(rid); }
 
-async function ensurePlanosPadrao(){
+function simpleText(value){
+  return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+function planoPrecisaSincronizar(existing={}, oficial={}){
+  const codigo = oficial.codigo;
+  const recursosText = simpleText((Array.isArray(existing.recursos) ? existing.recursos : []).join(' '));
+  if (existing.valorAnualMensal == null) return true;
+  if (codigo === 'professional' && Number(existing.valorMensal || 0) === 199.90) return true;
+  if (codigo === 'premium' && Number(existing.valorMensal || 0) === 299.90) return true;
+  if (codigo === 'professional' && simpleText(existing.nome) === 'professional') return true;
+  return (codigo === 'starter-mobile' && recursosText.includes('ate 2 garcons'))
+    || (codigo === 'professional' && (recursosText.includes('app motorista') || recursosText.includes('rastreamento por link')))
+    || (codigo === 'premium' && recursosText.includes('funcionalidades futuras'))
+    || (codigo === 'essencial' && recursosText.includes('relatorios avancados'));
+}
+async function ensurePlanosPadrao({ force = false } = {}){
   for (const p of PLANOS_PADRAO) {
     const existing = await PlanoSaas.findOne({ codigo:p.codigo });
-    if (!existing) await PlanoSaas.create(p);
+    if (existing) {
+      if (force || planoPrecisaSincronizar(existing, p)) await PlanoSaas.findByIdAndUpdate(existing._id || existing.id, { $set:p });
+    }
+    else await PlanoSaas.create(p);
   }
 }
 
@@ -183,6 +191,7 @@ function publicRestaurante(r={}){
     dataInicioPlano: o.dataInicioPlano || null,
     dataFimPlano: o.dataFimPlano || null,
     sessaoVersao: Number(o.sessaoVersao || 1),
+    planoInfo: getPlanSummary(o),
   };
 }
 
@@ -236,13 +245,28 @@ function isDocInRange(doc, inicio, fim, fields){
 function caixaSessaoIntersectsPeriodo(c, inicio, fim){
   if (!c) return false;
   const aberto = parseLocalDateInput(c.abertoEm || c.createdAt || c.dataOperacional, false);
-  const fechado = parseLocalDateInput(c.fechadoEm, true);
   const dataOperacional = parseLocalDateInput(c.dataOperacional, false);
-  if (aberto && !isNaN(aberto.getTime())) {
-    const fimCaixa = fechado && !isNaN(fechado.getTime()) ? fechado : new Date(8640000000000000);
-    return aberto <= fim && fimCaixa >= inicio;
+  if (dataOperacional && dataOperacional >= inicio && dataOperacional <= fim) return true;
+
+  const status = String(c.status || '').trim().toLowerCase();
+  if (status === 'aberto') {
+    const agora = new Date();
+    return agora >= inicio && agora <= fim && (!aberto || aberto <= fim);
   }
-  return !!dataOperacional && dataOperacional >= inicio && dataOperacional <= fim;
+
+  return !!aberto && aberto >= inicio && aberto <= fim;
+}
+async function recalcularCaixasAbertos(caixas=[]){
+  return Promise.all((caixas || []).map(async (caixa) => {
+    if (String(caixa?.status || '').toLowerCase() !== 'aberto') return caixa;
+    try {
+      const atualizado = await recalcularCaixa(docId(caixa));
+      return atualizado && typeof atualizado.toObject === 'function' ? atualizado.toObject() : (atualizado || caixa);
+    } catch (error) {
+      console.warn('saas.recalcularCaixaAberto:', docId(caixa), error?.message || error);
+      return caixa;
+    }
+  }));
 }
 function caixaSessaoLabel(c){
   const id = docId(c);
@@ -377,7 +401,7 @@ module.exports = {
       return res.json({ ok:true, admin: publicAdmin(admin), mensagem:'Admin SaaS inicial verificado/criado.' });
     }catch(e){ console.error('seed admin saas:',e); return res.status(500).json({ mensagem:'Erro ao criar admin inicial.', erro:e.message }); }
   },
-  async seedPlanos(req,res){ await ensurePlanosPadrao(); res.json({ ok:true, planos: await PlanoSaas.find({}).sort({ordem:1}).lean() }); },
+  async seedPlanos(req,res){ await ensurePlanosPadrao({ force:true }); res.json({ ok:true, planos: await PlanoSaas.find({}).sort({ordem:1}).lean() }); },
   async listarPlanos(req,res){ await ensurePlanosPadrao(); res.json(await PlanoSaas.find({}).sort({ordem:1}).lean()); },
   async salvarPlano(req,res){
     try{
@@ -387,6 +411,7 @@ module.exports = {
         codigo,
         nome: req.body.nome || codigo,
         valorMensal: Number(req.body.valorMensal ?? req.body.preco ?? 0),
+        valorAnualMensal: Number(req.body.valorAnualMensal ?? req.body.valorAnual ?? 0),
         descricao: req.body.descricao || '',
         recursos: Array.isArray(req.body.recursos) ? req.body.recursos : String(req.body.recursos || '').split('\n').map(s=>s.trim()).filter(Boolean),
         ativo: req.body.ativo !== false,
@@ -440,17 +465,10 @@ module.exports = {
   async atualizarRestaurante(req,res){
     try{
       const id = req.params.id;
-      const allowed = ['nome','email','cnpj','telefone','slugIdentificador','enderecoCidade','enderecoBairro','plano','statusAssinatura','dataInicioPlano','dataFimPlano','observacaoPlano','emailCobranca','ativo','sessaoVersao','taxaConvenienciaPix','descontoMensalidadePercentual','valorMensalidadeCustomizado','food99Status','food99MerchantId','food99WebhookToken','food99ClientId','food99ClientSecret','food99BaseUrl','food99'];
+      const allowed = ['nome','email','cnpj','telefone','slugIdentificador','enderecoCidade','enderecoBairro','plano','statusAssinatura','dataInicioPlano','dataFimPlano','observacaoPlano','emailCobranca','ativo','sessaoVersao','taxaConvenienciaPix','descontoMensalidadePercentual','valorMensalidadeCustomizado'];
       const update = {};
       for (const k of allowed) if (Object.prototype.hasOwnProperty.call(req.body,k)) update[k]=req.body[k];
       if(update.plano) update.plano = normalizePlano(update.plano);
-      if(Object.prototype.hasOwnProperty.call(update, 'food99Status')) update.food99Status = boolLike(update.food99Status);
-      ['food99MerchantId','food99WebhookToken','food99ClientId','food99ClientSecret','food99BaseUrl'].forEach((k) => {
-        if (Object.prototype.hasOwnProperty.call(update, k)) update[k] = String(update[k] || '').trim();
-      });
-      if(Object.prototype.hasOwnProperty.call(update, 'food99')) {
-        update.food99 = safeObject(update.food99, {});
-      }
       if(update.dataInicioPlano) update.dataInicioPlano = parseDate(update.dataInicioPlano);
       if(update.dataFimPlano) update.dataFimPlano = parseDate(update.dataFimPlano);
       ['taxaConvenienciaPix','descontoMensalidadePercentual','valorMensalidadeCustomizado'].forEach((k) => {
@@ -859,8 +877,13 @@ module.exports = {
       const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';
       const inicio = startOfDayValue(req.query.dataInicio || req.query.data || new Date());
       const fim = endOfDayValue(req.query.dataFim || req.query.data || new Date());
-      const caixasRaw = await CaixaSessao.find({}).sort({abertoEm:-1}).lean();
-      const caixas = (caixasRaw || []).filter((c) => matchesRestaurante(c, restauranteId) && caixaSessaoIntersectsPeriodo(c, inicio, fim));
+      const [restaurantesRaw, caixasRaw] = await Promise.all([
+        Restaurante.find({}).lean(),
+        CaixaSessao.find({}).sort({abertoEm:-1}).lean()
+      ]);
+      const nomes = restauranteNomeMap(restaurantesRaw);
+      let caixas = (caixasRaw || []).filter((c) => matchesRestaurante(c, restauranteId) && caixaSessaoIntersectsPeriodo(c, inicio, fim));
+      caixas = await recalcularCaixasAbertos(caixas);
       const caixaMap = new Map(caixas.map((c) => [docId(c), c]));
       const caixaIds = Array.from(caixaMap.keys());
       const pedidos = await pedidosPeriodoQuery(restauranteId, inicio, fim, caixaIds);
@@ -872,6 +895,10 @@ module.exports = {
       const porOrigem = {};
       const porDia = {};
       const porCaixa = {};
+      const porHora = {};
+      const porDiaSemana = {};
+      const porRestaurante = new Map();
+      let maiorPedido = 0;
       for (const p of pedidos) {
         if (!isVendaConfirmada(p)) continue;
         const valor = Number(p.total || p.valorTotal || 0);
@@ -886,10 +913,22 @@ module.exports = {
         const origemNorm = String(p.origem || 'nao_informada').toLowerCase();
         const dia = dateOnlyISO(dataVendaPedido(p)) || 'sem_data';
         const caixaLabel = pedidoCaixaLabel(p, caixaMap);
+        const vendaDate = parseLocalDateInput(dataVendaPedido(p), false);
+        const hora = vendaDate ? `${String(vendaDate.getHours()).padStart(2, '0')}:00` : 'sem_hora';
+        const semanaLabel = vendaDate ? ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'][vendaDate.getDay()] : 'sem_data';
+        const rid = String(p.restaurante || p.restauranteId || caixaMap.get(String(p.caixaSessaoId || ''))?.restauranteId || '');
+        if (!porRestaurante.has(rid)) porRestaurante.set(rid, { restauranteId:rid, nome:getRestauranteNome(nomes, rid), pedidos:0, total:0, ticketMedio:0 });
+        const restLinha = porRestaurante.get(rid);
+        restLinha.pedidos += 1;
+        restLinha.total += valor;
+        restLinha.ticketMedio = restLinha.pedidos ? restLinha.total / restLinha.pedidos : 0;
+        maiorPedido = Math.max(maiorPedido, valor);
         porStatus[statusNorm] = (porStatus[statusNorm] || 0) + 1;
         porOrigem[origemNorm] = (porOrigem[origemNorm] || 0) + valor;
         porDia[dia] = (porDia[dia] || 0) + valor;
         porCaixa[caixaLabel] = (porCaixa[caixaLabel] || 0) + valor;
+        porHora[hora] = (porHora[hora] || 0) + valor;
+        porDiaSemana[semanaLabel] = (porDiaSemana[semanaLabel] || 0) + valor;
         for (const item of extractItensPedido(p)) {
           const nome = itemNome(item);
           const qtd = itemQtd(item);
@@ -915,6 +954,10 @@ module.exports = {
         porOrigem,
         porDia,
         porCaixa,
+        porHora,
+        porDiaSemana,
+        porRestaurante: Array.from(porRestaurante.values()).sort((a,b)=>b.total-a.total).slice(0,25),
+        maiorPedido,
         produtosMaisVendidos,
         caixas: caixas.slice(0,80).map(c=>({id:docId(c), restauranteId:c.restauranteId, operadorNome:c.operadorNome, status:c.status, dataOperacional:c.dataOperacional, abertoEm:c.abertoEm, fechadoEm:c.fechadoEm, totalVendas:Number(c.totalVendas||0), totalPedidos:Number(c.totalPedidos||0)})),
         pedidos: pedidos.slice(0,100).map(p=>({ id:docId(p), numeroPedido:p.numeroPedido, cliente:p.nomeCliente, formaPagamento:p.formaPagamento, status:p.status, statusPagamento:p.statusPagamento, total:p.total || p.valorTotal, criadoEm:p.criadoEm || p.created_at, pagoEm:p.pagoEm, caixaSessaoId:p.caixaSessaoId, caixa: pedidoCaixaLabel(p, caixaMap) }))
@@ -992,13 +1035,14 @@ module.exports = {
       const restauranteId = req.query.restauranteId ? String(req.query.restauranteId) : '';
       const inicio = startOfDayValue(req.query.dataInicio || req.query.inicio || req.query.data || new Date());
       const fim = endOfDayValue(req.query.dataFim || req.query.fim || req.query.data || new Date());
-      const [restaurantes, caixasRaw, movimentosRaw] = await Promise.all([
+      const [restaurantes, caixasRaw] = await Promise.all([
         Restaurante.find({}).lean(),
-        CaixaSessao.find({}).sort({abertoEm:-1}).lean(),
-        CaixaMovimento.find({}).sort({data:-1}).lean()
+        CaixaSessao.find({}).sort({abertoEm:-1}).lean()
       ]);
       const nomes = restauranteNomeMap(restaurantes);
-      const caixas = (caixasRaw || []).filter((c) => matchesRestaurante(c, restauranteId) && caixaSessaoIntersectsPeriodo(c, inicio, fim));
+      let caixas = (caixasRaw || []).filter((c) => matchesRestaurante(c, restauranteId) && caixaSessaoIntersectsPeriodo(c, inicio, fim));
+      caixas = await recalcularCaixasAbertos(caixas);
+      const movimentosRaw = await CaixaMovimento.find({}).sort({data:-1}).lean();
       const caixasIds = new Set(caixas.map((c) => docId(c)));
       const movimentos = (movimentosRaw || []).filter((m) => matchesRestaurante(m, restauranteId) && ((m.caixaSessaoId && caixasIds.has(String(m.caixaSessaoId))) || (!m.caixaSessaoId && isDocInRange(m, inicio, fim, ['data','createdAt']))));
       const resumo = {
@@ -1051,6 +1095,9 @@ module.exports = {
           dataOperacional: c.dataOperacional,
           totalVendas: Number(c.totalVendas || 0),
           totalPedidos: Number(c.totalPedidos || 0),
+          saldoInicial: Number(c.saldoInicial || 0),
+          totalEsperadoDinheiro: Number(c.totalEsperadoDinheiro || 0),
+          saldoFinalInformado: c.saldoFinalInformado == null ? null : Number(c.saldoFinalInformado),
           abertoEm: c.abertoEm,
           fechadoEm: c.fechadoEm
         })),
@@ -1232,11 +1279,9 @@ module.exports = {
       const linhas = restaurantes.map((r) => {
         const mp = safeObject(r.mercadoPago);
         const ifood = safeObject(r.ifood);
-        const food99 = safeObject(r.food99);
         const bot = parseStatusBot(r);
         const mercadoPagoConectado = boolLike(mp.conectado) || !!(mp.accessToken || mp.token || mp.access_token);
         const ifoodConectado = boolLike(r.ifoodStatus) || boolLike(ifood.conectado) || !!ifood.accessToken;
-        const food99Conectado = boolLike(r.food99Status) && !!(r.food99MerchantId || food99.appShopId || food99.lojaNome);
         return {
           restauranteId: docId(r),
           nome: r.nome,
@@ -1245,26 +1290,21 @@ module.exports = {
           botLigado: boolLike(bot.ligado),
           botEstado: bot.estado || bot.status || (boolLike(bot.ligado) ? 'ligado' : 'desligado'),
           ifoodConectado,
-          food99Conectado,
           mercadoPagoConectado,
           pagamentoCartaoAtivo: boolLike(r.pagamentoCartaoAtivo, true),
           pushAtivos: pushAtivosPorRestaurante.get(docId(r)) || 0,
           mercadoPagoUserId: mp.userId || null,
-          ifoodMerchantId: ifood.merchantId || ifood.merchant_id || r.ifoodIdentificador || null,
-          food99MerchantId: r.food99MerchantId || null,
-          food99LojaNome: food99.lojaNome || null,
-          food99Ambiente: food99.ambiente || r.food99BaseUrl || null
+          ifoodMerchantId: ifood.merchantId || ifood.merchant_id || r.ifoodIdentificador || null
         };
       });
       const resumo = {
         restaurantes: linhas.length,
         botsLigados: linhas.filter((r) => r.botLigado).length,
         ifoodConectados: linhas.filter((r) => r.ifoodConectado).length,
-        food99Conectados: linhas.filter((r) => r.food99Conectado).length,
         mercadoPagoConectados: linhas.filter((r) => r.mercadoPagoConectado).length,
         cartaoAtivo: linhas.filter((r) => r.pagamentoCartaoAtivo).length,
         pushAtivos: sumValues(linhas, (r) => r.pushAtivos),
-        pendencias: linhas.filter((r) => !r.mercadoPagoConectado || !r.botLigado || !r.pagamentoCartaoAtivo || !r.food99Conectado).length
+        pendencias: linhas.filter((r) => !r.mercadoPagoConectado || !r.botLigado || !r.pagamentoCartaoAtivo).length
       };
       return res.json({
         criterio:'status consolidado de bot, marketplace, pagamentos e push',

@@ -1,5 +1,6 @@
 const authRestaurante = require('../middlewares/authRestaurante');
 const checkPermissao = require('../middlewares/checkPermissao');
+const { requirePlanFeature } = require('../middlewares/requirePlanFeature');
 const express = require('express');
 const router = express.Router();
 const c = require('../controllers/caixaController');
@@ -16,5 +17,5 @@ router.get('/:restauranteId/atual', c.caixaAtual);
 router.post('/:restauranteId/abrir', checkPermissao('abrirCaixa'), c.abrirCaixa);
 router.post('/:restauranteId/movimento', checkPermissao('movimentarCaixa'), c.movimentarCaixa);
 router.post('/:restauranteId/fechar', checkPermissao('fecharCaixa'), c.fecharCaixa);
-router.get('/:restauranteId/relatorios', checkPermissao('visualizarRelatorios'), c.relatorios);
+router.get('/:restauranteId/relatorios', checkPermissao('visualizarRelatorios'), requirePlanFeature('salesReports'), c.relatorios);
 module.exports = router;

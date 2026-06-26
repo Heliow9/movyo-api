@@ -2,6 +2,7 @@
 const jwt = require("jsonwebtoken");
 const Restaurante = require("../models/Restaurante");
 const { resumoCobrancaRestaurante } = require("../services/saasBillingService");
+const { getPlanSummary } = require("../utils/planRules");
 require("dotenv").config();
 
 function extractToken(req) {
@@ -107,7 +108,10 @@ module.exports = async function authRestaurante(req, res, next) {
 
     req.restaurante = restAuth;
     req.plano = restAuth.plano || 'free';
+    req.planoInfo = getPlanSummary(restAuth);
     res.setHeader('X-Movyo-License-Status', 'valid');
+    res.setHeader('X-Movyo-Plan', req.planoInfo.codigo);
+    res.setHeader('X-Movyo-Effective-Plan', req.planoInfo.efetivoCodigo);
     if (restAuth.dataFimPlano) res.setHeader('X-Movyo-License-Expires', new Date(restAuth.dataFimPlano).toISOString());
 
     // =========================

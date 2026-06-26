@@ -4,6 +4,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { createObjectId } = require("../lib/objectId");
 const { queryWithRetry } = require("../lib/mysqlRetry");
+const { getPlanSummary } = require("../utils/planRules");
 
 const DEFAULT_PERMISSOES = {
   verPedidos: true,
@@ -332,7 +333,7 @@ exports.loginGarcom = async (req, res) => {
 
     // ✅ AQUI ESTAVA O BUG: você não trazia mercadoPago.conectado
     const SELECT_LOGIN =
-      "nome slugIdentificador garcons ativo bloqueado mercadoPago.conectado";
+      "nome slugIdentificador garcons ativo bloqueado plano statusAssinatura dataFimPlano sessaoVersao mercadoPago.conectado";
 
     // ✅ modo novo principal: slug + telefone
     if (slugFinal && telFinal) {
@@ -427,6 +428,7 @@ exports.loginGarcom = async (req, res) => {
         statusAssinatura: restaurante.statusAssinatura || 'ativo',
         dataFimPlano: restaurante.dataFimPlano || null,
         sessaoVersao: Number(restaurante.sessaoVersao || 1),
+        planoInfo: getPlanSummary(restaurante),
         mercadoPago: {
           // ✅ AGORA VEM CERTO
           conectado: !!restaurante.mercadoPago?.conectado,
@@ -450,6 +452,7 @@ exports.meApp = async (req, res) => {
     // req.garcomDoc (subdoc), req.user (obj limpo), req.restauranteId
     const garcom = req.user; // já vem limpo e consistente
     const restauranteId = req.restauranteId;
+    const restaurante = req.restaurante || {};
 
     if (!restauranteId || !garcom?._id) {
       return res.status(401).json({ message: "Garçom não autenticado." });
@@ -470,6 +473,10 @@ exports.meApp = async (req, res) => {
         nome: garcom.restauranteNome || null,
         // se você quiser enviar slug aqui, pode usar req.restauranteSlug
         slugIdentificador: req.restauranteSlug || null,
+        plano: restaurante.plano || "free",
+        statusAssinatura: restaurante.statusAssinatura || "ativo",
+        dataFimPlano: restaurante.dataFimPlano || null,
+        planoInfo: getPlanSummary(restaurante),
       },
     });
   } catch (error) {
@@ -479,4 +486,3 @@ exports.meApp = async (req, res) => {
     });
   }
 };
-

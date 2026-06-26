@@ -3,21 +3,25 @@ const express = require('express');
 const router = express.Router();
 const botController = require('../controllers/botController');
 const { enviarMensagem2 } = require('../utils/bot');
+const authRestaurante = require('../middlewares/authRestaurante');
+const { requirePlanFeature } = require('../middlewares/requirePlanFeature');
+
+const requireWhatsappBot = [authRestaurante, requirePlanFeature('whatsappBot')];
 
 // Iniciar Bot
-router.post('/start', botController.startBot);
+router.post('/start', requireWhatsappBot, botController.startBot);
 
 // Verificar Status do Bot
-router.get('/status/:restauranteId', botController.getStatus);
+router.get('/status/:restauranteId', requireWhatsappBot, botController.getStatus);
 
 // Obter QR Code do Bot
-router.get('/qr/:restauranteId', botController.getQrCode);
+router.get('/qr/:restauranteId', requireWhatsappBot, botController.getQrCode);
 
 // Parar Bot
-router.delete('/stop/:restauranteId', botController.stopBot);
+router.delete('/stop/:restauranteId', requireWhatsappBot, botController.stopBot);
 
 // Resetar Sessão do Bot
-router.post('/reset/:restauranteId', botController.resetSession);
+router.post('/reset/:restauranteId', requireWhatsappBot, botController.resetSession);
 
 router.get('/teste-msg', async (req, res) => {
   try {

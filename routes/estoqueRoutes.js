@@ -9,9 +9,11 @@ const relatorios = require("../controllers/estoque/relatorios.controller");
 
 // middleware auth (ajuste o path/nome para o seu)
 const authRestaurante = require("../middlewares/authRestaurante");
+const { requirePlanFeature } = require("../middlewares/requirePlanFeature");
 
 // aplica auth em tudo
 router.use(authRestaurante);
+router.use(requirePlanFeature("inventory"));
 
 /**
  * INSUMOS

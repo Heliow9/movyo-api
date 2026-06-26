@@ -5,6 +5,7 @@ const router = express.Router();
 const authRestaurante = require("../middlewares/authRestaurante");
 const garcomAtivo = require("../middlewares/garcomAtivo");
 const checkPermissao = require("../middlewares/checkPermissao");
+const { requirePlanFeature, requireGarcomSlot } = require("../middlewares/requirePlanFeature");
 
 const garcomController = require("../controllers/garcomController");
 const pedidoController = require("../controllers/pedidoController");
@@ -75,6 +76,7 @@ router.post(
 router.post(
   "/app/mesa/:mesaId/pix",
   checkPermissao("fecharConta"),
+  requirePlanFeature("onlinePayments"),
   mesaController.gerarPixMesaApp
 );
 
@@ -102,9 +104,9 @@ router.get("/app/resumo", checkPermissao("verMesas"), mesaController.resumoHomeA
 router.post("/app/balcao", checkPermissao("adicionarItem"), balcaoController.abrirPedidoBalcao);
 router.post("/app/balcao/:pedidoId/itens", checkPermissao("adicionarItem"), balcaoController.adicionarItensBalcao);
 router.post("/app/balcao/:pedidoId/pagamento", checkPermissao("adicionarItem"), balcaoController.registrarPagamentoBalcao);
-router.post("/app/balcao/:pedidoId/pix", checkPermissao("adicionarItem"), balcaoController.gerarPixBalcao);
+router.post("/app/balcao/:pedidoId/pix", checkPermissao("adicionarItem"), requirePlanFeature("onlinePayments"), balcaoController.gerarPixBalcao);
 router.get("/app/balcao/:pedidoId/pix/status", checkPermissao("adicionarItem"), balcaoController.statusPixBalcao);
-router.post("/app/balcao/:pedidoId/pix/enviar-whatsapp", checkPermissao("adicionarItem"), balcaoController.enviarPixWhatsappBalcao);
+router.post("/app/balcao/:pedidoId/pix/enviar-whatsapp", checkPermissao("adicionarItem"), requirePlanFeature("whatsappBot"), balcaoController.enviarPixWhatsappBalcao);
 
 /* =========================
    ✅ APP: PEDIDOS
@@ -151,7 +153,7 @@ router.use(authRestaurante);
 // });
 
 router.get("/", garcomController.listarGarcons);
-router.post("/", garcomController.criarGarcom);
+router.post("/", requireGarcomSlot, garcomController.criarGarcom);
 router.put("/:garcomId", garcomController.atualizarGarcom);
 router.patch("/:garcomId/toggle", garcomController.toggleAtivo);
 router.delete("/:garcomId", garcomController.removerGarcom);
