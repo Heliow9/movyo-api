@@ -263,6 +263,34 @@ function wasRecentlySent(key) {
   return false;
 }
 
+async function sendExpoPushToken(pushToken, payload = {}) {
+  const token = normalizeExpoPushToken(pushToken);
+  const response = await axios.post(EXPO_PUSH_ENDPOINT, {
+    to: token,
+    title: clean(payload.title || 'Movyo'),
+    body: clean(payload.body),
+    sound: clean(payload.sound || 'default'),
+    priority: clean(payload.priority || 'high'),
+    channelId: clean(payload.channelId || 'movyo-operacional'),
+    categoryId: clean(payload.categoryId || ''),
+    ttl: Math.max(0, Number(payload.ttl ?? 120)),
+    data: payload.data && typeof payload.data === 'object' ? payload.data : {},
+  }, {
+    timeout: Number(process.env.EXPO_PUSH_TIMEOUT_MS || 10000),
+    headers: {
+      Accept: 'application/json',
+      'Accept-Encoding': 'gzip, deflate',
+      'Content-Type': 'application/json',
+    },
+  });
+  const ticket = Array.isArray(response?.data?.data) ? response.data.data[0] : response?.data?.data;
+  if (ticket?.status === 'error') {
+    const error = new Error(ticket?.message || 'Expo Push recusou a notificacao.');
+    error.pushCode = ticket?.details?.error || 'EXPO_PUSH_ERROR';
+    throw error;
+  }
+  return ticket || { status: 'ok' };
+}
 async function sendToRestaurant(restauranteId, payload, options = {}) {
   const restId = normalizeRestauranteId(restauranteId);
   if (!restId) return { ok: false, reason: 'RESTAURANTE_AUSENTE', total: 0, enviados: 0 };
@@ -519,6 +547,7 @@ module.exports = {
   saveNativeSubscription,
   removeSubscription,
   removeNativeSubscription,
+  sendExpoPushToken,
   sendToRestaurant,
   buildPedidoEmProducaoPayload,
   notifyPedidoEmProducao,
