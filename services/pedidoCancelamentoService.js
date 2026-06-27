@@ -18,6 +18,18 @@ function norm(value) {
     .replace(/[\s-]+/g, "_");
 }
 
+const STATUS_CANCELADOS = new Set(["cancelado", "cancelada", "canceled", "cancelled"]);
+const STATUS_FINAIS = new Set(["entregue", "finalizado", "finalizada", "concluido", "concluida"]);
+
+function pedidoJaCancelado(pedido) {
+  return STATUS_CANCELADOS.has(norm(pedido?.status)) || !!pedido?.canceladoEm;
+}
+
+function statusBloqueiaCancelamento(pedido, tipo = "") {
+  if (norm(tipo) === "devolucao_cliente") return false;
+  return STATUS_FINAIS.has(norm(pedido?.status));
+}
+
 function toPlain(doc) {
   return doc && typeof doc.toObject === "function" ? doc.toObject() : { ...(doc || {}) };
 }
@@ -27,9 +39,9 @@ function getPedidoTotalOriginal(pedido) {
   return round2(
     snap.valorTotal ??
       snap.total ??
-      pedido?.valorPago ??
       pedido?.valorTotal ??
       pedido?.total ??
+      pedido?.valorPago ??
       0
   );
 }
@@ -111,6 +123,19 @@ async function cancelarPedidoComAuditoria(pedido, options = {}) {
   const canceladoPor = options.canceladoPor || null;
   const io = options.io || null;
 
+  if (pedidoJaCancelado(pedido) && options.reprocessar !== true) {
+    return {
+      pedido,
+      jaCancelado: true,
+      estorno: {
+        status: pedido.estornoStatus || "nao_aplicavel",
+        valor: round2(pedido.estornoValor || 0),
+        detalhes: pedido.estornoDetalhes || [],
+        erro: pedido.estornoErro || "",
+      },
+    };
+  }
+
   const restauranteId = String(pedido.restaurante?._id || pedido.restaurante || "");
   const restaurante = options.restaurante || await Restaurante.findById(restauranteId).lean();
   const original = toPlain(pedido);
@@ -186,6 +211,14 @@ async function cancelarPedidoComAuditoria(pedido, options = {}) {
       motivo,
       estornoStatus: pedido.estornoStatus,
     });
+
+    const entregadorId = String(pedido.entregador?._id || pedido.entregador || "");
+    if (entregadorId) {
+      io.to(`entregador-${entregadorId}`).emit("pedidoCancelado", {
+        pedidoId: pedido._id || pedido.id,
+        motivo,
+      });
+    }
   }
 
   return { pedido, estorno };
@@ -227,4 +260,7 @@ module.exports = {
   cancelarPedidoComAuditoria,
   cancelarPedidosVitrineExpirados,
   estornarPagamentoMercadoPago,
+  pedidoJaCancelado,
+  statusBloqueiaCancelamento,
+  getPedidoTotalOriginal,
 };

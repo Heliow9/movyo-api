@@ -1,4 +1,4 @@
-﻿// controllers/pedidoController.js
+// controllers/pedidoController.js
 const mongoose = require("../lib/mongoId");
 const { pool } = require("../db/mysql");
 const { queryWithRetry } = require("../lib/mysqlRetry");
@@ -16,10 +16,46 @@ const Frete = require("../models/Frete");
 const { enviarMensagem } = require("../utils/bot");
 const { todayYmd } = require("../utils/operationalDate");
 const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
-const { cancelarPedidoComAuditoria } = require("../services/pedidoCancelamentoService");
+const {
+  cancelarPedidoComAuditoria,
+  pedidoJaCancelado,
+  statusBloqueiaCancelamento,
+} = require("../services/pedidoCancelamentoService");
+const { enviarOferta } = require("../services/deliveryOfferService");
 const { planHasFeature } = require("../utils/planRules");
 
 const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
+
+function garcomPodeCancelarPedido(req) {
+  if (String(req.role || req.user?.role || "").toLowerCase() !== "garcom") return true;
+  const permissoes = req.user?.permissoes || req.permissoes || {};
+  return permissoes.cancelarPedido === true || permissoes.cancelarPedido === "true";
+}
+
+async function liberarMesaAposCancelamento(pedido, restauranteId, io) {
+  const mesaId = pedido?.mesaId;
+  if (!mesaId || !mongoose.Types.ObjectId.isValid(String(mesaId))) return null;
+
+  const mesa = await Mesa.findByIdAndUpdate(
+    mesaId,
+    {
+      $set: {
+        status: "livre",
+        pedidoAtualId: null,
+        pedidoAtualNumero: null,
+        comandaNumero: null,
+        ocupadaDesde: null,
+      },
+    },
+    { new: true }
+  );
+
+  if (io && mesa) {
+    io.to(`restaurante-${restauranteId}`).emit("mesaAtualizada", mesa);
+    io.to(`mesa-${String(mesa._id)}`).emit("mesaAtualizada", mesa);
+  }
+  return mesa;
+}
 
 function idString(value) {
   return String(value?._id || value?.id || value || "");
@@ -72,6 +108,10 @@ function rowToPedidoLean(row = {}) {
   pedido.pagamentos = parseJsonSafe(row.pagamentos, []);
   pedido.pagamento = parseJsonSafe(row.pagamento, null);
   pedido.pedidoOriginalSnapshot = parseJsonSafe(row.pedidoOriginalSnapshot, null);
+  pedido.ofertaEntrega = parseJsonSafe(row.ofertaEntrega, null);
+  pedido.comprovanteEntrega = parseJsonSafe(row.comprovanteEntrega, null);
+  pedido.ocorrenciasEntrega = parseJsonSafe(row.ocorrenciasEntrega, []);
+  pedido.linkEntrega = parseJsonSafe(row.linkEntrega, null);
   // Normaliza aliases do MySQL para os nomes usados pelos clientes.
   pedido.createdAt = row.createdAt || row.created_at || row.criadoEm || null;
   pedido.updatedAt = row.updatedAt || row.updated_at || row.statusAtualizadoEm || null;
@@ -99,7 +139,9 @@ const PEDIDOS_LIST_COLUMNS = `
   aceitoEm, emProducaoEm, emEntregaEm, statusAtualizadoEm, entregueEm, canceladoEm,
   motivoCancelamento, cancelamentoTipo, valorCancelado, estornoStatus, estornoValor, estornoEm,
   estornoErro, pedidoOriginalSnapshot, dataOperacional, caixaSessaoId, operadorCaixaId,
-  operadorCaixaNome, created_at, updated_at
+  operadorCaixaNome, ofertaEntrega, comprovanteEntrega, ocorrenciasEntrega, linkEntrega,
+  distanciaPercorridaKm, tempoEntregaSegundos, valorRecebidoMotorista, latitudeCliente,
+  longitudeCliente, created_at, updated_at
 `;
 
 function getPedidosCountCache(key) {
@@ -1549,56 +1591,34 @@ const marcarItemEntregueCliente = (req, res) =>
 ========================================================= */
 const enviarParaEntregador = async (req, res) => {
   const { idPedido, idEntregador } = req.params;
-
   try {
-    const pedido = await Pedido.findById(idPedido);
-    if (!pedido) return res.status(404).json({ erro: "Pedido nao encontrado" });
-
-    const restauranteId = idString(pedido.restaurante || req.restauranteId || req.user?.restauranteId);
-    const restauranteAutenticado = idString(req.restauranteId || req.user?.restauranteId);
-    if (restauranteAutenticado && restauranteId !== restauranteAutenticado) {
-      return res.status(403).json({ erro: "Pedido pertence a outro restaurante." });
-    }
-    const entregador = await Entregador.findById(idEntregador);
-    if (!entregador) {
-      return res.status(404).json({ erro: "Entregador nao encontrado" });
-    }
-
-    if (idString(entregador.restaurante) !== restauranteId) {
-      return res.status(403).json({ erro: "Entregador pertence a outro restaurante." });
-    }
-
-    const limite = await obterLimitePedidosPorEntregador(restauranteId);
-    const ativas = await contarEntregasAtivas(idEntregador, idPedido);
-    if (ativas >= limite) {
-      return res.status(409).json({
-        erro: `Este entregador ja atingiu o limite de ${limite} entrega(s) ativa(s).`,
-        limite,
-        entregasAtivas: ativas,
-      });
-    }
-
-    pedido.entregador = idEntregador;
-    pedido.status = "aguardando_resposta";
-    pedido.statusAtualizadoEm = new Date();
-    await pedido.save();
-
-    req.io?.to(`entregador-${idEntregador}`).emit("pedidoRecebido", pedido);
-    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoEnviado", pedido);
-    req.io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
-    console.log(`Pedido ${idPedido} enviado para entregador ${idEntregador}`);
-
-    res.status(200).json({
-      sucesso: true,
-      mensagem: "Pedido enviado para o entregador",
-      pedido,
-      entregador: { _id: idEntregador, nome: entregador.nome, email: entregador.email },
-      limite,
-      entregasAtivas: ativas + 1,
+    const result = await enviarOferta({
+      pedidoId: idPedido,
+      entregadorId: idEntregador,
+      restauranteId: req.restauranteId || req.user?.restauranteId,
+      io: req.io,
+      origem: "desktop_http",
     });
-  } catch (err) {
-    console.error("Erro ao enviar pedido:", err);
-    res.status(500).json({ erro: "Erro ao enviar pedido" });
+    return res.status(200).json({
+      sucesso: true,
+      mensagem: "Pedido enviado para o motorista.",
+      pedido: result.pedido,
+      entregador: {
+        _id: idString(result.entregador),
+        nome: result.entregador.nome,
+        email: result.entregador.email,
+      },
+      limite: result.limite,
+      entregasAtivas: result.entregasAtivas,
+      expiraEm: result.pedido.ofertaEntrega?.expiraEm,
+      timeoutSegundos: result.pedido.ofertaEntrega?.timeoutSegundos,
+    });
+  } catch (error) {
+    console.error("Erro ao enviar pedido:", error?.message || error);
+    return res.status(Number(error?.status || 500)).json({
+      erro: error?.message || "Erro ao enviar pedido.",
+      ...(error?.details || {}),
+    });
   }
 };
 
@@ -1696,15 +1716,41 @@ const atualizarStatusPedido = async (req, res) => {
     }
 
     const statusAnterior = pedido.status;
+    const tipoCancelamento = req.body?.tipoCancelamento || req.body?.tipo || "";
+
+    if (pedidoJaCancelado(pedido) && String(status || "").toLowerCase() !== "cancelado") {
+      return res.status(409).json({ erro: "Pedido cancelado não pode ser reaberto por alteração de status." });
+    }
+
     if (String(status || "").toLowerCase() === "cancelado") {
+      if (!garcomPodeCancelarPedido(req)) {
+        return res.status(403).json({
+          code: "PERMISSION_DENIED",
+          erro: "Sem permissão para cancelar pedido.",
+          permissaoNecessaria: "cancelarPedido",
+        });
+      }
+      if (statusBloqueiaCancelamento(pedido, tipoCancelamento)) {
+        return res.status(409).json({
+          erro: `Não é possível cancelar pedido com status '${pedido.status}'.`,
+        });
+      }
+
       const result = await cancelarPedidoComAuditoria(pedido, {
         motivo: req.body?.motivo || "Pedido recusado/cancelado pelo restaurante.",
-        tipo: req.body?.tipoCancelamento || "recusa_restaurante",
-        role: "restaurante",
-        canceladoPor: req.userId || req.restauranteId || null,
+        tipo: tipoCancelamento || "recusa_restaurante",
+        role: String(req.role || req.user?.role || "").toLowerCase() === "garcom" ? "garcom" : "restaurante",
+        canceladoPor: req.garcomId || req.user?._id || req.userId || req.restauranteId || null,
         io: req.io,
       });
-      return res.json({ sucesso: true, pedido: result.pedido, estorno: result.estorno });
+      const mesa = await liberarMesaAposCancelamento(result.pedido, pedidoRestauranteId, req.io);
+      return res.json({
+        sucesso: true,
+        pedido: result.pedido,
+        mesa,
+        estorno: result.estorno,
+        jaCancelado: !!result.jaCancelado,
+      });
     }
 
     pedido.status = status;
@@ -2108,21 +2154,16 @@ const cancelarPedido = async (req, res) => {
       return res.status(403).json({ message: "Pedido nÃ£o pertence a este restaurante." });
     }
 
-    const st = String(pedido.status || "");
     const tipoCancelamento = String(req.body?.tipoCancelamento || req.body?.tipo || "").trim();
-    if (st === "entregue" && tipoCancelamento !== "devolucao_cliente") {
+    if (statusBloqueiaCancelamento(pedido, tipoCancelamento)) {
       return res.status(409).json({
         message: `NÃ£o Ã© possÃ­vel cancelar pedido com status '${pedido.status}'.`,
       });
     }
 
-    if (st === "cancelado") {
-      return res.json({ ok: true, message: "Pedido jÃ¡ estava cancelado.", pedido });
-    }
-
     const motivo = (req.body?.motivo || req.body?.descricao || "").toString().trim() || null;
     const role = req.user?.role === "garcom" ? "garcom" : "restaurante";
-    const canceladoPor = role === "garcom" ? req.user?.garcomId || null : req.userId || null;
+    const canceladoPor = role === "garcom" ? req.garcomId || req.user?._id || null : req.userId || null;
 
     const result = await cancelarPedidoComAuditoria(pedido, {
       motivo: motivo || "Cancelamento do pedido",
@@ -2132,29 +2173,15 @@ const cancelarPedido = async (req, res) => {
       io: req.io,
     });
 
-    let mesaAtualizadaNova = null;
-    const mesaIdNovo = result.pedido?.mesaId;
-    if (mesaIdNovo && mongoose.Types.ObjectId.isValid(String(mesaIdNovo))) {
-      mesaAtualizadaNova = await Mesa.findByIdAndUpdate(
-        mesaIdNovo,
-        {
-          $set: {
-            status: "livre",
-            pedidoAtualId: null,
-            pedidoAtualNumero: null,
-            comandaNumero: null,
-            ocupadaDesde: null,
-          },
-        },
-        { new: true }
-      );
-      if (req.io && mesaAtualizadaNova) {
-        req.io.to(`restaurante-${restauranteId}`).emit("mesaAtualizada", mesaAtualizadaNova);
-        req.io.to(`mesa-${String(mesaAtualizadaNova._id)}`).emit("mesaAtualizada", mesaAtualizadaNova);
-      }
-    }
+    const mesaAtualizadaNova = await liberarMesaAposCancelamento(result.pedido, restauranteId, req.io);
 
-    return res.json({ ok: true, pedido: result.pedido, mesa: mesaAtualizadaNova, estorno: result.estorno });
+    return res.json({
+      ok: true,
+      pedido: result.pedido,
+      mesa: mesaAtualizadaNova,
+      estorno: result.estorno,
+      jaCancelado: !!result.jaCancelado,
+    });
 
     const itensAtuais = Array.isArray(pedido.itens) ? pedido.itens : [];
     if (itensAtuais.length > 0) {
@@ -2266,6 +2293,17 @@ const cancelarItemPedido = async (req, res) => {
     if (["entregue", "cancelado"].includes(st)) {
       return res.status(409).json({
         message: `NÃ£o Ã© possÃ­vel cancelar item com status '${pedido.status}'.`,
+      });
+    }
+
+    const pagamentosConfirmados = (Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [])
+      .some((pagamento) => String(pagamento?.status || "").toLowerCase() === "confirmado");
+    const pedidoJaPago = Number(pedido.valorPago || 0) > 0 ||
+      String(pedido.statusPagamento || "").toLowerCase() === "pago" ||
+      pagamentosConfirmados;
+    if (pedidoJaPago) {
+      return res.status(409).json({
+        message: "Pedido com pagamento confirmado nao permite cancelamento parcial. Cancele o pedido inteiro para processar o estorno corretamente.",
       });
     }
 

@@ -7,6 +7,7 @@ const Restaurante = require("../models/Restaurante");
 
 const { consultarPagamento } = require("../services/mercadoPagoPixService");
 const { processarWebhookMensalidade } = require("../services/saasBillingService");
+const { estornarPagamentoMercadoPago, getPedidoTotalOriginal } = require("../services/pedidoCancelamentoService");
 const { enviarMensagem, estaConectado } = require("../utils/bot");
 const { getCaixaAberto, vincularPedidoAoCaixa, registrarMovimentoVenda, recalcularCaixa } = require("../services/caixaService");
 
@@ -326,6 +327,58 @@ exports.mpWebhook = async (req, res) => {
     const mp = await consultarPagamento({ accessToken, paymentId: paymentIdStr });
     const mpStatus = String(mp?.status || "").toLowerCase();
     const agora = new Date();
+
+    // Um webhook atrasado nunca pode reativar um pedido cancelado. Se o pagamento
+    // foi aprovado depois do cancelamento, tenta o estorno novamente.
+    if (String(pedido.status || "").toLowerCase() === "cancelado" || pedido.canceladoEm) {
+      let estorno = {
+        status: pedido.estornoStatus || "nao_aplicavel",
+        valor: Number(pedido.estornoValor || 0),
+        erro: pedido.estornoErro || "",
+        detalhes: pedido.estornoDetalhes || [],
+      };
+
+      if (isPaidStatus(mpStatus) && estorno.status !== "concluido") {
+        estorno = await estornarPagamentoMercadoPago({
+          pedido,
+          restaurante,
+          motivo: pedido.motivoCancelamento || "Pedido cancelado antes da confirmacao do pagamento.",
+        });
+      } else if (["refunded", "charged_back"].includes(mpStatus)) {
+        estorno = {
+          status: "concluido",
+          valor: getPedidoTotalOriginal(pedido),
+          erro: "",
+          detalhes: pedido.estornoDetalhes || [],
+        };
+      }
+
+      pedido.status = "cancelado";
+      pedido.statusPagamento = estorno.status === "concluido" ? "estornado" : "cancelado";
+      pedido.estornoStatus = estorno.status;
+      pedido.estornoValor = estorno.status === "concluido"
+        ? round2(estorno.valor || getPedidoTotalOriginal(pedido))
+        : Number(pedido.estornoValor || 0);
+      pedido.estornoEm = estorno.status === "concluido" ? (pedido.estornoEm || agora) : pedido.estornoEm;
+      pedido.estornoErro = estorno.erro || "";
+      pedido.estornoDetalhes = estorno.detalhes || [];
+      pedido.pagamentos = (Array.isArray(pedido.pagamentos) ? pedido.pagamentos : []).map((pg) =>
+        String(pg?.mpPaymentId || "") === paymentIdStr
+          ? { ...pg, mpStatus, status: estorno.status === "concluido" ? "estornado" : "cancelado" }
+          : pg
+      );
+      await pedido.save();
+
+      req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+      return res.status(200).json({
+        ok: true,
+        mode: "pedido_cancelado",
+        pedidoId: String(pedido._id),
+        paymentId: paymentIdStr,
+        mpStatus,
+        estornoStatus: pedido.estornoStatus,
+      });
+    }
 
     // tenta localizar pagamento parcial
     const pagamentosArr = Array.isArray(pedido.pagamentos) ? pedido.pagamentos : [];
