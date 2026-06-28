@@ -123,7 +123,13 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
+  maxAge: process.env.UPLOADS_STATIC_MAX_AGE || "7d",
+  etag: true,
+  setHeaders(res) {
+    res.setHeader("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400");
+  },
+}));
 
 // ✅ Compat: troca de senha fora do router /api/restaurantes, para evitar 404 em builds antigos/proxy
 try {
@@ -145,6 +151,7 @@ try {
 app.use("/api/endereco", require("./routes/enderecoRoutes"));
 app.use("/api/enderecos", require("./routes/enderecoRoutes"));
 app.use("/api/restaurantes", require("./routes/restauranteRoutes"));
+app.use("/api/vitrine", require("./routes/vitrineRoutes"));
 app.use("/api/saas", require("./routes/saasRoutes"));
 app.use("/api/auditoria", require("./routes/auditoriaRoutes"));
 app.use("/api/categorias", require("./routes/categoriaProdutoRoutes"));
