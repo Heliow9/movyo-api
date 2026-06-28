@@ -184,7 +184,7 @@ async function buscarRestaurantePorSlug(slug) {
   const [rowsCase] = await queryWithRetry(
     `SELECT ${columns}
        FROM restaurantes
-      WHERE LOWER(slugIdentificador) = LOWER(?) OR LOWER(logoSlug) = LOWER(?)
+      WHERE LOWER(TRIM(slugIdentificador)) = LOWER(?) OR LOWER(TRIM(logoSlug)) = LOWER(?)
       LIMIT 1`,
     [slugLimpo, slugLimpo],
     { label: "vitrine.restaurante.slug_ci" }
@@ -211,12 +211,14 @@ exports.cardapioPorSlug = async (req, res) => {
     const restauranteRow = await buscarRestaurantePorSlug(slug);
     const restaurante = normalizeRestaurante(restauranteRow);
 
-    if (!restaurante || !restaurante.ativo) {
-      return res.status(404).json({ erro: "Restaurante não encontrado ou inativo.", slug });
+    if (!restaurante) {
+      return res.status(404).json({ erro: "Restaurante não encontrado.", slug });
     }
-    if (!planHasFeature(restaurante, "digitalMenu")) {
-      return res.status(403).json({ erro: "Cardapio digital indisponivel no plano atual." });
-    }
+
+    // Compatibilidade com a rota antiga /api/restaurantes/:slug:
+    // a vitrine pública sempre conseguiu carregar restaurante existente mesmo quando
+    // o campo ativo/plano estava inconsistente no cadastro. A rota rápida não deve
+    // derrubar a experiência e forçar fallback por causa dessa divergência.
 
     const [categoriaRows] = await queryWithRetry(
       `SELECT * FROM categorias_produto
