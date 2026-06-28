@@ -14,6 +14,7 @@ const DEFAULT_PERMISSOES = {
   adicionarItem: true,
   fecharConta: false,
   cancelarPedido: false,
+  cancelarSemPinGerente: false,
 };
 
 const normalizarTel = (tel) => (tel ? String(tel).replace(/\D/g, "") : null);

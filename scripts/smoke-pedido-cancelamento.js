@@ -197,9 +197,10 @@ async function run() {
   assert.equal(pedidoCanceladoComPagamentoTardio.estornoValor, 59.9);
 
   console.log("OK cancelamento: regras, valor original, idempotencia e estorno Mercado Pago validados.");
+  process.exit(0);
 }
 
 run().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

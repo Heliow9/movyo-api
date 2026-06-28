@@ -335,6 +335,11 @@ async function calcularTotaisCaixa(caixaId) {
       const f = normalizeFormaPagamento(m.formaPagamento);
       if (totals[f] === undefined) totals.outros += val;
       else totals[f] += val;
+    } else if (tipo === 'cancelamento_pedido' || tipo === 'cancelamento_item') {
+      totals.vendas -= val;
+      const f = normalizeFormaPagamento(m.formaPagamento);
+      if (totals[f] === undefined) totals.outros -= val;
+      else totals[f] -= val;
     }
   }
 
@@ -345,7 +350,7 @@ async function calcularTotaisCaixa(caixaId) {
   totals.credito = round2(Math.max(totals.credito, toNum(pedidoRow.creditoPedidos)));
   totals.debito = round2(Math.max(totals.debito, toNum(pedidoRow.debitoPedidos)));
   totals.online = round2(Math.max(totals.online, toNum(pedidoRow.onlinePedidos)));
-  totals.vendas = round2(Math.max(totals.vendas, totals.vendasPedidos));
+  totals.vendas = round2(Math.max(0, totals.vendas, totals.vendasPedidos));
   return totals;
 }
 
