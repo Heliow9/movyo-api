@@ -136,30 +136,132 @@ function parseJsonSafe(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
+function asMoneyNumber(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  let s = String(value).trim().replace(/\s/g, "").replace(/R\$/gi, "").replace(/[^0-9,.-]/g, "");
+  if (!s || s === "-" || s === "," || s === ".") return 0;
+  if (s.includes(",") && s.includes(".")) {
+    if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else s = s.replace(/,/g, "");
+  } else if (s.includes(",")) {
+    s = s.replace(",", ".");
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function roundMoney(value) {
+  return Math.round((asMoneyNumber(value) + Number.EPSILON) * 100) / 100;
+}
+
+function totalItemPedidoLean(item = {}) {
+  const qtd = Math.max(1, asMoneyNumber(item.quantidade ?? item.qtd ?? item.quantity ?? 1));
+  const total = asMoneyNumber(
+    item.precoTotal ??
+    item.total ??
+    item.valorTotal ??
+    item.subtotal ??
+    item.valorItemTotal
+  );
+  if (total > 0) return total;
+
+  const unit = asMoneyNumber(
+    item.precoUnitario ??
+    item.valorUnitario ??
+    item.preco ??
+    item.valor ??
+    item.price ??
+    item.precoBase
+  );
+  return unit > 0 ? unit * qtd : 0;
+}
+
+function totalItensPedidoLean(itens = []) {
+  return roundMoney(
+    (Array.isArray(itens) ? itens : []).reduce((acc, item) => acc + totalItemPedidoLean(item), 0)
+  );
+}
+
+function garantirTotaisItensPedidoLean(itens = []) {
+  return (Array.isArray(itens) ? itens : []).map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const qtd = Math.max(1, asMoneyNumber(item.quantidade ?? item.qtd ?? item.quantity ?? 1));
+    const total = roundMoney(totalItemPedidoLean(item));
+    const unit = total > 0 ? roundMoney(total / qtd) : roundMoney(item.precoUnitario ?? item.valorUnitario ?? item.preco ?? item.valor ?? 0);
+    return {
+      ...item,
+      quantidade: item.quantidade ?? item.qtd ?? qtd,
+      qtd: item.qtd ?? item.quantidade ?? qtd,
+      precoUnitario: asMoneyNumber(item.precoUnitario) > 0 ? item.precoUnitario : unit,
+      valorUnitario: asMoneyNumber(item.valorUnitario) > 0 ? item.valorUnitario : unit,
+      preco: asMoneyNumber(item.preco) > 0 ? item.preco : unit,
+      valor: asMoneyNumber(item.valor) > 0 ? item.valor : unit,
+      precoTotal: asMoneyNumber(item.precoTotal) > 0 ? item.precoTotal : total,
+      total: asMoneyNumber(item.total) > 0 ? item.total : total,
+      valorTotal: asMoneyNumber(item.valorTotal) > 0 ? item.valorTotal : total,
+      subtotal: asMoneyNumber(item.subtotal) > 0 ? item.subtotal : total,
+    };
+  });
+}
+
+function calcularTotalPedidoLean({ row, itens, snapshot }) {
+  const direto = asMoneyNumber(row.total ?? row.valorTotal ?? row.totalPedido ?? row.valor);
+  if (direto > 0) return roundMoney(direto);
+
+  const brutoSalvo = asMoneyNumber(row.totalBruto);
+  const desconto = Math.min(
+    brutoSalvo,
+    asMoneyNumber(row.descontoValor ?? row.valorDesconto ?? row.desconto)
+  );
+  if (brutoSalvo > 0) return roundMoney(Math.max(0, brutoSalvo - desconto));
+
+  const itensTotal = totalItensPedidoLean(itens);
+  const taxaEntrega = asMoneyNumber(row.taxaEntrega);
+  if (itensTotal + taxaEntrega > 0) {
+    const descontoItens = Math.min(itensTotal + taxaEntrega, asMoneyNumber(row.descontoValor ?? row.valorDesconto ?? row.desconto));
+    return roundMoney(Math.max(0, itensTotal + taxaEntrega - descontoItens));
+  }
+
+  const snapTotal = asMoneyNumber(snapshot?.valorTotal ?? snapshot?.total ?? snapshot?.totalPedido);
+  if (snapTotal > 0) return roundMoney(snapTotal);
+
+  const valorCancelado = asMoneyNumber(row.valorCancelado);
+  if (valorCancelado > 0) return roundMoney(valorCancelado);
+
+  return 0;
+}
+
 function rowToPedidoLean(row = {}) {
   const pedido = { ...row };
   pedido._id = row.id;
   pedido.id = row.id;
-  pedido.valorTotal = Number(row.total ?? row.valorTotal ?? 0) || 0;
-  pedido.total = Number(row.total ?? row.valorTotal ?? 0) || 0;
-  pedido.valorPago = Number(row.valorPago ?? 0) || 0;
-  pedido.valorPendente = Number(row.valorPendente ?? 0) || 0;
-  pedido.valorCancelado = Number(row.valorCancelado ?? 0) || 0;
-  pedido.estornoValor = Number(row.estornoValor ?? 0) || 0;
-  pedido.taxaEntrega = Number(row.taxaEntrega ?? 0) || 0;
-  pedido.descontoValor = Number(row.descontoValor ?? 0) || 0;
-  pedido.valorDesconto = Number(row.valorDesconto ?? 0) || 0;
-  pedido.totalBruto = Number(row.totalBruto ?? 0) || 0;
-  pedido.formadePagamento = row.formaPagamento || row.formadePagamento || "";
-  pedido.formaPagamento = row.formaPagamento || row.formadePagamento || "";
-  pedido.itens = parseJsonSafe(row.itens, []);
+
+  const itens = parseJsonSafe(row.itens, []);
+  const snapshot = parseJsonSafe(row.pedidoOriginalSnapshot, null);
+
+  pedido.itens = garantirTotaisItensPedidoLean(itens);
   pedido.pagamentos = parseJsonSafe(row.pagamentos, []);
   pedido.pagamento = parseJsonSafe(row.pagamento, null);
-  pedido.pedidoOriginalSnapshot = parseJsonSafe(row.pedidoOriginalSnapshot, null);
+  pedido.pedidoOriginalSnapshot = snapshot;
   pedido.ofertaEntrega = parseJsonSafe(row.ofertaEntrega, null);
   pedido.comprovanteEntrega = parseJsonSafe(row.comprovanteEntrega, null);
   pedido.ocorrenciasEntrega = parseJsonSafe(row.ocorrenciasEntrega, []);
   pedido.linkEntrega = parseJsonSafe(row.linkEntrega, null);
+
+  const totalCalculado = calcularTotalPedidoLean({ row, itens: pedido.itens, snapshot });
+  pedido.valorTotal = totalCalculado;
+  pedido.total = totalCalculado;
+  pedido.valorPago = roundMoney(row.valorPago ?? 0);
+  pedido.valorPendente = roundMoney(row.valorPendente ?? 0);
+  pedido.valorCancelado = roundMoney(row.valorCancelado ?? 0);
+  pedido.estornoValor = roundMoney(row.estornoValor ?? 0);
+  pedido.taxaEntrega = roundMoney(row.taxaEntrega ?? 0);
+  pedido.descontoValor = roundMoney(row.descontoValor ?? 0);
+  pedido.valorDesconto = roundMoney(row.valorDesconto ?? 0);
+  pedido.totalBruto = roundMoney(row.totalBruto ?? totalItensPedidoLean(pedido.itens));
+  pedido.formadePagamento = row.formaPagamento || row.formadePagamento || "";
+  pedido.formaPagamento = row.formaPagamento || row.formadePagamento || "";
   // Normaliza aliases do MySQL para os nomes usados pelos clientes.
   pedido.createdAt = row.createdAt || row.created_at || row.criadoEm || null;
   pedido.updatedAt = row.updatedAt || row.updated_at || row.statusAtualizadoEm || null;
