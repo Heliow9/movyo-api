@@ -2,8 +2,6 @@ const axios = require("axios");
 
 const Pedido = require("../models/Pedido");
 const Restaurante = require("../models/Restaurante");
-const CaixaMovimento = require("../models/CaixaMovimento");
-const { recalcularCaixa } = require("./caixaService");
 
 const MP_API = "https://api.mercadopago.com";
 
@@ -48,30 +46,6 @@ function getPedidoTotalOriginal(pedido) {
   );
 }
 
-function getMetodoEstorno(pedido) {
-  const formas = [
-    pedido?.formaPagamento,
-    pedido?.formadePagamento,
-    pedido?.pagamento?.metodo,
-    ...(Array.isArray(pedido?.pagamentos) ? pedido.pagamentos.map((p) => p?.metodo) : []),
-  ].map(norm);
-
-  if (formas.some((forma) => forma.includes("pix"))) return "pix";
-  if (formas.some((forma) => ["cartao", "credito", "debito"].some((tipo) => forma.includes(tipo)))) {
-    return "cartao";
-  }
-  return pedido?.mpPaymentId || getMpPaymentIds(pedido).length ? "mercado_pago" : "nao_aplicavel";
-}
-
-function isPagamentoConfirmado(pedido) {
-  const status = norm(pedido?.statusPagamento || pedido?.pagamento?.status);
-  if (["pago", "paid", "approved", "aprovado", "confirmado", "estornado"].includes(status)) return true;
-  if (Number(pedido?.valorPago || 0) > 0 || pedido?.pagoEm) return true;
-  return (Array.isArray(pedido?.pagamentos) ? pedido.pagamentos : []).some((pagamento) =>
-    ["pago", "paid", "approved", "aprovado", "confirmado"].includes(norm(pagamento?.status || pagamento?.mpStatus))
-  );
-}
-
 function isPagamentoOnline(pedido) {
   const forma = norm(pedido?.formaPagamento || pedido?.formadePagamento);
   const pagamentos = Array.isArray(pedido?.pagamentos) ? pedido.pagamentos : [];
@@ -90,10 +64,6 @@ function getMpPaymentIds(pedido) {
   return [...ids].filter(Boolean);
 }
 
-function temPagamentoMercadoPago(pedido) {
-  return getMpPaymentIds(pedido).length > 0;
-}
-
 function getMpAccessToken(restaurante) {
   let mp = restaurante?.mercadoPago || {};
   if (typeof mp === "string") {
@@ -104,43 +74,13 @@ function getMpAccessToken(restaurante) {
 
 async function estornarPagamentoMercadoPago({ pedido, restaurante, motivo }) {
   const paymentIds = getMpPaymentIds(pedido);
-  const meio = getMetodoEstorno(pedido);
   if (!paymentIds.length) {
-    if (isPagamentoConfirmado(pedido) && meio !== "nao_aplicavel") {
-      return {
-        status: "erro",
-        meio,
-        valor: 0,
-        detalhes: [],
-        erro: `Pagamento ${meio === "pix" ? "PIX" : "online"} confirmado sem identificador Mercado Pago para estorno automatico.`,
-        mensagem: "Cancelamento concluido, mas o estorno exige acao manual.",
-        precisaAcaoManual: true,
-        automatico: false,
-      };
-    }
-    return {
-      status: "nao_aplicavel",
-      meio,
-      valor: 0,
-      detalhes: [],
-      mensagem: "Pedido sem pagamento online confirmado para estornar.",
-      precisaAcaoManual: false,
-      automatico: false,
-    };
+    return { status: "nao_aplicavel", valor: 0, detalhes: [], mensagem: "Pedido sem pagamento Mercado Pago." };
   }
 
   const token = getMpAccessToken(restaurante);
   if (!token) {
-    return {
-      status: "erro",
-      meio,
-      valor: 0,
-      detalhes: [],
-      erro: "Restaurante sem credencial Mercado Pago para estorno.",
-      mensagem: "Cancelamento concluido, mas o estorno exige acao manual.",
-      precisaAcaoManual: true,
-      automatico: false,
-    };
+    return { status: "erro", valor: 0, detalhes: [], erro: "Restaurante sem credencial Mercado Pago para estorno." };
   }
 
   const detalhes = [];
@@ -163,130 +103,17 @@ async function estornarPagamentoMercadoPago({ pedido, restaurante, motivo }) {
     } catch (err) {
       const data = err?.response?.data || {};
       erro = data.message || data.error || err.message;
-      const jaEstornado = /already.*refund|already.*refunded|ja.*estorn|j[aá].*devolvid/i.test(
-        `${erro} ${JSON.stringify(data)}`
-      );
-      if (jaEstornado) {
-        const amount = Number(data.amount || data.transaction_amount || 0);
-        valor += amount;
-        detalhes.push({ paymentId, ok: true, status: "already_refunded", amount: amount || null, motivo });
-      } else {
-        detalhes.push({ paymentId, ok: false, erro, response: data });
-      }
+      detalhes.push({ paymentId, ok: false, erro, response: data });
     }
   }
 
   const falhas = detalhes.filter((d) => !d.ok);
-  const status = falhas.length ? "erro" : "concluido";
   return {
-    status,
-    meio,
+    status: falhas.length ? "erro" : "concluido",
     valor: round2(valor || getPedidoTotalOriginal(pedido)),
     detalhes,
     erro,
-    mensagem: status === "concluido"
-      ? `Estorno ${meio === "pix" ? "via PIX" : "online"} concluido com sucesso.`
-      : `Falha no estorno ${meio === "pix" ? "via PIX" : "online"}.`,
-    precisaAcaoManual: status === "erro",
-    automatico: status === "concluido",
   };
-}
-
-async function estornarValorMercadoPago({
-  pedido,
-  restaurante,
-  valor,
-  motivo,
-  referencia = "parcial",
-}) {
-  const amount = round2(valor);
-  const meio = getMetodoEstorno(pedido);
-  if (amount <= 0) {
-    return {
-      status: "nao_aplicavel",
-      meio,
-      valor: 0,
-      detalhes: [],
-      mensagem: "Cancelamento sem valor para estorno.",
-      precisaAcaoManual: false,
-      automatico: false,
-    };
-  }
-
-  const paymentIds = getMpPaymentIds(pedido);
-  if (!paymentIds.length) {
-    return {
-      status: "erro",
-      meio,
-      valor: 0,
-      detalhes: [],
-      erro: "Pagamento confirmado sem identificador Mercado Pago para estorno parcial.",
-      mensagem: "O item nao foi cancelado porque o estorno nao pode ser processado automaticamente.",
-      precisaAcaoManual: true,
-      automatico: false,
-    };
-  }
-
-  const token = getMpAccessToken(restaurante);
-  if (!token) {
-    return {
-      status: "erro",
-      meio,
-      valor: 0,
-      detalhes: [],
-      erro: "Restaurante sem credencial Mercado Pago para estorno parcial.",
-      mensagem: "O item nao foi cancelado porque o estorno nao pode ser processado automaticamente.",
-      precisaAcaoManual: true,
-      automatico: false,
-    };
-  }
-
-  const paymentId = paymentIds[0];
-  try {
-    const res = await axios.post(
-      `${MP_API}/v1/payments/${paymentId}/refunds`,
-      { amount },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-          "X-Idempotency-Key": `refund_partial_${paymentId}_${pedido._id || pedido.id}_${norm(referencia)}`,
-        },
-        timeout: 20000,
-      }
-    );
-    const data = res.data || {};
-    const refunded = round2(data.amount || data.transaction_amount || amount);
-    return {
-      status: "concluido",
-      meio,
-      valor: refunded,
-      detalhes: [{
-        paymentId,
-        ok: true,
-        status: data.status || "approved",
-        amount: refunded,
-        id: data.id || null,
-        motivo,
-      }],
-      mensagem: `Estorno parcial ${meio === "pix" ? "via PIX" : "online"} concluido com sucesso.`,
-      precisaAcaoManual: false,
-      automatico: true,
-    };
-  } catch (error) {
-    const data = error?.response?.data || {};
-    const message = data.message || data.error || error.message;
-    return {
-      status: "erro",
-      meio,
-      valor: 0,
-      detalhes: [{ paymentId, ok: false, erro: message, response: data }],
-      erro: message,
-      mensagem: `Falha no estorno parcial ${meio === "pix" ? "via PIX" : "online"}.`,
-      precisaAcaoManual: true,
-      automatico: false,
-    };
-  }
 }
 
 async function cancelarPedidoComAuditoria(pedido, options = {}) {
@@ -302,17 +129,9 @@ async function cancelarPedidoComAuditoria(pedido, options = {}) {
       jaCancelado: true,
       estorno: {
         status: pedido.estornoStatus || "nao_aplicavel",
-        meio: getMetodoEstorno(pedido?.pedidoOriginalSnapshot || pedido),
         valor: round2(pedido.estornoValor || 0),
         detalhes: pedido.estornoDetalhes || [],
         erro: pedido.estornoErro || "",
-        mensagem: pedido.estornoStatus === "concluido"
-          ? "Estorno concluido com sucesso."
-          : pedido.estornoStatus === "erro"
-            ? "O estorno exige acao manual."
-            : "Pedido cancelado sem estorno online aplicavel.",
-        precisaAcaoManual: pedido.estornoStatus === "erro",
-        automatico: pedido.estornoStatus === "concluido",
       },
     };
   }
@@ -326,15 +145,7 @@ async function cancelarPedidoComAuditoria(pedido, options = {}) {
   const precisaEstorno = options.estornar !== false && isPagamentoOnline(original);
   const estorno = precisaEstorno
     ? await estornarPagamentoMercadoPago({ pedido: original, restaurante, motivo })
-    : {
-        status: "nao_aplicavel",
-        meio: getMetodoEstorno(original),
-        valor: 0,
-        detalhes: [],
-        mensagem: "Pedido cancelado sem estorno online aplicavel.",
-        precisaAcaoManual: false,
-        automatico: false,
-      };
+    : { status: "nao_aplicavel", valor: 0, detalhes: [] };
 
   pedido.pedidoOriginalSnapshot = pedido.pedidoOriginalSnapshot || {
     itens: itensOriginais,
@@ -393,36 +204,13 @@ async function cancelarPedidoComAuditoria(pedido, options = {}) {
 
   await pedido.save();
 
-  let movimentoCaixa = null;
-  let caixaAtualizada = null;
-  if (pedido.caixaSessaoId && valorOriginal > 0) {
-    movimentoCaixa = await CaixaMovimento.create({
-      restauranteId,
-      caixaSessaoId: String(pedido.caixaSessaoId),
-      operadorId: pedido.operadorCaixaId || null,
-      tipo: "cancelamento_pedido",
-      valor: valorOriginal,
-      formaPagamento: original.formaPagamento || original.formadePagamento || "outros",
-      origem: original.origem || "pedido",
-      pedidoId: pedido._id || pedido.id,
-      referenciaPagamento: `cancelamento-pedido:${pedido._id || pedido.id}`,
-      descricao: `Cancelamento do pedido ${original.numeroPedido || pedido._id || pedido.id}: ${motivo}`,
-      data: new Date(),
-    });
-    caixaAtualizada = await recalcularCaixa(pedido.caixaSessaoId).catch(() => null);
-  }
-
   if (io && restauranteId) {
     io.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
     io.to(`restaurante-${restauranteId}`).emit("pedidoCancelado", {
       pedidoId: pedido._id || pedido.id,
       motivo,
       estornoStatus: pedido.estornoStatus,
-      movimentoCaixa,
     });
-    if (caixaAtualizada) {
-      io.to(`restaurante-${restauranteId}`).emit("caixaAtualizado", caixaAtualizada);
-    }
 
     const entregadorId = String(pedido.entregador?._id || pedido.entregador || "");
     if (entregadorId) {
@@ -433,7 +221,7 @@ async function cancelarPedidoComAuditoria(pedido, options = {}) {
     }
   }
 
-  return { pedido, estorno, movimentoCaixa, caixa: caixaAtualizada };
+  return { pedido, estorno };
 }
 
 async function cancelarPedidosVitrineExpirados({ io } = {}) {
@@ -472,11 +260,6 @@ module.exports = {
   cancelarPedidoComAuditoria,
   cancelarPedidosVitrineExpirados,
   estornarPagamentoMercadoPago,
-  estornarValorMercadoPago,
-  isPagamentoOnline,
-  isPagamentoConfirmado,
-  getMetodoEstorno,
-  temPagamentoMercadoPago,
   pedidoJaCancelado,
   statusBloqueiaCancelamento,
   getPedidoTotalOriginal,

@@ -3,32 +3,6 @@ require('dotenv').config();
 const { pool, testConnection } = require('../db/mysql');
 
 const indexes = [
-
-  {
-    table: 'pedidos',
-    name: 'idx_pedidos_rest_telefone_criado',
-    sql: 'CREATE INDEX idx_pedidos_rest_telefone_criado ON pedidos (restaurante, telefoneCliente(30), criadoEm)',
-  },
-  {
-    table: 'pedidos',
-    name: 'idx_pedidos_entregador_status_criado',
-    sql: 'CREATE INDEX idx_pedidos_entregador_status_criado ON pedidos (entregador, status(30), criadoEm)',
-  },
-  {
-    table: 'produtos',
-    name: 'idx_produtos_rest_ativo_vitrine_ordem',
-    sql: 'CREATE INDEX idx_produtos_rest_ativo_vitrine_ordem ON produtos (restaurante, ativo, ativoVitrine, ordem)',
-  },
-  {
-    table: 'categorias_produto',
-    name: 'idx_categorias_rest_ativa_ordem',
-    sql: 'CREATE INDEX idx_categorias_rest_ativa_ordem ON categorias_produto (restaurante, ativa, ordem)',
-  },
-  {
-    table: 'restaurantes',
-    name: 'idx_restaurantes_logo_slug',
-    sql: 'CREATE INDEX idx_restaurantes_logo_slug ON restaurantes (logoSlug(191))',
-  },
   {
     table: 'pedidos',
     name: 'idx_pedidos_rest_criado_id',
@@ -53,16 +27,6 @@ const indexes = [
     table: 'pedidos',
     name: 'idx_pedidos_rest_status_pagamento_criado',
     sql: 'CREATE INDEX idx_pedidos_rest_status_pagamento_criado ON pedidos (restaurante, status(30), statusPagamento(30), criadoEm)',
-  },
-  {
-    table: 'pedidos',
-    name: 'idx_pedidos_external_order',
-    sql: 'CREATE INDEX idx_pedidos_external_order ON pedidos (externalOrderId(191))',
-  },
-  {
-    table: 'pedidos',
-    name: 'idx_pedidos_rest_origem_caixa',
-    sql: 'CREATE INDEX idx_pedidos_rest_origem_caixa ON pedidos (restaurante, origem(32), caixaSessaoId)',
   },
   {
     table: 'caixa_sessoes',

@@ -1,9 +1,15 @@
-// routes/entregadorOnlineRoutes.js
 const express = require("express");
-const router = express.Router();
 const controller = require("../controllers/entregadorOnlineController");
+const authRestaurante = require("../middlewares/authRestaurante");
+const matchRestaurante = require("../middlewares/requireRestaurantMatch");
+const { requirePlanFeature } = require("../middlewares/requirePlanFeature");
 
-// GET /api/entregadores-online/:restauranteId
-router.get("/:restauranteId", controller.listarOnlineHoje);
-
+const router = express.Router();
+router.get(
+  "/:restauranteId",
+  authRestaurante,
+  matchRestaurante,
+  requirePlanFeature("deliveryManagement"),
+  controller.listarOnlineHoje
+);
 module.exports = router;

@@ -13,7 +13,6 @@ router.get('/:restauranteId/operadores', c.listarOperadores);
 router.post('/:restauranteId/operadores', checkPermissao('gerenciarOperadores'), c.salvarOperador);
 router.put('/:restauranteId/operadores/:operadorId', checkPermissao('gerenciarOperadores'), c.salvarOperador);
 router.patch('/:restauranteId/operadores/:operadorId/status', checkPermissao('gerenciarOperadores'), c.alternarOperador);
-router.patch('/:restauranteId/operadores/:operadorId/pin', checkPermissao('gerenciarOperadores'), c.alterarPinOperador);
 router.get('/:restauranteId/atual', c.caixaAtual);
 router.post('/:restauranteId/abrir', checkPermissao('abrirCaixa'), c.abrirCaixa);
 router.post('/:restauranteId/movimento', checkPermissao('movimentarCaixa'), c.movimentarCaixa);

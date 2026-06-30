@@ -3,7 +3,3 @@ ALTER TABLE produtos
   ADD COLUMN pizzaMultisabor TINYINT(1) NULL,
   ADD COLUMN maxSabores DOUBLE NULL,
   ADD COLUMN calculoPrecoPor VARCHAR(255) NULL;
-
-
-
-

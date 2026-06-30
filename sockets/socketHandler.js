@@ -6,21 +6,11 @@ const Entregador = require("../models/Entregador");
 const EntregadorOnline = require("../models/EntregadorOnline");
 const Restaurante = require("../models/Restaurante");
 const axios = require("axios");
+const jwt = require("jsonwebtoken");
+const { enviarOferta, aceitarOferta, recusarOferta } = require("../services/deliveryOfferService");
+const { atualizarStatusJornada, registrarLocalizacao } = require("../services/entregadorJornadaService");
 
 const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
-
-const ENTREGA_ACEITE_TIMEOUT_MS = Number(process.env.ENTREGA_ACEITE_TIMEOUT_MS || 180 * 1000);
-
-function criarSolicitacaoEntregaId() {
-  return require("crypto").randomBytes(8).toString("hex");
-}
-
-function limparTimeoutPedido(pedidoId) {
-  const key = idString(pedidoId);
-  const timer = timeoutsDePedidos.get(key);
-  if (timer) clearTimeout(timer);
-  timeoutsDePedidos.delete(key);
-}
 
 function idString(value) {
   return String(value?._id || value?.id || value || "");
@@ -42,185 +32,34 @@ async function contarEntregasAtivas(entregadorId, pedidoIdIgnorar = null) {
   return Pedido.countDocuments(filtro);
 }
 
-
-function pedidoPlain(pedido) {
-  return pedido && typeof pedido.toObject === "function" ? pedido.toObject() : { ...(pedido || {}) };
-}
-
-function entregadorPublico(entregador = {}) {
-  if (!entregador) return null;
-  return {
-    _id: idString(entregador._id || entregador.id),
-    id: idString(entregador._id || entregador.id),
-    nome: entregador.nome,
-    email: entregador.email,
-    localizacao: entregador.localizacao || null,
-  };
-}
-
-function adicionarHistoricoEntrega(pedido, evento = {}) {
-  const lista = Array.isArray(pedido.historicoEntregadores) ? pedido.historicoEntregadores : [];
-  pedido.historicoEntregadores = [...lista.slice(-20), { ...evento, em: evento.em || new Date().toISOString() }];
-}
-
-function montarPayloadPedido(pedido, entregador = null, extra = {}) {
-  const plain = pedidoPlain(pedido);
-  return {
-    ...plain,
-    _id: idString(plain._id || plain.id),
-    id: idString(plain._id || plain.id),
-    entregador: entregador ? entregadorPublico(entregador) : (plain.entregador || null),
-    tempoAceiteSegundos: Math.ceil(ENTREGA_ACEITE_TIMEOUT_MS / 1000),
-    ...extra,
-  };
-}
-
-async function liberarPedidoParaNovoDirecionamento(io, { pedido, entregadorId, restauranteId, motivo, tipo = "recusado" }) {
-  if (!pedido) return null;
-  const agora = new Date();
-  const entregadorAnterior = idString(entregadorId || pedido.entregador);
-  const solicitacaoId = pedido.entregadorSolicitacaoId || pedido.entregadorSolicitacao?.id || "";
-  pedido.status = "em_entrega";
-  pedido.entregador = null;
-  pedido.statusEntrega = tipo === "timeout" ? "nao_aceito" : "recusado_entregador";
-  pedido.entregadorRecusadoEm = agora;
-  pedido.entregadorRecusaMotivo = motivo || (tipo === "timeout" ? "Tempo de aceite esgotado." : "Pedido recusado pelo entregador.");
-  pedido.entregadorSolicitacaoId = null;
-  pedido.entregadorSolicitacao = null;
-  pedido.entregadorAceiteExpiraEm = null;
-  pedido.statusAtualizadoEm = agora;
-  if (!pedido.emEntregaEm) pedido.emEntregaEm = agora;
-  adicionarHistoricoEntrega(pedido, { tipo, entregadorId: entregadorAnterior, solicitacaoId, motivo: pedido.entregadorRecusaMotivo });
-  await pedido.save();
-  limparTimeoutPedido(pedido._id || pedido.id);
-  const payload = montarPayloadPedido(pedido, null, { entregadorAnterior, tipo, motivo: pedido.entregadorRecusaMotivo });
-  const roomRestaurante = restauranteId || idString(pedido.restaurante);
-  if (roomRestaurante) {
-    io.to(`restaurante-${roomRestaurante}`).emit("pedidoRecusado", payload);
-    io.to(`restaurante-${roomRestaurante}`).emit("pedidoNaoAceito", payload);
-    io.to(`restaurante-${roomRestaurante}`).emit("pedidoAtualizado", payload);
-  }
-  if (entregadorAnterior) {
-    io.to(`entregador-${entregadorAnterior}`).emit("pedidoSolicitacaoEncerrada", payload);
-    io.to(`entregador-${entregadorAnterior}`).emit("pedidoSolicitacaoExpirada", payload);
-  }
-  return payload;
-}
-
-async function expirarSolicitacaoEntregaSocket(io, { pedidoId, entregadorId, solicitacaoId, restauranteId }) {
-  try {
-    const pedido = await Pedido.findById(pedidoId);
-    if (!pedido) return;
-    const mesmoEntregador = idString(pedido.entregador) === idString(entregadorId);
-    const mesmaSolicitacao = !solicitacaoId || idString(pedido.entregadorSolicitacaoId) === idString(solicitacaoId);
-    if (pedido.status === "aguardando_resposta" && mesmoEntregador && mesmaSolicitacao) {
-      await liberarPedidoParaNovoDirecionamento(io, {
-        pedido,
-        entregadorId,
-        restauranteId,
-        tipo: "timeout",
-        motivo: "Motorista não aceitou em até 180 segundos.",
-      });
-    }
-  } catch (err) {
-    console.log("🔥 timeout pedido entregador erro:", err?.message);
-  }
-}
-
-function normalizarLocalizacaoPayload(payload = {}) {
-  const latitude = Number(payload.latitude ?? payload.localizacao?.latitude ?? payload.coords?.latitude);
-  const longitude = Number(payload.longitude ?? payload.localizacao?.longitude ?? payload.coords?.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-  return { latitude, longitude };
-}
-
-function emitirEntregadoresOnline(io, restauranteId) {
-  if (!restauranteId) return;
-  const lista = entregadoresOnline.filter((e) => e.restauranteId === String(restauranteId));
-  // Mantem os dois nomes porque o Desktop usa deliverersOnline e o app motorista
-  // tambem ja teve versoes ouvindo entregadoresOnline.
-  io.to(`restaurante-${restauranteId}`).emit("deliverersOnline", lista);
-  io.to(`restaurante-${restauranteId}`).emit("entregadoresOnline", lista);
-}
-
-async function atualizarLocalizacaoEntregadorSocket(io, payload = {}) {
-  try {
-    const entregadorId = payload.entregadorId || payload.id || payload._id;
-    const locBase = normalizarLocalizacaoPayload(payload);
-    if (!entregadorId || !locBase) return;
-
-    const entregador = await Entregador.findById(entregadorId);
-    if (!entregador) return;
-
-    const agoraIso = new Date().toISOString();
-    const loc = { ...locBase, atualizadoEm: agoraIso };
-    const statusPayload = payload.online ?? payload.status;
-    const estaDisponivel = statusPayload === undefined ? true : Boolean(statusPayload);
-
-    entregador.localizacao = loc;
-    if (statusPayload !== undefined) {
-      entregador.status = estaDisponivel;
-      entregador.disponivel = estaDisponivel;
-    }
-    await entregador.save();
-
-    const restauranteId = String(payload.restauranteId || entregador.restaurante || entregador.restauranteId || "");
-    const updatePayload = {
-      id: String(entregador._id || entregador.id),
-      _id: String(entregador._id || entregador.id),
-      entregadorId: String(entregador._id || entregador.id),
-      socketId: payload.socketId,
-      nome: entregador.nome,
-      email: entregador.email,
-      restauranteId,
-      latitude: loc.latitude,
-      longitude: loc.longitude,
-      localizacao: loc,
-      status: estaDisponivel,
-      disponivel: estaDisponivel,
-      atualizadoEm: agoraIso,
-    };
-
-    if (!estaDisponivel) {
-      entregadoresOnline = entregadoresOnline.filter((e) => String(e.id || e._id || e.entregadorId) !== String(entregadorId));
-      io.to(`entregador-${entregadorId}`).emit("atualizacaoLocalizacao", loc);
-      if (restauranteId) {
-        io.to(`restaurante-${restauranteId}`).emit("localizacaoAtualizada", updatePayload);
-        io.to(`restaurante-${restauranteId}`).emit("delivererLocationUpdated", updatePayload);
-        io.to(`restaurante-${restauranteId}`).emit("delivererStatusUpdated", updatePayload);
-        emitirEntregadoresOnline(io, restauranteId);
-      }
-      return;
-    }
-
-    let found = false;
-    entregadoresOnline = entregadoresOnline.map((e) => {
-      if (String(e.id || e._id || e.entregadorId) !== String(entregadorId)) return e;
-      found = true;
-      return { ...e, ...updatePayload, socketId: e.socketId || payload.socketId };
-    });
-
-    if (!found && restauranteId) {
-      const pedidosAtivos = await Pedido.countDocuments({
-        entregador: entregadorId,
-        status: { $in: STATUS_ENTREGA_ATIVA },
-      });
-      entregadoresOnline.push({ ...updatePayload, pedidosAtivos });
-    }
-
-    io.to(`entregador-${entregadorId}`).emit("atualizacaoLocalizacao", loc);
-    if (restauranteId) {
-      io.to(`restaurante-${restauranteId}`).emit("localizacaoAtualizada", updatePayload);
-      io.to(`restaurante-${restauranteId}`).emit("delivererLocationUpdated", updatePayload);
-      io.to(`restaurante-${restauranteId}`).emit("delivererStatusUpdated", updatePayload);
-      emitirEntregadoresOnline(io, restauranteId);
-    }
-  } catch (err) {
-    console.log("🔥 atualizarLocalizacaoEntregadorSocket erro:", err?.message);
-  }
-}
-
 module.exports = (io) => {
+  io.use(async (socket, next) => {
+    const token = String(
+      socket.handshake?.auth?.token || socket.handshake?.query?.token || ""
+    ).replace(/^Bearer\s+/i, "").trim();
+    if (!token) {
+      socket.data.auth = null;
+      return next();
+    }
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      socket.data.auth = decoded;
+      let role = String(decoded.role || "").toLowerCase();
+      if (!role && decoded.id) {
+        const legacyDriver = await Entregador.findById(decoded.id).lean().catch(() => null);
+        role = legacyDriver ? "entregador" : "restaurante";
+      }
+      socket.data.role = role || "restaurante";
+      socket.data.restauranteId = idString(decoded.restauranteId || decoded.idRestaurante || decoded.id);
+      socket.data.entregadorId = socket.data.role === "entregador"
+        ? idString(decoded.entregadorId || decoded.id)
+        : "";
+      return next();
+    } catch (error) {
+      return next(new Error("AUTH_INVALIDA"));
+    }
+  });
+
   io.on("connection", (socket) => {
     console.log("🔌 Socket conectado:", socket.id);
 
@@ -324,260 +163,149 @@ module.exports = (io) => {
     /* =========================================================
      * 🚚 ENTREGADORES
      * =======================================================*/
-    socket.on("joinEntregador", async ({ entregadorId, status = true } = {}) => {
+    socket.on("joinEntregador", async ({ entregadorId, status = true } = {}, ack) => {
       try {
-        if (!entregadorId) return;
-
-        const entregador = await Entregador.findById(entregadorId);
-        if (!entregador) return;
-
-        safeJoin(`entregador-${entregadorId}`);
-
-        const restauranteId = String(entregador.restaurante || entregador.restauranteId || "");
-        const estaDisponivel = Boolean(status);
-        const agoraIso = new Date().toISOString();
-        const loc = entregador.localizacao
-          ? { ...entregador.localizacao, atualizadoEm: entregador.localizacao.atualizadoEm || agoraIso }
-          : null;
-
-        entregador.status = estaDisponivel;
-        entregador.disponivel = estaDisponivel;
-        await entregador.save();
-
-        const pedidosAtivos = await Pedido.countDocuments({
-          entregador: entregadorId,
-          status: { $in: ["aguardando_resposta", "em_rota", "em_entrega"] },
-        });
-
-        const diaHoje = new Date().toISOString().split("T")[0];
-
-        entregadoresOnline = entregadoresOnline.filter((e) => String(e.id || e._id || e.entregadorId) !== String(entregadorId));
-
-        const payloadStatus = {
-          id: String(entregador._id || entregador.id),
-          _id: String(entregador._id || entregador.id),
-          entregadorId: String(entregador._id || entregador.id),
-          socketId: socket.id,
-          nome: entregador.nome,
-          email: entregador.email,
-          restauranteId,
-          localizacao: loc,
-          status: estaDisponivel,
-          disponivel: estaDisponivel,
-          pedidosAtivos,
-          atualizadoEm: agoraIso,
-        };
-
-        if (!estaDisponivel) {
-          await EntregadorOnline.deleteOne({ entregadorId, dia: diaHoje });
-        } else {
-          entregadoresOnline.push(payloadStatus);
-
-          await EntregadorOnline.findOneAndUpdate(
-            { entregadorId, dia: diaHoje },
-            {
-              entregadorId,
-              restauranteId: entregador.restaurante,
-              dataEntrada: new Date(),
-              dia: diaHoje,
-              online: true,
-              localizacao: loc,
-            },
-            { upsert: true }
-          );
+        const authId = idString(socket.data.entregadorId);
+        if (!authId || socket.data.role !== "entregador" || authId !== idString(entregadorId)) {
+          ack?.({ ok: false, message: "Motorista nao autenticado para esta sala." });
+          return;
         }
-
-        if (restauranteId) {
-          io.to(`restaurante-${restauranteId}`).emit("delivererStatusUpdated", payloadStatus);
-          emitirEntregadoresOnline(io, restauranteId);
+        const entregador = await Entregador.findById(authId);
+        if (!entregador) return ack?.({ ok: false, message: "Motorista nao encontrado." });
+        safeJoin(`entregador-${authId}`);
+        await atualizarStatusJornada(entregador, status !== false);
+        entregadoresOnline = entregadoresOnline.filter((e) => e.id !== authId);
+        if (status !== false) {
+          const pedidosAtivos = await Pedido.countDocuments({
+            entregador: authId,
+            status: { $in: STATUS_ENTREGA_ATIVA },
+          });
+          entregadoresOnline.push({
+            id: authId,
+            socketId: socket.id,
+            nome: entregador.nome,
+            email: entregador.email,
+            restauranteId: idString(entregador.restaurante),
+            localizacao: entregador.localizacao,
+            status: true,
+            pedidosAtivos,
+          });
         }
-      } catch (err) {
-        console.log("🔥 joinEntregador erro:", err?.message);
+        const lista = entregadoresOnline.filter((e) => e.restauranteId === idString(entregador.restaurante));
+        io.to(`restaurante-${idString(entregador.restaurante)}`).emit("deliverersOnline", lista);
+        io.to(`entregador-${authId}`).emit("entregadoresOnline", lista);
+        ack?.({ ok: true, online: status !== false });
+      } catch (error) {
+        console.log("joinEntregador erro:", error?.message);
+        ack?.({ ok: false, message: error?.message || "Erro ao entrar na sala." });
       }
     });
 
-    socket.on("joinEntregadorSala", ({ entregadorId } = {}) => {
-      if (!entregadorId) return;
-      safeJoin(`entregador-${entregadorId}`);
+    socket.on("joinEntregadorSala", ({ entregadorId } = {}, ack) => {
+      const authId = idString(socket.data.entregadorId);
+      if (!authId || socket.data.role !== "entregador" || authId !== idString(entregadorId)) {
+        return ack?.({ ok: false, message: "Sala de motorista nao autorizada." });
+      }
+      safeJoin(`entregador-${authId}`);
+      ack?.({ ok: true });
     });
 
-    const receberLocalizacaoMotorista = async (payload = {}) => {
-      await atualizarLocalizacaoEntregadorSocket(io, { ...payload, socketId: socket.id });
+    const handleLocalizacaoMotorista = async ({ entregadorId, latitude, longitude } = {}, ack) => {
+      try {
+        const authId = idString(socket.data.entregadorId);
+        if (!authId || socket.data.role !== "entregador" || authId !== idString(entregadorId)) {
+          return ack?.({ ok: false, message: "Localizacao nao autorizada." });
+        }
+        const lat = Number(latitude);
+        const lng = Number(longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          return ack?.({ ok: false, message: "Localizacao invalida." });
+        }
+        const entregador = await Entregador.findById(authId);
+        if (!entregador) return ack?.({ ok: false, message: "Motorista nao encontrado." });
+        const { jornada } = await registrarLocalizacao(entregador, { latitude: lat, longitude: lng });
+        entregadoresOnline = entregadoresOnline.map((item) =>
+          item.id === authId ? { ...item, localizacao: { latitude: lat, longitude: lng } } : item
+        );
+        const payload = {
+          entregadorId: authId,
+          latitude: lat,
+          longitude: lng,
+          distanciaPercorridaKm: Number(jornada.distanciaPercorridaKm || 0),
+          atualizadoEm: new Date(),
+        };
+        io.to(`entregador-${authId}`).emit("atualizacaoLocalizacao", payload);
+        io.to(`restaurante-${idString(entregador.restaurante)}`).emit("localizacaoAtualizada", payload);
+        io.to(`restaurante-${idString(entregador.restaurante)}`).emit(
+          "deliverersOnline",
+          entregadoresOnline.filter((e) => e.restauranteId === idString(entregador.restaurante))
+        );
+        ack?.({ ok: true });
+      } catch (error) {
+        console.log("localizacao motorista erro:", error?.message);
+        ack?.({ ok: false, message: error?.message || "Erro de localizacao." });
+      }
     };
 
-    // O app motorista antigo emitia "atualizarLocalizacao" e algumas versões
-    // emitem "localizacaoAtualizada". Mantemos os dois para não perder rastreio.
-    socket.on("atualizarLocalizacao", receberLocalizacaoMotorista);
-    socket.on("localizacaoAtualizada", receberLocalizacaoMotorista);
+    socket.on("localizacaoAtualizada", handleLocalizacaoMotorista);
+    socket.on("atualizarLocalizacao", handleLocalizacaoMotorista);
 
     /* =========================================================
-     * 📦 PEDIDOS DELIVERY (EXISTENTE)
+     * PEDIDOS DELIVERY (EXISTENTE)
      * =======================================================*/
-    socket.on("enviarPedido", async ({ pedidoId, delivererId, restauranteId } = {}) => {
+    socket.on("enviarPedido", async ({ pedidoId, delivererId, restauranteId } = {}, ack) => {
       try {
-        if (!pedidoId || !delivererId || !restauranteId) return;
-
-        const pedido = await Pedido.findById(pedidoId);
-        if (!pedido) return;
-
-        const entregador = await Entregador.findById(delivererId);
-        if (!entregador || idString(entregador.restaurante || entregador.restauranteId) !== String(restauranteId)) {
-          io.to(`restaurante-${restauranteId}`).emit("pedidoEnvioErro", {
-            pedidoId,
-            delivererId,
-            message: "Entregador invalido para este restaurante.",
-          });
-          return;
+        const authRestauranteId = idString(socket.data.restauranteId);
+        if (socket.data.role === "entregador" || !authRestauranteId || authRestauranteId !== idString(restauranteId)) {
+          return ack?.({ ok: false, message: "Restaurante nao autorizado." });
         }
-
-        const limite = await obterLimitePedidosPorEntregador(restauranteId);
-        const ativas = await contarEntregasAtivas(delivererId, pedidoId);
-        if (ativas >= limite) {
-          io.to(`restaurante-${restauranteId}`).emit("pedidoEnvioErro", {
-            pedidoId,
-            delivererId,
-            limite,
-            entregasAtivas: ativas,
-            message: `Este entregador ja atingiu o limite de ${limite} entrega(s) ativa(s).`,
-          });
-          return;
-        }
-
-        const agora = new Date();
-        const expiraEm = new Date(agora.getTime() + ENTREGA_ACEITE_TIMEOUT_MS);
-        const solicitacaoId = criarSolicitacaoEntregaId();
-        limparTimeoutPedido(pedidoId);
-
-        pedido.entregador = delivererId;
-        pedido.status = "aguardando_resposta";
-        pedido.statusEntrega = "aguardando_aceite";
-        pedido.statusAtualizadoEm = agora;
-        pedido.direcionadoEm = agora;
-        pedido.entregadorSolicitacaoId = solicitacaoId;
-        pedido.entregadorAceiteExpiraEm = expiraEm;
-        pedido.entregadorSolicitacao = {
-          id: solicitacaoId,
-          entregadorId: idString(delivererId),
-          entregadorNome: entregador.nome,
-          enviadoEm: agora.toISOString(),
-          expiraEm: expiraEm.toISOString(),
-          tempoAceiteSegundos: Math.ceil(ENTREGA_ACEITE_TIMEOUT_MS / 1000),
-          alertaIntervaloSegundos: 15,
-        };
-        adicionarHistoricoEntrega(pedido, { tipo: "direcionado", entregadorId: idString(delivererId), entregadorNome: entregador.nome, solicitacaoId });
-        await pedido.save();
-
-        const payload = montarPayloadPedido(pedido, entregador);
-        io.to(`entregador-${delivererId}`).emit("pedidoRecebido", payload);
-        io.to(`entregador-${delivererId}`).emit("pedidoDirecionado", payload);
-        io.to(`restaurante-${restauranteId}`).emit("pedidoEnviado", payload);
-        io.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", payload);
-
-        const timeout = setTimeout(() => {
-          expirarSolicitacaoEntregaSocket(io, { pedidoId, entregadorId: delivererId, solicitacaoId, restauranteId });
-        }, ENTREGA_ACEITE_TIMEOUT_MS);
-        if (typeof timeout.unref === "function") timeout.unref();
-        timeoutsDePedidos.set(idString(pedidoId), timeout);
-      } catch (err) {
-        console.log("🔥 enviarPedido erro:", err?.message);
-      }
-    });
-
-    socket.on("aceitarPedido", async ({ pedidoId, entregadorId } = {}) => {
-      try {
-        if (!pedidoId || !entregadorId) return;
-
-        const pedido = await Pedido.findById(pedidoId);
-        if (!pedido) return;
-
-        if (idString(pedido.entregador) !== idString(entregadorId) || pedido.status !== "aguardando_resposta") {
-          io.to(`entregador-${entregadorId}`).emit("pedidoAceiteErro", { pedidoId, message: "Esta solicitação não está mais disponível." });
-          return;
-        }
-
-        const expiraMs = pedido.entregadorAceiteExpiraEm ? new Date(pedido.entregadorAceiteExpiraEm).getTime() : 0;
-        if (expiraMs && Date.now() > expiraMs) {
-          await liberarPedidoParaNovoDirecionamento(io, {
-            pedido,
-            entregadorId,
-            restauranteId: idString(pedido.restaurante),
-            tipo: "timeout",
-            motivo: "Motorista não aceitou em até 180 segundos.",
-          });
-          return;
-        }
-
-        const agora = new Date();
-        pedido.entregador = entregadorId;
-        pedido.status = "em_rota";
-        pedido.statusEntrega = "aceito";
-        pedido.aceitoEm = agora;
-        pedido.entregadorAceitoEm = agora;
-        pedido.statusAtualizadoEm = agora;
-        adicionarHistoricoEntrega(pedido, { tipo: "aceito", entregadorId: idString(entregadorId), solicitacaoId: pedido.entregadorSolicitacaoId || "" });
-        pedido.entregadorSolicitacaoId = null;
-        pedido.entregadorSolicitacao = null;
-        pedido.entregadorAceiteExpiraEm = null;
-        await pedido.save();
-        limparTimeoutPedido(pedidoId);
-
-        const entregador = await Entregador.findById(entregadorId).lean().catch(() => null);
-        const payload = montarPayloadPedido(pedido, entregador);
-        io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAceito", payload);
-        io.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", payload);
-        io.to(`entregador-${entregadorId}`).emit("pedidoAceito", payload);
-      } catch (err) {
-        console.log("🔥 aceitarPedido erro:", err?.message);
-      }
-    });
-
-    socket.on("pedidoRecusado", async ({ pedidoId, entregadorId, motivo, tipo } = {}) => {
-      try {
-        if (!pedidoId || !entregadorId) return;
-        const pedido = await Pedido.findById(pedidoId);
-        if (!pedido) return;
-        if (idString(pedido.entregador) !== idString(entregadorId) || pedido.status !== "aguardando_resposta") {
-          io.to(`entregador-${entregadorId}`).emit("pedidoRecusaErro", { pedidoId, message: "Esta solicitação já foi encerrada." });
-          return;
-        }
-        await liberarPedidoParaNovoDirecionamento(io, {
-          pedido,
-          entregadorId,
-          restauranteId: idString(pedido.restaurante),
-          tipo: tipo === "timeout" ? "timeout" : "recusado",
-          motivo: motivo || "Pedido recusado pelo entregador.",
+        const result = await enviarOferta({
+          pedidoId,
+          entregadorId: delivererId,
+          restauranteId,
+          io,
+          origem: "desktop_socket",
         });
-      } catch (err) {
-        console.log("🔥 pedidoRecusado erro:", err?.message);
+        ack?.({ ok: true, pedido: result.pedido });
+      } catch (error) {
+        io.to(`restaurante-${idString(restauranteId)}`).emit("pedidoEnvioErro", {
+          pedidoId,
+          delivererId,
+          message: error?.message || "Erro ao enviar pedido.",
+        });
+        ack?.({ ok: false, message: error?.message || "Erro ao enviar pedido." });
       }
     });
 
-    socket.on("recusarPedido", async ({ pedidoId, entregadorId, motivo, tipo } = {}) => {
+    socket.on("aceitarPedido", async ({ pedidoId, entregadorId } = {}, ack) => {
       try {
-        if (!pedidoId || !entregadorId) return;
-        const pedido = await Pedido.findById(pedidoId);
-        if (!pedido) return;
-        if (idString(pedido.entregador) !== idString(entregadorId) || pedido.status !== "aguardando_resposta") {
-          io.to(`entregador-${entregadorId}`).emit("pedidoRecusaErro", { pedidoId, message: "Esta solicitação já foi encerrada." });
-          return;
+        const authId = idString(socket.data.entregadorId);
+        if (!authId || socket.data.role !== "entregador" || authId !== idString(entregadorId)) {
+          return ack?.({ ok: false, message: "Aceite nao autorizado." });
         }
-        await liberarPedidoParaNovoDirecionamento(io, {
-          pedido,
-          entregadorId,
-          restauranteId: idString(pedido.restaurante),
-          tipo: tipo === "timeout" ? "timeout" : "recusado",
-          motivo: motivo || "Pedido recusado pelo entregador.",
-        });
-      } catch (err) {
-        console.log("🔥 recusarPedido erro:", err?.message);
+        const pedido = await aceitarOferta({ pedidoId, entregadorId: authId, io });
+        ack?.({ ok: true, pedido });
+      } catch (error) {
+        ack?.({ ok: false, message: error?.message || "Erro ao aceitar pedido." });
+      }
+    });
+
+    socket.on("pedidoRecusado", async ({ pedidoId, entregadorId, motivo } = {}, ack) => {
+      try {
+        const authId = idString(socket.data.entregadorId);
+        if (!authId || socket.data.role !== "entregador" || authId !== idString(entregadorId)) {
+          return ack?.({ ok: false, message: "Recusa nao autorizada." });
+        }
+        const pedido = await recusarOferta({ pedidoId, entregadorId: authId, motivo, io });
+        ack?.({ ok: true, pedido });
+      } catch (error) {
+        ack?.({ ok: false, message: error?.message || "Erro ao recusar pedido." });
       }
     });
 
     socket.on("disconnect", () => {
       console.log("🔌 Desconectado:", socket.id);
-      const afetados = entregadoresOnline.filter((e) => e.socketId === socket.id).map((e) => e.restauranteId).filter(Boolean);
       entregadoresOnline = entregadoresOnline.filter((e) => e.socketId !== socket.id);
-      [...new Set(afetados)].forEach((restauranteId) => emitirEntregadoresOnline(io, restauranteId));
     });
   });
 };

@@ -23,18 +23,12 @@ function operadorPode(operador, permissao){
   if(!p || typeof p!=='object') return true;
   return p[permissao] !== false && p[permissao] !== 'false';
 }
-function operadorPublico(operador) {
-  const data = operador?.toObject ? operador.toObject() : { ...(operador || {}) };
-  const pinConfigurado = !!String(data.pin || '').trim();
-  delete data.pin;
-  return { ...data, pinConfigurado };
-}
 
 exports.listarOperadores = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
     const operadores = await OperadorCaixa.find({ restauranteId: String(restauranteId) }).sort({ nome: 1 });
-    res.json({ operadores: (operadores || []).map(operadorPublico) });
+    res.json({ operadores });
   } catch (e) { res.status(500).json({ message: 'Erro ao listar operadores.', error: e.message }); }
 };
 
@@ -44,81 +38,29 @@ exports.salvarOperador = async (req, res) => {
     const { nome, apelido, pin, ativo=true, observacao, permissoes={} } = req.body;
     if (!restauranteId) return res.status(400).json({ message: 'restauranteId é obrigatório.' });
     if (!String(nome || '').trim()) return res.status(400).json({ message: 'Nome do operador é obrigatório.' });
-    const editando = !!req.params.operadorId;
-    let operador = editando ? await OperadorCaixa.findById(req.params.operadorId) : null;
-    if (editando && (!operador || String(operador.restauranteId) !== String(restauranteId))) {
-      return res.status(404).json({ message: 'Operador nao encontrado.' });
-    }
+    let operador = req.params.operadorId ? await OperadorCaixa.findById(req.params.operadorId) : null;
     if (!operador) operador = new OperadorCaixa({ restauranteId });
-    if (editando && Object.prototype.hasOwnProperty.call(req.body || {}, 'pin')) {
-      return res.status(409).json({
-        message: 'Para substituir o PIN, informe o PIN atual na opcao Alterar PIN.',
-        code: 'ALTERACAO_PIN_EXIGE_PIN_ATUAL',
-      });
-    }
     operador.nome = String(nome).trim();
     operador.apelido = String(apelido || '').trim();
-    if (!editando) {
-      operador.pin = String(pin || '').trim();
-    }
+    operador.pin = String(pin || '').trim();
     operador.ativo = ativo !== false;
     operador.observacao = String(observacao || '').trim();
     operador.permissoes = permissoes && typeof permissoes === 'object' ? permissoes : {};
     await operador.save();
     await registrarAuditoria(req, req.params.operadorId ? 'operador.atualizado' : 'operador.criado', 'operador', operador._id, { nome:operador.nome, ativo:operador.ativo, permissoes:operador.permissoes });
-    res.json({ ok: true, operador: operadorPublico(operador) });
+    res.json({ ok: true, operador });
   } catch (e) { res.status(500).json({ message: 'Erro ao salvar operador.', error: e.message }); }
 };
 
 exports.alternarOperador = async (req, res) => {
   try {
-    const restauranteId = restauranteIdFromReq(req);
     const operador = await OperadorCaixa.findById(req.params.operadorId);
-    if (operador && String(operador.restauranteId) !== String(restauranteId)) {
-      return res.status(404).json({ message: 'Operador nao encontrado.' });
-    }
     if (!operador) return res.status(404).json({ message: 'Operador não encontrado.' });
     operador.ativo = req.body.ativo !== undefined ? !!req.body.ativo : !operador.ativo;
     await operador.save();
     await registrarAuditoria(req, 'operador.status_alterado', 'operador', operador._id, { nome:operador.nome, ativo:operador.ativo });
-    res.json({ ok: true, operador: operadorPublico(operador) });
+    res.json({ ok: true, operador });
   } catch (e) { res.status(500).json({ message: 'Erro ao alterar operador.', error: e.message }); }
-};
-
-exports.alterarPinOperador = async (req, res) => {
-  try {
-    const restauranteId = restauranteIdFromReq(req);
-    const operador = await OperadorCaixa.findById(req.params.operadorId);
-    if (!operador || String(operador.restauranteId) !== String(restauranteId)) {
-      return res.status(404).json({ message: 'Operador nao encontrado.' });
-    }
-
-    const pinAtual = String(req.body?.pinAtual || '').trim();
-    const novoPin = String(req.body?.novoPin || '').trim();
-    const confirmarPin = String(req.body?.confirmarPin || '').trim();
-    if (!/^\d{4,8}$/.test(novoPin)) {
-      return res.status(400).json({ message: 'O novo PIN deve conter entre 4 e 8 digitos.' });
-    }
-    if (novoPin !== confirmarPin) {
-      return res.status(400).json({ message: 'A confirmacao do novo PIN nao confere.' });
-    }
-    if (operadorExigePin(operador) && !pinConfere(operador, pinAtual)) {
-      return res.status(401).json({ message: 'PIN atual invalido.', code: 'PIN_ATUAL_INVALIDO' });
-    }
-    if (pinAtual && novoPin === pinAtual) {
-      return res.status(400).json({ message: 'O novo PIN deve ser diferente do PIN atual.' });
-    }
-
-    operador.pin = novoPin;
-    await operador.save();
-    await registrarAuditoria(req, 'operador.pin_alterado', 'operador', operador._id, {
-      nome: operador.nome,
-      pinAnteriorConfigurado: !!pinAtual,
-    });
-    return res.json({ ok: true, operador: operadorPublico(operador), message: 'PIN alterado com sucesso.' });
-  } catch (e) {
-    return res.status(500).json({ message: 'Erro ao alterar PIN do operador.', error: e.message });
-  }
 };
 
 const caixaAtualCache = new Map();
@@ -332,30 +274,6 @@ async function listarMovimentosRelatorio(restauranteId, caixaIds) {
   return (rows || []).map(withId);
 }
 
-async function resumirCancelamentosItensPorCaixa(restauranteId, caixaIds) {
-  const ids = Array.from(new Set((caixaIds || []).map(String).filter(Boolean)));
-  if (!ids.length) return new Map();
-
-  const [rows] = await queryWithRetry(
-    `SELECT caixaSessaoId, COUNT(*) AS itensCancelados, COALESCE(SUM(valor), 0) AS valorItensCancelados
-       FROM caixa_movimentos
-      WHERE restauranteId = ?
-        AND caixaSessaoId IN (${inClause(ids)})
-        AND LOWER(COALESCE(tipo, '')) = 'cancelamento_item'
-      GROUP BY caixaSessaoId`,
-    [String(restauranteId), ...ids],
-    { label: 'caixa.relatorios.cancelamentosItens' }
-  );
-
-  return new Map((rows || []).map((row) => [
-    String(row.caixaSessaoId || ''),
-    {
-      itensCancelados: Number(row.itensCancelados || 0),
-      valorItensCancelados: round2(toNum(row.valorItensCancelados)),
-    },
-  ]));
-}
-
 exports.relatorios = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
@@ -373,14 +291,13 @@ exports.relatorios = async (req, res) => {
 
     caixas = await buscarCaixasRelatorio(restauranteId, start, end);
     const caixaIds = caixas.map((c) => String(c._id || c.id)).filter(Boolean);
-    const [pedidosPorCaixa, pedidos, movimentos, cancelamentosItensPorCaixa] = await Promise.all([
+    const [pedidosPorCaixa, pedidos, movimentos] = await Promise.all([
       contarPedidosPorCaixa(restauranteId, caixaIds),
       listarPedidosRelatorio(restauranteId, caixaIds),
       listarMovimentosRelatorio(restauranteId, caixaIds),
-      resumirCancelamentosItensPorCaixa(restauranteId, caixaIds),
     ]);
 
-    const resumo = { totalVendas:0, dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangrias:0, suprimentos:0, pedidos:0, itensCancelados:0, valorItensCancelados:0, caixas: caixas.length };
+    const resumo = { totalVendas:0, dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangrias:0, suprimentos:0, pedidos:0, caixas: caixas.length };
     const by = new Map();
     const keyFor = (c) => {
       if (tipo === 'caixa') return String(c._id || c.id);
@@ -390,22 +307,14 @@ exports.relatorios = async (req, res) => {
     const labelFor = (c) => tipo === 'caixa' ? `Caixa ${String(c._id || c.id).slice(-6)}` : tipo === 'operador' ? (c.operadorNome || 'Sem operador') : (labelDataBR(dataOperacionalCaixa(c)) || 'Sem data');
     for (const c of caixas) {
       const k = keyFor(c);
-      if (!by.has(k)) by.set(k, { chave:k, label:labelFor(c), caixas:0, pedidos:0, itensCancelados:0, valorItensCancelados:0, totalVendas:0, dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangrias:0, suprimentos:0 });
+      if (!by.has(k)) by.set(k, { chave:k, label:labelFor(c), caixas:0, pedidos:0, totalVendas:0, dinheiro:0, pix:0, credito:0, debito:0, online:0, outros:0, sangrias:0, suprimentos:0 });
       const row = by.get(k); row.caixas += 1;
       const totalPedidosCaixa = Number(pedidosPorCaixa.get(String(c._id || c.id)) || 0);
       row.pedidos += totalPedidosCaixa;
       resumo.pedidos += totalPedidosCaixa;
-      const cancelamentos = cancelamentosItensPorCaixa.get(String(c._id || c.id)) || {};
-      row.itensCancelados += Number(cancelamentos.itensCancelados || 0);
-      row.valorItensCancelados = round2(row.valorItensCancelados + toNum(cancelamentos.valorItensCancelados));
-      resumo.itensCancelados += Number(cancelamentos.itensCancelados || 0);
-      resumo.valorItensCancelados = round2(resumo.valorItensCancelados + toNum(cancelamentos.valorItensCancelados));
       const vals = { totalVendas:c.totalVendas, dinheiro:c.totalDinheiro, pix:c.totalPix, credito:c.totalCredito, debito:c.totalDebito, online:c.totalOnline, outros:c.totalOutros, sangrias:c.totalSangrias, suprimentos:c.totalSuprimentos };
       for (const [kk,v] of Object.entries(vals)) { row[kk] = round2(row[kk]+toNum(v)); resumo[kk] = round2(resumo[kk]+toNum(v)); }
     }
-    const cancelamentosItens = movimentos.filter((movimento) =>
-      String(movimento.tipo || '').toLowerCase() === 'cancelamento_item'
-    );
-    res.json({ tipo, resumo, linhas: [...by.values()], caixas, pedidos, movimentos, cancelamentosItens });
+    res.json({ tipo, resumo, linhas: [...by.values()], caixas, pedidos, movimentos });
   } catch (e) { res.status(500).json({ message: 'Erro ao gerar relatório de caixa.', error: e.message }); }
 };
