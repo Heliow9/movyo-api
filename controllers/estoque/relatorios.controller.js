@@ -101,8 +101,10 @@ exports.comprasPorMeta = async (req, res) => {
     const insumos = await Insumo.find({ restauranteId, ativo: true }).lean();
     const insumoMap = new Map(insumos.map((i) => [String(i._id), i]));
 
-    // faltas consolidadas em baseUnit do insumo
-    const faltaPorInsumo = new Map(); // insumoId -> faltaBase
+    // Demanda consolidada: soma o consumo de todas as metas e desconta o
+    // estoque disponível uma única vez. Descontar o estoque por receita
+    // subestima a compra quando o mesmo insumo aparece em várias receitas.
+    const demandaPorInsumo = new Map();
 
     for (const r of receitas) {
       const meta = metas.find((m) => String(m.receitaId) === String(r._id));
@@ -114,23 +116,23 @@ exports.comprasPorMeta = async (req, res) => {
         if (!ins) continue;
 
         const consumoTotal = Number(it.consumoBasePorUn || 0) * qtd;
-        const falta = Math.max(0, consumoTotal - Number(ins.quantidadeBase || 0));
-
-        if (falta > 0) {
-          const key = String(ins._id);
-          faltaPorInsumo.set(key, (faltaPorInsumo.get(key) || 0) + falta);
-        }
+        const key = String(ins._id);
+        demandaPorInsumo.set(key, (demandaPorInsumo.get(key) || 0) + consumoTotal);
       }
     }
 
     const consolidado = [];
-    for (const [insumoId, faltaBase] of faltaPorInsumo.entries()) {
+    for (const [insumoId, demandaBase] of demandaPorInsumo.entries()) {
       const ins = insumoMap.get(insumoId);
       if (!ins) continue;
+      const faltaBase = Math.max(0, demandaBase - Number(ins.quantidadeBase || 0));
+      if (faltaBase <= 0) continue;
       consolidado.push({
         insumoId: ins._id,
         nome: ins.nome,
         baseUnit: ins.baseUnit,
+        demandaBase,
+        estoqueBase: Number(ins.quantidadeBase || 0),
         faltaBase,
       });
     }

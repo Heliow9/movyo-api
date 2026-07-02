@@ -2,6 +2,7 @@ const axios = require("axios");
 
 const Pedido = require("../models/Pedido");
 const Restaurante = require("../models/Restaurante");
+const { estornarEstoquePorPedido } = require("./estoque/baixarPorPedido");
 
 const MP_API = "https://api.mercadopago.com";
 
@@ -203,6 +204,20 @@ async function cancelarPedidoComAuditoria(pedido, options = {}) {
   pedido.pixCopiaECola = "";
 
   await pedido.save();
+
+  try {
+    await estornarEstoquePorPedido({
+      restauranteId,
+      pedidoId: pedido._id || pedido.id,
+      actorId: canceladoPor,
+    });
+  } catch (estoqueError) {
+    console.warn(
+      "Falha ao estornar estoque do pedido cancelado:",
+      pedido._id || pedido.id,
+      estoqueError?.message || estoqueError
+    );
+  }
 
   if (io && restauranteId) {
     io.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);

@@ -23,6 +23,7 @@ const {
 } = require("../services/pedidoCancelamentoService");
 const { enviarOferta } = require("../services/deliveryOfferService");
 const { planHasFeature } = require("../utils/planRules");
+const { baixarEstoquePorPedido } = require("../services/estoque/baixarPorPedido");
 
 const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
 
@@ -1561,6 +1562,7 @@ async function atualizarStatusItemCozinha(req, res, nextStatus) {
     // CompatÃ­vel com Mongoose e com o model MySQL usado nesta API.
     if (typeof pedido.markModified === "function") pedido.markModified("itens");
     await pedido.save();
+
     // reforÃ§o para MySQL/model JSON: garante persistÃªncia do array itens atualizado
     try { await Pedido.findByIdAndUpdate(pedido._id, { $set: { itens: pedido.itens } }); } catch (_) {}
 
@@ -1780,6 +1782,21 @@ const atualizarStatusPedido = async (req, res) => {
     }
     await pedido.save();
 
+    let estoque = null;
+    if (status === "em_producao" && statusAnterior !== "em_producao") {
+      try {
+        estoque = await baixarEstoquePorPedido({
+          restauranteId: pedidoRestauranteId,
+          pedidoId: pedido._id || pedido.id,
+          itensPedido: pedido.itens || [],
+          actorId: req.garcomId || req.user?._id || req.userId || req.restauranteId || null,
+        });
+      } catch (estoqueError) {
+        estoque = { ok: false, erro: estoqueError?.message || "Falha ao baixar estoque." };
+        console.warn("Falha na baixa de estoque do pedido:", pedido._id || pedido.id, estoque.erro);
+      }
+    }
+
     if (status === "em_producao" && caixaAbertoStatus) {
       // O movimento financeiro Ã© criado na confirmaÃ§Ã£o do pagamento. Aqui apenas
       // recalculamos o caixa, evitando duplicar vendas em pedidos mistos/parciais.
@@ -1825,7 +1842,7 @@ const atualizarStatusPedido = async (req, res) => {
       }
     }
 
-    return res.json({ sucesso: true, pedido });
+    return res.json({ sucesso: true, pedido, estoque });
   } catch (error) {
     console.error("âŒ Erro geral ao atualizar status:", error);
     return res.status(500).json({

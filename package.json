@@ -12,7 +12,8 @@
                     "perf:indexes":  "node scripts/ensure-performance-indexes.js",
                     "push:generate-keys":  "node scripts/generate-vapid-keys.js",
                     "test:delivery":  "node scripts/smoke-delivery-offer.js",
-                    "test:cancelamento":  "node scripts/smoke-pedido-cancelamento.js"
+                    "test:cancelamento":  "node scripts/smoke-pedido-cancelamento.js",
+                    "test:estoque-pizza":  "node scripts/smoke-estoque-pizza.js"
                 },
     "dependencies":  {
                          "@whiskeysockets/baileys":  "^6.7.16",

@@ -1,157 +1,138 @@
-// controllers/estoque/movimentos.controller.js
-const Produto = require("../../models/Produto");
-const Receita = require("../../models/Receita");
+const crypto = require("crypto");
 const Insumo = require("../../models/Insumo");
-
-// -------------------------------------
-// Helpers
-// -------------------------------------
-function baseFromUnidade(unidade) {
-  if (unidade === "g" || unidade === "kg") return "kg";
-  if (unidade === "ml" || unidade === "l") return "l";
-  if (unidade === "un") return "un";
-  return unidade;
-}
+const MovimentoEstoque = require("../../models/MovimentoEstoque");
+const { baixarEstoquePorPedido } = require("../../services/estoque/baixarPorPedido");
 
 function toBase(qtd, unidade) {
-  const n = Number(qtd || 0);
-  if (unidade === "g") return { base: "kg", value: n / 1000 };
-  if (unidade === "kg") return { base: "kg", value: n };
-  if (unidade === "ml") return { base: "l", value: n / 1000 };
-  if (unidade === "l") return { base: "l", value: n };
-  if (unidade === "un") return { base: "un", value: n };
-  return { base: unidade, value: n };
+  const value = Number(qtd || 0);
+  if (unidade === "g") return { base: "kg", value: value / 1000 };
+  if (unidade === "kg") return { base: "kg", value };
+  if (unidade === "ml") return { base: "l", value: value / 1000 };
+  if (unidade === "l") return { base: "l", value };
+  if (unidade === "un") return { base: "un", value };
+  return { base: unidade, value };
 }
 
-// baixa uma receita N vezes
-async function baixarReceita(receitaId, mult) {
-  const receita = await Receita.findById(receitaId).lean();
-  if (!receita) throw new Error("Receita não encontrada.");
+function baseFromInsumo(insumo) {
+  const unidade = insumo?.baseUnit || insumo?.unidadePadrao;
+  if (unidade === "g" || unidade === "kg") return "kg";
+  if (unidade === "ml" || unidade === "l") return "l";
+  return unidade || "un";
+}
 
-  const itens = Array.isArray(receita.itens)
-    ? receita.itens
-    : Array.isArray(receita.items)
-    ? receita.items
-    : [];
+async function getInsumo(req) {
+  return Insumo.findOne({
+    _id: req.params.id,
+    restauranteId: req.restauranteId,
+  });
+}
 
-  if (!itens.length) return;
-
-  const insumoIds = itens.map((x) => x.insumoId || x.insumo).filter(Boolean);
-  const insumos = await Insumo.find({ _id: { $in: insumoIds } });
-  const insumoMap = new Map(insumos.map((i) => [String(i._id), i]));
-
-  // valida
-  for (const it of itens) {
-    const insumoId = String(it.insumoId || it.insumo);
-    const ins = insumoMap.get(insumoId);
-    if (!ins) continue;
-
-    const qtd = Number(it.qtd ?? it.consumoBasePorUn ?? it.insumoBasePorUn ?? 0);
-    const unidade = it.unidade || it.baseUnit || "g";
-
-    const consumoBase = toBase(qtd, unidade);
-    const baseInsumo = baseFromUnidade(ins.unidadePadrao || ins.baseUnit);
-
-    if (consumoBase.base !== baseInsumo) {
-      throw new Error(`Unidade incompatível na receita (${ins.nome}).`);
-    }
-
-    const total = consumoBase.value * Number(mult || 1);
-    if ((ins.quantidadeBase || 0) - total < 0) {
-      throw new Error(`Estoque insuficiente para ${ins.nome}.`);
-    }
+exports.listarPorInsumo = async (req, res) => {
+  try {
+    const insumo = await getInsumo(req);
+    if (!insumo) return res.status(404).json({ message: "Insumo não encontrado." });
+    const movimentos = await MovimentoEstoque.find({
+      restauranteId: req.restauranteId,
+      insumoId: req.params.id,
+    }).sort({ data: -1 });
+    return res.json({ data: movimentos });
+  } catch (error) {
+    return res.status(500).json({ message: "Erro ao carregar histórico do insumo.", error: error.message });
   }
+};
 
-  // baixa
-  for (const it of itens) {
-    const insumoId = String(it.insumoId || it.insumo);
-    const ins = insumoMap.get(insumoId);
-    if (!ins) continue;
+exports.criarMovimentoManual = async (req, res) => {
+  try {
+    const insumo = await getInsumo(req);
+    if (!insumo) return res.status(404).json({ message: "Insumo não encontrado." });
 
-    const qtd = Number(it.qtd ?? it.consumoBasePorUn ?? it.insumoBasePorUn ?? 0);
-    const unidade = it.unidade || it.baseUnit || "g";
-    const consumoBase = toBase(qtd, unidade);
+    const tipo = String(req.body.tipo || "entrada").trim().toLowerCase();
+    const permitidos = new Set(["entrada", "compra", "saida", "perda", "ajuste", "inventario"]);
+    if (!permitidos.has(tipo)) return res.status(400).json({ message: "Tipo de movimento inválido." });
 
-    const total = consumoBase.value * Number(mult || 1);
+    const saldoAtual = Number(insumo.quantidadeBase || 0);
+    const unidadeInformada = String(req.body.unidade || insumo.unidadePadrao || insumo.baseUnit || "un");
+    let deltaBase = 0;
+
+    if (tipo === "ajuste" || tipo === "inventario") {
+      const alvo = toBase(req.body.novoSaldo ?? req.body.quantidade, unidadeInformada);
+      if (!Number.isFinite(alvo.value) || alvo.value < 0) {
+        return res.status(400).json({ message: "Novo saldo inválido." });
+      }
+      if (alvo.base !== baseFromInsumo(insumo)) {
+        return res.status(400).json({ message: "Unidade incompatível com o insumo." });
+      }
+      deltaBase = alvo.value - saldoAtual;
+    } else {
+      const quantidade = toBase(req.body.quantidade, unidadeInformada);
+      if (!Number.isFinite(quantidade.value) || quantidade.value <= 0) {
+        return res.status(400).json({ message: "Informe uma quantidade maior que zero." });
+      }
+      if (quantidade.base !== baseFromInsumo(insumo)) {
+        return res.status(400).json({ message: "Unidade incompatível com o insumo." });
+      }
+      deltaBase = ["saida", "perda"].includes(tipo) ? -quantidade.value : quantidade.value;
+    }
+
+    const novoSaldo = saldoAtual + deltaBase;
+    if (novoSaldo < 0) {
+      return res.status(409).json({
+        message: `Saldo insuficiente. Disponível: ${saldoAtual.toFixed(4)} ${baseFromInsumo(insumo)}.`,
+      });
+    }
 
     await Insumo.updateOne(
-      { _id: ins._id },
-      { $inc: { quantidadeBase: -Math.abs(total) } }
+      { _id: insumo._id, restauranteId: req.restauranteId },
+      { $inc: { quantidadeBase: deltaBase } }
     );
+
+    const movimento = await MovimentoEstoque.create({
+      restauranteId: req.restauranteId,
+      insumoId: insumo._id,
+      tipo,
+      quantidadeBase: deltaBase,
+      custoUnitarioBase: Number(req.body.custoUnitarioBase ?? insumo.costBase ?? 0),
+      origem: "manual",
+      referenciaId: req.body.referenciaId || null,
+      observacao: String(req.body.observacao || "").trim(),
+      criadoPor: req.user?._id || req.userId || req.restauranteId || null,
+      detalhes: { saldoAnterior: saldoAtual, saldoPosterior: novoSaldo },
+      data: new Date(),
+    });
+
+    return res.status(201).json({
+      ok: true,
+      data: movimento,
+      insumo: { ...insumo.toObject(), quantidadeBase: novoSaldo, estoqueAtualBase: novoSaldo },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Erro ao registrar movimento de estoque.", error: error.message });
   }
-}
-
-// -------------------------------------
-// ✅ Handlers que sua rota espera (não pode faltar)
-// -------------------------------------
-
-// GET /insumos/:id/movimentos
-exports.listarPorInsumo = async (req, res) => {
-  // Se você já tem model Movimento, substitui por query nele.
-  // Por enquanto, só pra não quebrar:
-  return res.json({ data: [] });
 };
 
-// POST /insumos/:id/movimentos  (compra/ajuste manual)
-exports.criarMovimentoManual = async (req, res) => {
-  // Aqui você implementa compra/ajuste manual e grava movimento.
-  // Por enquanto, stub seguro:
-  return res.json({ ok: true, mensagem: "Movimento manual ainda não implementado." });
-};
-
-// POST /baixa
 exports.baixarPorProduto = async (req, res) => {
   try {
-    const { produtoId, quantidade, opcionais } = req.body;
-    const q = Math.max(1, Math.floor(Number(quantidade || 1)));
-
-    const produto = await Produto.findById(produtoId).lean();
-    if (!produto) return res.status(404).json({ mensagem: "Produto não encontrado." });
-
-    // 1) baixa receita principal
-    if (produto.receita) {
-      await baixarReceita(produto.receita, q);
-    }
-
-    // 2) baixa opcionais selecionados (se o campo existir no model)
-    const ops = Array.isArray(opcionais) ? opcionais : [];
-    for (const key of ops) {
-      const vinc = produto.estoqueOpcionais?.get
-        ? produto.estoqueOpcionais.get(key)
-        : produto.estoqueOpcionais?.[key];
-
-      if (!vinc) continue;
-
-      if (vinc.receita) {
-        await baixarReceita(vinc.receita, q);
-        continue;
-      }
-
-      if (vinc.insumo && vinc.qtd > 0) {
-        const ins = await Insumo.findById(vinc.insumo);
-        if (!ins) continue;
-
-        const consumoBase = toBase(vinc.qtd, vinc.unidade || "un");
-        const baseInsumo = baseFromUnidade(ins.unidadePadrao || ins.baseUnit);
-
-        if (consumoBase.base !== baseInsumo) {
-          throw new Error(`Unidade incompatível no opcional (${key}).`);
-        }
-
-        const total = consumoBase.value * q;
-        if ((ins.quantidadeBase || 0) - total < 0) {
-          throw new Error(`Estoque insuficiente para ${ins.nome} (opcional ${key}).`);
-        }
-
-        await Insumo.updateOne(
-          { _id: ins._id },
-          { $inc: { quantidadeBase: -Math.abs(total) } }
-        );
-      }
-    }
-
-    return res.json({ ok: true, mensagem: "Baixa realizada com sucesso." });
-  } catch (err) {
-    return res.status(400).json({ ok: false, mensagem: err?.message || "Erro ao baixar estoque." });
+    const produtoId = String(req.body.produtoId || "");
+    if (!produtoId) return res.status(400).json({ message: "produtoId é obrigatório." });
+    const quantidade = Math.max(1, Math.floor(Number(req.body.quantidade || 1)));
+    const referenciaId = String(req.body.pedidoId || crypto.randomBytes(12).toString("hex"));
+    const item = {
+      produtoId,
+      quantidade,
+      saboresSelecionados: req.body.saboresSelecionados || req.body.sabores || [],
+      bordaSelecionada: req.body.bordaSelecionada || req.body.borda || null,
+      adicionalSelecionado: req.body.adicionalSelecionado || req.body.adicional || null,
+      complementosSelecionados: req.body.complementosSelecionados || [],
+      tiposExtrasSelecionados: req.body.tiposExtrasSelecionados || {},
+    };
+    const result = await baixarEstoquePorPedido({
+      restauranteId: req.restauranteId,
+      pedidoId: referenciaId,
+      itensPedido: [item],
+      actorId: req.user?._id || req.userId || req.restauranteId || null,
+    });
+    return res.json({ ...result, referenciaId });
+  } catch (error) {
+    return res.status(409).json({ ok: false, message: error?.message || "Erro ao baixar estoque." });
   }
 };

@@ -109,6 +109,34 @@ function normalizeProdutoBody(body = {}, { partial = false } = {}) {
   return normalized;
 }
 
+function validarEstoquePizza(produto = {}) {
+  const tipoItem = normalizeTipoItem(produto.tipoItem || produto.tipo || "comum");
+  const maxSabores = normalizeMaxSabores(produto.maxSabores, 1);
+  const estoquePizza = parseJsonSafe(produto.estoquePizza, {});
+  if (tipoItem !== "pizza" || maxSabores <= 1 || !toBool(estoquePizza?.ativo, false)) return null;
+
+  const receitaBaseId = String(
+    estoquePizza.receitaBaseId || produto.receita?._id || produto.receita?.id || produto.receita || ""
+  ).trim();
+  if (!receitaBaseId) {
+    return "Selecione a receita base antes de ativar o estoque da pizza multisabor.";
+  }
+
+  const sabores = parseJsonSafe(produto.sabores, []);
+  if (!Array.isArray(sabores) || !sabores.length) {
+    return "Adicione ao menos um sabor e vincule sua receita de estoque.";
+  }
+
+  const semReceita = sabores
+    .filter((sabor) => !String(sabor?.receitaId || sabor?.receita?._id || sabor?.receita || "").trim())
+    .map((sabor) => String(sabor?.nome || "Sabor sem nome"));
+  if (semReceita.length) {
+    return `Vincule uma receita de estoque para: ${semReceita.join(", ")}.`;
+  }
+
+  return null;
+}
+
 
 function normalizeProdutoResponse(produto) {
   if (!produto) return produto;
@@ -151,6 +179,8 @@ function boolFromDb(value, fallback = false) {
 const criarProduto = async (req, res) => {
   try {
     const payload = normalizeProdutoBody(req.body, { partial: false });
+    const erroEstoquePizza = validarEstoquePizza(payload);
+    if (erroEstoquePizza) return res.status(400).json({ erro: erroEstoquePizza });
     const novoProduto = await Produto.create(payload);
     res.status(201).json(normalizeProdutoResponse(novoProduto));
   } catch (err) {
@@ -166,6 +196,8 @@ const editarProduto = async (req, res) => {
   const { id } = req.params;
   try {
     const payload = normalizeProdutoBody(req.body, { partial: true });
+    const erroEstoquePizza = validarEstoquePizza(payload);
+    if (erroEstoquePizza) return res.status(400).json({ erro: erroEstoquePizza });
 
     const atualizado = await Produto.findByIdAndUpdate(id, payload, {
       new: true,
@@ -221,6 +253,8 @@ const getProdutosPorRestaurante = async (req, res) => {
         id: row.id,
         extras: parseJsonSafe(row.extras, []),
         estoque: parseJsonSafe(row.estoque, {}),
+        estoquePizza: parseJsonSafe(row.estoquePizza, {}),
+        estoqueOpcionais: parseJsonSafe(row.estoqueOpcionais, {}),
         sabores: parseJsonSafe(row.sabores, []),
         bordas: parseJsonSafe(row.bordas, []),
         adicionais: parseJsonSafe(row.adicionais, []),
