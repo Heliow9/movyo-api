@@ -1348,8 +1348,21 @@ const listarPedidosPorRestaurante = async (req, res) => {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.set("Pragma", "no-cache");
     res.set("Expires", "0");
-    const { status, origem, somenteMesa, somenteBalcao, page = 1, limit = 200, dataInicio, dataFim } =
-      req.query;
+    const {
+      status,
+      origem,
+      somenteMesa,
+      somenteBalcao,
+      page = 1,
+      limit = 200,
+      dataInicio,
+      dataFim,
+      skipCount,
+      semCount,
+    } = req.query;
+    const shouldSkipCount = [skipCount, semCount].some((value) =>
+      ["1", "true", "sim", "yes"].includes(String(value || "").trim().toLowerCase())
+    );
 
     if (!restauranteId) {
       return res.status(400).json({ message: "Restaurante Ã© obrigatÃ³rio." });
@@ -1386,18 +1399,20 @@ const listarPedidosPorRestaurante = async (req, res) => {
 
     const whereSql = where.join(" AND ");
     const countCacheKey = JSON.stringify({ whereSql, params });
-    const cachedTotal = getPedidosCountCache(countCacheKey);
-    const countPromise = cachedTotal === null
-      ? queryWithRetry(
-          `SELECT COUNT(*) AS total FROM pedidos WHERE ${whereSql}`,
-          params,
-          { label: "pedidos.listar.count" }
-        ).then((result) => {
-          const total = Number(result?.[0]?.[0]?.total || 0);
-          setPedidosCountCache(countCacheKey, total);
-          return total;
-        })
-      : Promise.resolve(cachedTotal);
+    const cachedTotal = shouldSkipCount ? 0 : getPedidosCountCache(countCacheKey);
+    const countPromise = shouldSkipCount
+      ? Promise.resolve(null)
+      : cachedTotal === null
+        ? queryWithRetry(
+            `SELECT COUNT(*) AS total FROM pedidos WHERE ${whereSql}`,
+            params,
+            { label: "pedidos.listar.count" }
+          ).then((result) => {
+            const total = Number(result?.[0]?.[0]?.total || 0);
+            setPedidosCountCache(countCacheKey, total);
+            return total;
+          })
+        : Promise.resolve(cachedTotal);
 
     // Executa contagem e listagem em paralelo. Antes eram sequenciais e a
     // latÃªncia do MySQL externo era somada, aumentando o risco de timeout.
@@ -1407,7 +1422,7 @@ const listarPedidosPorRestaurante = async (req, res) => {
         `SELECT ${PEDIDOS_LIST_COLUMNS}
            FROM pedidos
           WHERE ${whereSql}
-          ORDER BY criadoEm DESC, created_at DESC, id DESC
+          ORDER BY criadoEm DESC, id DESC
           LIMIT ? OFFSET ?`,
         [...params, limitNum, offset],
         { label: "pedidos.listar.rows" }
@@ -1416,13 +1431,14 @@ const listarPedidosPorRestaurante = async (req, res) => {
     const rows = rowsResult?.[0] || [];
 
     const pedidos = rows.map(rowToPedidoLean);
-    return res.json({
-      total,
+    const payload = {
       page: pageNum,
       limit: limitNum,
       pedidos,
       performanceMs: Date.now() - startedAt,
-    });
+    };
+    if (!shouldSkipCount) payload.total = total;
+    return res.json(payload);
   } catch (error) {
     console.error("Erro ao buscar pedidos:", error);
     res.status(500).json({
