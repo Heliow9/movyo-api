@@ -4,9 +4,72 @@ const CANCELADOS = new Set(["cancelado", "cancelada", "canceled", "cancelled", "
 const PENDENTES = new Set(["pendente", "aguardando_pagamento", "pagamento_pendente", "error"]);
 const PAGOS = new Set(["pago", "paid", "approved", "aprovado", "confirmado"]);
 const MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+const OPERATION_TIMEZONE = process.env.MOVYO_OPERATION_TIMEZONE || "America/Sao_Paulo";
 
 function norm(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function normAscii(value) {
+  return norm(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getOperationDateParts(value) {
+  if (!value) return null;
+
+  if (typeof value === "string") {
+    const text = value.trim();
+    const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(text);
+    const local = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+    if (local && !hasTimezone) {
+      return {
+        year: Number(local[1]),
+        month: Number(local[2]),
+        day: Number(local[3]),
+        hour: Number(local[4] || 0),
+      };
+    }
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: OPERATION_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return {
+    year: Number(map.year),
+    month: Number(map.month),
+    day: Number(map.day),
+    hour: Number(map.hour),
+  };
+}
+
+function isFreteItem(item = {}) {
+  const nome = normAscii(item.nome || item.titulo || item.descricao || item.title || item.name || "");
+  const tipo = normAscii(item.tipo || item.categoria || item.kind || "");
+  return (
+    tipo === "frete" ||
+    tipo === "taxa entrega" ||
+    tipo === "taxa de entrega" ||
+    nome === "frete" ||
+    nome === "entrega" ||
+    nome === "taxa entrega" ||
+    nome === "taxa de entrega" ||
+    nome === "delivery fee"
+  );
 }
 
 function round2(value) {
@@ -138,11 +201,11 @@ function createSeries(periodo, range) {
 }
 
 function bucketIndex(periodo, order) {
-  const date = new Date(order.criadoEm || order.created_at);
-  if (Number.isNaN(date.getTime())) return -1;
-  if (periodo === "ano") return date.getMonth();
-  if (periodo === "mes") return date.getDate() - 1;
-  return date.getHours();
+  const parts = getOperationDateParts(order.criadoEm || order.created_at);
+  if (!parts) return -1;
+  if (periodo === "ano") return parts.month - 1;
+  if (periodo === "mes") return parts.day - 1;
+  return parts.hour;
 }
 
 function groupLabel(value, kind) {
@@ -214,6 +277,7 @@ exports.obter = async (req, res) => {
       origens.set(origem, (origens.get(origem) || 0) + 1);
 
       parseJson(order.itens, []).forEach((item) => {
+        if (isFreteItem(item)) return;
         const nome = String(item.nome || item.titulo || item.descricao || "Item");
         const quantidade = Math.max(1, Number(item.quantidade || item.qtd || 1) || 1);
         const total = Number(item.precoTotal ?? item.total ?? item.subtotal ?? 0) ||
