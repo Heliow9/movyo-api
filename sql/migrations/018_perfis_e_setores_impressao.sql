@@ -1,0 +1,8 @@
+ALTER TABLE restaurantes
+  ADD COLUMN IF NOT EXISTS configuracaoImpressao LONGTEXT NULL;
+
+ALTER TABLE produtos
+  ADD COLUMN IF NOT EXISTS setorImpressao VARCHAR(32) NOT NULL DEFAULT 'auto';
+
+ALTER TABLE categorias_produto
+  ADD COLUMN IF NOT EXISTS setorImpressao VARCHAR(32) NOT NULL DEFAULT 'auto';

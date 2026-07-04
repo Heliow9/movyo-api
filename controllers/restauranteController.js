@@ -51,6 +51,18 @@ function sanitizeConfiguracoesPayload(body) {
 function normalizeConfiguracoesPayload(clean) {
   const out = { ...(clean || {}) };
 
+  if (Object.prototype.hasOwnProperty.call(out, "configuracaoImpressao")) {
+    const configuracao = parseJsonSafe(out.configuracaoImpressao, {});
+    const routes = configuracao?.routes && typeof configuracao.routes === "object"
+      ? Object.fromEntries(Object.entries(configuracao.routes).map(([id, route]) => {
+          const safeRoute = { ...(route || {}) };
+          delete safeRoute.printerName;
+          return [id, safeRoute];
+        }))
+      : {};
+    out.configuracaoImpressao = { ...(configuracao || {}), routes };
+  }
+
   // compat: se ainda vier o campo antigo do front
   if (
     out.maxPedidosPorEntregador == null &&
@@ -325,7 +337,7 @@ module.exports = {
       const [rows] = await queryWithRetry(
         `SELECT id, nome, email, cnpj, telefone, enderecoCep, enderecoRua, enderecoNumero,
                 enderecoBairro, enderecoCidade, enderecoEstado, logoUrl, logoSlug, slugIdentificador,
-                horariosFuncionamento, tempoMedioEntregaMin, tempoAutoCancelamentoVitrineMin, maxPedidosPorEntregador, pedidosPorEntregador,
+                horariosFuncionamento, configuracaoImpressao, tempoMedioEntregaMin, tempoAutoCancelamentoVitrineMin, maxPedidosPorEntregador, pedidosPorEntregador,
                 anotaaiStatus, anotaaiUrl, anotaaiIdentificador, anotaaiToken,
                 ifoodStatus, ifoodIdentificador, ifoodPrecisaConfirmacao, ifoodIgnorarPronto, ifood,
                 localizacao, statusBot, ativo, mensagensPersonalizadas, chavePix, recipient_id,
@@ -362,6 +374,7 @@ module.exports = {
         logoSlug: restaurante.logoSlug || "",
         slugIdentificador: restaurante.slugIdentificador || "",
         horariosFuncionamento: parse(restaurante.horariosFuncionamento, {}),
+        configuracaoImpressao: parse(restaurante.configuracaoImpressao, {}),
         tempoMedioEntregaMin: restaurante.tempoMedioEntregaMin ?? 45,
         tempoAutoCancelamentoVitrineMin: Number(restaurante.tempoAutoCancelamentoVitrineMin ?? 6),
         maxPedidosPorEntregador: restaurante.maxPedidosPorEntregador ?? restaurante.pedidosPorEntregador ?? 3,
@@ -574,6 +587,7 @@ module.exports = {
       if (!restaurante) {
         return res.status(404).json({ mensagem: "Restaurante não encontrado." });
       }
+      perfilCache.delete(String(restauranteId));
 
       return res.status(200).json({
         mensagem: "Configurações atualizadas com sucesso.",

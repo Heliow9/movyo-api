@@ -21,6 +21,10 @@ function boolFromDb(value, fallback = false) {
  */
 function normalizarCategoriaPayload(payload = {}) {
   const body = { ...payload };
+  const setor = String(body.setorImpressao || "auto").trim().toLowerCase();
+  body.setorImpressao = ["auto", "pizzaria", "chapa", "cozinha", "bar", "sobremesa", "nenhum"].includes(setor)
+    ? setor
+    : "auto";
 
   // 🍕 Se for pizza multisabor, força regras corretas
   if (body.pizzaMultisabor) {
@@ -72,6 +76,7 @@ const createCategoria = async (req, res) => {
     const novaCategoria = await CategoriaProduto.create({
       nome: payload.nome,
       restaurante: payload.restaurante,
+      setorImpressao: payload.setorImpressao,
 
       permiteSabores: payload.permiteSabores,
       permiteBordas: payload.permiteBordas,

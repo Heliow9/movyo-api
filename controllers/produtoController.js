@@ -45,6 +45,13 @@ function normalizeMaxSabores(value, fallback = 1) {
   return Math.max(1, Math.min(12, Math.round(n)));
 }
 
+function normalizeSetorImpressao(value) {
+  const setor = String(value || "auto").trim().toLowerCase();
+  return ["auto", "pizzaria", "chapa", "cozinha", "bar", "sobremesa", "nenhum"].includes(setor)
+    ? setor
+    : "auto";
+}
+
 function normalizeProdutoBody(body = {}, { partial = false } = {}) {
   // ✅ aceita:
   // - imprimeNaCozinha (novo)
@@ -60,6 +67,7 @@ function normalizeProdutoBody(body = {}, { partial = false } = {}) {
   const imprimeNaCozinha = toBool(raw, partial ? undefined : true);
 
   const normalized = { ...body };
+  normalized.setorImpressao = normalizeSetorImpressao(normalized.setorImpressao);
 
   // remove aliases pra não ficar lixo no doc
   delete normalized.imprimirNaCozinha;
@@ -226,6 +234,7 @@ const getProdutosPorRestaurante = async (req, res) => {
               c.ativa AS categoriaJoinAtiva, c.permiteSabores AS categoriaJoinPermiteSabores,
               c.pizzaMultisabor AS categoriaJoinPizzaMultisabor, c.calculoPrecoPor AS categoriaJoinCalculoPrecoPor,
               c.maxSabores AS categoriaJoinMaxSabores, c.tiposExtras AS categoriaJoinTiposExtras,
+              c.setorImpressao AS categoriaJoinSetorImpressao,
               c.saboresDisponiveis AS categoriaJoinSaboresDisponiveis,
               c.bordasDisponiveis AS categoriaJoinBordasDisponiveis,
               c.adicionaisDisponiveis AS categoriaJoinAdicionaisDisponiveis,
@@ -284,6 +293,7 @@ const getProdutosPorRestaurante = async (req, res) => {
           pizzaMultisabor: boolFromDb(row.categoriaJoinPizzaMultisabor, false),
           calculoPrecoPor: row.categoriaJoinCalculoPrecoPor || "maior",
           maxSabores: Number(row.categoriaJoinMaxSabores || 1),
+          setorImpressao: row.categoriaJoinSetorImpressao || "auto",
           tiposExtras: parseJsonSafe(row.categoriaJoinTiposExtras, []),
           saboresDisponiveis: parseJsonSafe(row.categoriaJoinSaboresDisponiveis, []),
           bordasDisponiveis: parseJsonSafe(row.categoriaJoinBordasDisponiveis, []),
