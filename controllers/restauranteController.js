@@ -39,6 +39,7 @@ function sanitizeConfiguracoesPayload(body) {
 
   // 🚫 não deixa sobrescrever integrações sensíveis / controladas por outros fluxos
   delete clean.mercadoPago;
+  delete clean.ifood;
   delete clean.recipient_id;
   delete clean.senha;
   delete clean.email;

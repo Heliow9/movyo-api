@@ -18,7 +18,14 @@ module.exports = function buildIfoodRoutes({ enqueueEvent } = {}) {
   // OAuth
   router.get("/connect-url", authRestaurante, ifood.startOAuth);
   router.get("/oauth/callback", ifood.callbackOAuth);
+  router.get("/status", authRestaurante, ifood.status);
+  router.post("/user-code", authRestaurante, ifood.requestUserCode);
+  router.post("/complete", authRestaurante, ifood.completeAuthorization);
+  router.post("/disconnect", authRestaurante, ifood.disconnect);
+  router.post("/pedido-teste", authRestaurante, ifood.criarPedidoTeste);
+
+  // Webhook publico configurado no Developer Portal do iFood.
+  router.post("/webhook", ifood.webhook);
 
   return router;
 };
-  

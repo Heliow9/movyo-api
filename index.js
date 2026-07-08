@@ -96,6 +96,7 @@ app.use(cors({
     "x-movyo-client",
     "X-Movyo-Version",
     "x-restaurante-id",
+    "X-IFood-Signature",
   ],
 
   exposedHeaders: [
@@ -108,7 +109,14 @@ app.use(cors({
   optionsSuccessStatus: 204,
 }));
 
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "1mb" }));
+app.use(express.json({
+  limit: process.env.JSON_BODY_LIMIT || "1mb",
+  verify: (req, _res, buf) => {
+    if (String(req.originalUrl || req.url || "").startsWith("/api/ifood/webhook")) {
+      req.rawBody = Buffer.from(buf);
+    }
+  },
+}));
 
 // ✅ DEV/PERF: mostra no terminal qualquer rota que demorar mais de 1s.
 // Ajuda a detectar gargalos sem poluir requests rápidas.
@@ -171,6 +179,7 @@ app.use("/api/balcao", require("./routes/balcaoRoutes"));
 app.use("/api/caixa", require("./routes/caixaRoutes"));
 app.use("/api/resumo", require("./routes/resumoRoutes"));
 app.use("/api/push", require("./routes/pushRoutes"));
+app.use("/api/ifood", require("./routes/ifoodRoutes")());
 
 const imagensRoutes = require("./routes/imagens.routes");
 app.use("/api/imagens", imagensRoutes);

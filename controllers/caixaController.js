@@ -77,6 +77,21 @@ function emitirCaixa(req, restauranteId, evento, caixa) {
   req.io?.to(sala).emit(evento.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), { caixa });
 }
 
+async function movimentosRecentesDoCaixa(restauranteId, caixaId, limit = 30) {
+  if (!caixaId) return [];
+  const safeLimit = Math.max(1, Math.min(100, Number(limit || 30)));
+  const [rows] = await queryWithRetry(
+    `SELECT *
+       FROM caixa_movimentos
+      WHERE restauranteId = ? AND caixaSessaoId = ?
+      ORDER BY COALESCE(data, created_at) DESC
+      LIMIT ${safeLimit}`,
+    [String(restauranteId), String(caixaId)],
+    { label: 'caixa.atual.movimentosRecentes' }
+  );
+  return (rows || []).map(withId);
+}
+
 exports.caixaAtual = async (req, res) => {
   try {
     const restauranteId = restauranteIdFromReq(req);
@@ -90,7 +105,10 @@ exports.caixaAtual = async (req, res) => {
 
     const caixa = await getCaixaAberto(restauranteId);
     const atualizado = caixa?._id ? await montarCaixaComTotais(caixa) : null;
-    const payload = { aberto: !!atualizado, caixa: atualizado || null };
+    const movimentos = atualizado?._id
+      ? await movimentosRecentesDoCaixa(restauranteId, atualizado._id || atualizado.id)
+      : [];
+    const payload = { aberto: !!atualizado, caixa: atualizado || null, movimentos };
     caixaAtualCache.set(cacheKey, { ts: Date.now(), data: payload });
     res.json(payload);
   } catch (e) { res.status(500).json({ message: 'Erro ao consultar caixa atual.', error: e.message }); }
