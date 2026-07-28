@@ -384,14 +384,28 @@ async function pedidosPeriodoQuery(restauranteId, inicio, fim, caixaIds=[]){
 module.exports = {
   async login(req,res){
     try{
-      await ensureAdminInicial();
       const email = String(req.body?.email || '').trim().toLowerCase();
       const senha = String(req.body?.senha || req.body?.password || '');
-      const admin = await AdminSaas.findOne({ email });
+      if(!email || !senha) return res.status(400).json({ mensagem:'Informe e-mail e senha.' });
+
+      // Um admin já cadastrado deve conseguir entrar mesmo quando as variáveis
+      // usadas exclusivamente para criar o primeiro admin não estão definidas.
+      let admin = await AdminSaas.findOne({ email });
+      if(!admin && email === ADMIN_INICIAL_EMAIL && ADMIN_INICIAL_SENHA){
+        admin = await ensureAdminInicial();
+      }
       if(!admin || admin.ativo === false) return res.status(401).json({ mensagem:'Login SaaS inválido.' });
-      const okSenha = await bcrypt.compare(senha, admin.senha || '');
+      const senhaArmazenada = String(admin.senha || '');
+      const senhaEmBcrypt = /^\$2[aby]\$\d{2}\$/.test(senhaArmazenada);
+      const okSenha = senhaEmBcrypt
+        ? await bcrypt.compare(senha, senhaArmazenada)
+        : Boolean(senhaArmazenada) && senha === senhaArmazenada;
       if(!okSenha) return res.status(401).json({ mensagem:'Login SaaS inválido.' });
-      await AdminSaas.findByIdAndUpdate(admin._id || admin.id, { $set:{ ultimoLoginEm:new Date() } });
+
+      const atualizacao = { ultimoLoginEm:new Date() };
+      // Migra automaticamente registros legados que ainda tenham senha em texto puro.
+      if(!senhaEmBcrypt) atualizacao.senha = await bcrypt.hash(senha, 10);
+      await AdminSaas.findByIdAndUpdate(admin._id || admin.id, { $set:atualizacao });
       return res.json({ token: signAdmin({ tipo:'saas-admin', adminId:admin._id || admin.id, email:admin.email, perfil:admin.tipo || 'full' }), admin: publicAdmin(admin) });
     }catch(e){ console.error('saas login:',e); return res.status(500).json({ mensagem:'Erro no login SaaS.' }); }
   },
