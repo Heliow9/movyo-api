@@ -18,6 +18,7 @@ const uploadLogo = require("../middlewares/uploadLogo");
 // auth
 router.post("/register", restauranteController.register);
 router.post("/login", restauranteController.loginRestaurant);
+router.post("/refresh", restauranteController.refreshSession);
 
 // recipient
 router.post("/:id/recipient", restauranteController.criarRecipientManual);

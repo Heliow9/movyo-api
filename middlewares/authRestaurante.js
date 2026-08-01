@@ -30,6 +30,12 @@ module.exports = async function authRestaurante(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+    // Refresh tokens so podem ser usados no endpoint publico de renovacao.
+    // Tokens antigos, ainda sem o campo "tipo", continuam compativeis ate expirarem.
+    if (decoded?.tipo === "refresh") {
+      return res.status(401).json({ mensagem: "Token invalido para acesso." });
+    }
+
     // ✅ restauranteId em vários formatos
     const restauranteId =
       decoded.restauranteId ||

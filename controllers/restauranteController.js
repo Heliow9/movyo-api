@@ -28,10 +28,27 @@ function parseJsonSafe(value, fallback) {
 }
 
 
-// Gerar token JWT
-const gerarToken = (id, sessaoVersao = 1) => {
-  return jwt.sign({ id, sessaoVersao: Number(sessaoVersao || 1) }, process.env.JWT_SECRET, { expiresIn: "7d" });
-};
+const ACCESS_TOKEN_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || "7d";
+const REFRESH_TOKEN_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || "30d";
+
+// O access token continua curto; o refresh token permite renovar a sessao
+// sem guardar novamente email/senha no computador do restaurante.
+const gerarToken = (id, sessaoVersao = 1) => jwt.sign(
+  { id, sessaoVersao: Number(sessaoVersao || 1), tipo: "access" },
+  process.env.JWT_SECRET,
+  { expiresIn: ACCESS_TOKEN_EXPIRES_IN }
+);
+
+const gerarRefreshToken = (id, sessaoVersao = 1) => jwt.sign(
+  { id, sessaoVersao: Number(sessaoVersao || 1), tipo: "refresh" },
+  process.env.JWT_SECRET,
+  { expiresIn: REFRESH_TOKEN_EXPIRES_IN }
+);
+
+const gerarTokensSessao = (id, sessaoVersao = 1) => ({
+  token: gerarToken(id, sessaoVersao),
+  refreshToken: gerarRefreshToken(id, sessaoVersao),
+});
 
 // remove chaves que NÃO podem ser atualizadas por /configuracoes
 function sanitizeConfiguracoesPayload(body) {
@@ -259,15 +276,84 @@ module.exports = {
         });
       }
 
-      const token = gerarToken(restaurante._id, restaurante.sessaoVersao || 1);
+      const tokens = gerarTokensSessao(restaurante._id, restaurante.sessaoVersao || 1);
       const restaurantePublico =
         typeof restaurante.toObject === "function" ? restaurante.toObject() : { ...restaurante };
       delete restaurantePublico.senha;
       restaurantePublico.planoInfo = getPlanSummary(restaurantePublico);
-      return res.status(200).json({ token, restaurante: restaurantePublico });
+      return res.status(200).json({ ...tokens, restaurante: restaurantePublico });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ mensagem: "Erro ao fazer login." });
+    }
+  },
+
+  // POST /api/restaurantes/refresh
+  async refreshSession(req, res) {
+    try {
+      const refreshToken = String(req.body?.refreshToken || "").trim();
+      const accessToken = String(req.body?.token || "").trim();
+      const sessionToken = refreshToken || accessToken;
+      if (!sessionToken) {
+        return res.status(401).json({
+          code: "REFRESH_TOKEN_REQUIRED",
+          mensagem: "Sessao expirada. Entre novamente.",
+        });
+      }
+
+      const decoded = jwt.verify(sessionToken, process.env.JWT_SECRET);
+      const tokenTypeAllowed = refreshToken
+        ? decoded?.tipo === "refresh"
+        : decoded?.tipo === "access" || decoded?.tipo == null;
+      if (!tokenTypeAllowed) {
+        return res.status(401).json({
+          code: "REFRESH_TOKEN_INVALID",
+          mensagem: "Sessao expirada. Entre novamente.",
+        });
+      }
+
+      const restauranteId = decoded.id || decoded.restauranteId || decoded._id;
+      const restaurante = restauranteId ? await Restaurante.findById(restauranteId) : null;
+      if (!restaurante) {
+        return res.status(401).json({
+          code: "REFRESH_TOKEN_INVALID",
+          mensagem: "Sessao expirada. Entre novamente.",
+        });
+      }
+
+      const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+      const fimPlano = restaurante?.dataFimPlano ? new Date(restaurante.dataFimPlano) : null;
+      const licencaVencida = fimPlano && !Number.isNaN(fimPlano.getTime()) && fimPlano < hoje;
+      if (licencaVencida) {
+        const assinaturaCobranca = await resumoCobrancaRestaurante(restaurante).catch(() => null);
+        return res.status(403).json({
+          mensagem: "Licenca vencida. Regularize o plano para continuar usando o Movyo.",
+          code: "LICENCA_VENCIDA",
+          restauranteId: String(restaurante._id || restaurante.id || ""),
+          assinaturaCobranca,
+        });
+      }
+
+      if (restaurante?.ativo === false || restaurante?.bloqueado === true || String(restaurante?.statusAssinatura || "").toLowerCase() === "bloqueado") {
+        return res.status(403).json({
+          mensagem: "Restaurante bloqueado/desativado. Fale com o suporte Movyo.",
+          code: "RESTAURANTE_BLOQUEADO",
+        });
+      }
+
+      return res.status(200).json(
+        gerarTokensSessao(restaurante._id || restaurante.id, restaurante.sessaoVersao || decoded.sessaoVersao || 1)
+      );
+    } catch (error) {
+      const isJwtError = ["TokenExpiredError", "JsonWebTokenError", "NotBeforeError"].includes(error?.name);
+      if (isJwtError) {
+        return res.status(401).json({
+          code: "REFRESH_TOKEN_INVALID",
+          mensagem: "Sessao expirada. Entre novamente.",
+        });
+      }
+      console.error("Erro ao renovar sessao do restaurante:", error);
+      return res.status(500).json({ mensagem: "Erro ao renovar sessao." });
     }
   },
 
