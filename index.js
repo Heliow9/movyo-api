@@ -183,6 +183,7 @@ app.use("/api/ifood", require("./routes/ifoodRoutes")());
 
 const imagensRoutes = require("./routes/imagens.routes");
 app.use("/api/imagens", imagensRoutes);
+app.use("/api/ia", require("./routes/iaRoutes"));
 
 // Teste / Health
 app.get("/health", (req, res) => {
