@@ -126,6 +126,36 @@ function normalizeSlugIdentificador(value) {
     .slice(0, 80);
 }
 
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function publicRestauranteCadastro(restaurante) {
+  const payload = restaurante && typeof restaurante.toObject === "function"
+    ? restaurante.toObject()
+    : { ...(restaurante || {}) };
+  delete payload.senha;
+  return payload;
+}
+
+async function buildSlugCadastroPublico(nome, cidade) {
+  const base = normalizeSlugIdentificador(nome);
+  if (!base) return "";
+
+  const candidates = [
+    base,
+    normalizeSlugIdentificador(`${base}-${cidade || ""}`),
+    `${base}-${Date.now().toString(36).slice(-6)}`,
+  ].filter((slug, index, all) => slug && all.indexOf(slug) === index);
+
+  for (const slug of candidates) {
+    const existente = await Restaurante.findOne({ slugIdentificador: slug });
+    if (!existente) return slug;
+  }
+
+  return `${base}-${Date.now().toString(36)}`.slice(0, 80);
+}
+
 async function ensureSlugDisponivel(slug, restauranteIdAtual) {
   if (!slug) return;
   const existente = await Restaurante.findOne({ slugIdentificador: slug });
@@ -146,6 +176,86 @@ function buildPublicPaymentFlags(restaurante) {
 }
 
 module.exports = {
+  // POST /api/restaurantes/public-cadastro
+  // Cadastro exclusivo do site: nunca cria sessao e sempre aguarda liberacao administrativa.
+  async publicRegister(req, res) {
+    try {
+      const body = req.body || {};
+      const nome = String(body.nomeRestaurante || body.nome || "").trim();
+      const responsavel = String(body.responsavel || "").trim();
+      const email = normalizeEmail(body.email);
+      const telefone = String(body.telefone || "").trim();
+      const cidade = String(body.cidade || body.enderecoCidade || "").trim();
+      const segmento = String(body.segmento || "Restaurante").trim();
+      const senha = String(body.senha || "");
+
+      if (!nome || !responsavel || !email || !telefone || !cidade || !senha) {
+        return res.status(400).json({
+          mensagem: "Preencha nome do restaurante, responsavel, telefone, cidade, email e senha.",
+        });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ mensagem: "Informe um email valido." });
+      }
+      if (senha.length < 6) {
+        return res.status(400).json({ mensagem: "A senha precisa ter pelo menos 6 caracteres." });
+      }
+
+      const restauranteExistente = await Restaurante.findOne({ email });
+      if (restauranteExistente) {
+        return res.status(409).json({ mensagem: "Email ja cadastrado." });
+      }
+
+      const slugIdentificador = await buildSlugCadastroPublico(nome, cidade);
+      if (!slugIdentificador) {
+        return res.status(400).json({ mensagem: "Nome do restaurante invalido." });
+      }
+
+      const inicioPlano = new Date();
+      const fimPlano = new Date(inicioPlano);
+      fimPlano.setDate(fimPlano.getDate() + 20);
+
+      const novoRestaurante = await Restaurante.create({
+        nome,
+        email,
+        senha: await bcrypt.hash(senha, 10),
+        telefone,
+        enderecoCidade: cidade,
+        emailCobranca: email,
+        slugIdentificador,
+        plano: "free",
+        ativo: false,
+        statusAssinatura: "bloqueado",
+        dataInicioPlano: inicioPlano,
+        dataFimPlano: fimPlano,
+        observacaoPlano: [
+          "Cadastro pelo site aguardando liberacao administrativa",
+          `Responsavel: ${responsavel}`,
+          `Segmento: ${segmento}`,
+          "Origem: site-movyo",
+        ].join(" | "),
+      });
+
+      const mensagem = "Cadastro recebido. O acesso permanecera bloqueado ate a liberacao pela equipe Movyo.";
+      return res.status(201).json({
+        ok: true,
+        status: "aguardando_liberacao",
+        mensagem,
+        message: mensagem,
+        restaurante: publicRestauranteCadastro(novoRestaurante),
+      });
+    } catch (error) {
+      console.error("cadastro publico de restaurante:", error);
+      const conflito = error?.code === "ER_DUP_ENTRY";
+      const status = Number(error?.statusCode || error?.status || (conflito ? 409 : 500));
+      return res.status(status).json({
+        mensagem: status === 409
+          ? "Email ou identificador ja cadastrado."
+          : "Erro ao cadastrar restaurante.",
+      });
+    }
+  },
+
   // POST /api/restaurantes/register
   async register(req, res) {
     try {

@@ -16,6 +16,11 @@ const {
 const uploadLogo = require("../middlewares/uploadLogo");
 
 // auth
+router.post(
+  "/public-cadastro",
+  rateLimitPublico({ prefix: "cadastro-restaurante", max: 10 }),
+  restauranteController.publicRegister
+);
 router.post("/register", restauranteController.register);
 router.post("/login", restauranteController.loginRestaurant);
 router.post("/refresh", restauranteController.refreshSession);
