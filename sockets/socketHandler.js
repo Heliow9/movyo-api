@@ -1,5 +1,6 @@
 let entregadoresOnline = [];
 const timeoutsDePedidos = new Map();
+const locationWriteStates = new Map();
 
 const Pedido = require("../models/Pedido");
 const Entregador = require("../models/Entregador");
@@ -11,6 +12,10 @@ const { enviarOferta, aceitarOferta, recusarOferta } = require("../services/deli
 const { atualizarStatusJornada, registrarLocalizacao } = require("../services/entregadorJornadaService");
 
 const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
+const SOCKET_DEBUG = String(process.env.SOCKET_DEBUG || "").toLowerCase() === "true";
+const SOCKET_REQUIRE_AUTH = String(process.env.SOCKET_REQUIRE_AUTH || "").toLowerCase() === "true";
+const LOCATION_PERSIST_INTERVAL_MS = Math.max(1000, Number(process.env.LOCATION_PERSIST_INTERVAL_MS || 3000));
+const LOCATION_MAX_EVENTS_PER_SECOND = Math.max(1, Number(process.env.LOCATION_MAX_EVENTS_PER_SECOND || 5));
 
 function idString(value) {
   return String(value?._id || value?.id || value || "");
@@ -38,6 +43,7 @@ module.exports = (io) => {
       socket.handshake?.auth?.token || socket.handshake?.query?.token || ""
     ).replace(/^Bearer\s+/i, "").trim();
     if (!token) {
+      if (SOCKET_REQUIRE_AUTH) return next(new Error("AUTH_OBRIGATORIA"));
       socket.data.auth = null;
       return next();
     }
@@ -45,14 +51,17 @@ module.exports = (io) => {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       socket.data.auth = decoded;
       let role = String(decoded.role || "").toLowerCase();
-      if (!role && decoded.id) {
-        const legacyDriver = await Entregador.findById(decoded.id).lean().catch(() => null);
+      const decodedId = decoded.id || decoded._id;
+      if (!role && decodedId) {
+        const legacyDriver = await Entregador.findById(decodedId).lean().catch(() => null);
         role = legacyDriver ? "entregador" : "restaurante";
       }
       socket.data.role = role || "restaurante";
-      socket.data.restauranteId = idString(decoded.restauranteId || decoded.idRestaurante || decoded.id);
+      socket.data.restauranteId = idString(
+        decoded.restauranteId || decoded.idRestaurante || decoded.restaurante?._id || decoded._id || decoded.id
+      );
       socket.data.entregadorId = socket.data.role === "entregador"
-        ? idString(decoded.entregadorId || decoded.id)
+        ? idString(decoded.entregadorId || decoded._id || decoded.id)
         : "";
       return next();
     } catch (error) {
@@ -61,25 +70,33 @@ module.exports = (io) => {
   });
 
   io.on("connection", (socket) => {
-    console.log("🔌 Socket conectado:", socket.id);
+    if (SOCKET_DEBUG) console.log("Socket conectado:", socket.id);
+
+    const canAccessRestaurante = (restauranteId) => {
+      const requested = idString(restauranteId);
+      if (!requested) return false;
+      if (!socket.data.auth) return !SOCKET_REQUIRE_AUTH;
+      return idString(socket.data.restauranteId) === requested;
+    };
+
+    const rejectUnauthorizedRoom = (ack, message = "Sala nao autorizada.") => {
+      ack?.({ ok: false, message });
+    };
 
     const safeJoin = (room) => {
       if (!room) return;
       socket.join(room);
-      console.log(`✅ join: ${socket.id} -> ${room}`);
-      // ajuda debug: mostra as rooms atuais
-      // (sempre tem a room do próprio socket.id)
-      console.log("rooms:", Array.from(socket.rooms));
+      if (SOCKET_DEBUG) console.log(`join: ${socket.id} -> ${room}`);
     };
 
     /* =========================================================
      * 🏪 RESTAURANTE
      * =======================================================*/
-    socket.on("joinRestaurante", ({ restauranteId } = {}) => {
+    socket.on("joinRestaurante", ({ restauranteId } = {}, ack) => {
       if (!restauranteId) {
-        console.log("⚠️ joinRestaurante sem restauranteId");
-        return;
+        return rejectUnauthorizedRoom(ack, "restauranteId obrigatorio.");
       }
+      if (!canAccessRestaurante(restauranteId)) return rejectUnauthorizedRoom(ack);
 
       const room = `restaurante-${restauranteId}`;
       safeJoin(room);
@@ -88,17 +105,19 @@ module.exports = (io) => {
         "deliverersOnline",
         entregadoresOnline.filter((e) => e.restauranteId === String(restauranteId))
       );
+      ack?.({ ok: true });
     });
 
     /* =========================================================
      * 🪑 MESA / COMANDA
      * =======================================================*/
-    socket.on("joinMesa", ({ mesaId } = {}) => {
+    socket.on("joinMesa", ({ mesaId } = {}, ack) => {
       if (!mesaId) {
-        console.log("⚠️ joinMesa sem mesaId");
-        return;
+        return rejectUnauthorizedRoom(ack, "mesaId obrigatorio.");
       }
+      if (SOCKET_REQUIRE_AUTH && !socket.data.auth) return rejectUnauthorizedRoom(ack);
       safeJoin(`mesa-${mesaId}`);
+      ack?.({ ok: true });
     });
 
     /* =========================================================
@@ -107,9 +126,9 @@ module.exports = (io) => {
      * =======================================================*/
     socket.on("itemAdicionadoMesa", ({ restauranteId, mesaId, pedido, mesa } = {}) => {
       if (!restauranteId || !mesaId) {
-        console.log("⚠️ itemAdicionadoMesa faltando restauranteId/mesaId");
         return;
       }
+      if (!canAccessRestaurante(restauranteId)) return;
 
       // ✅ mantém: atualizar a comanda só pra quem está na sala da mesa
       if (pedido) {
@@ -135,6 +154,7 @@ module.exports = (io) => {
      * =======================================================*/
     socket.on("mesaAberta", ({ restauranteId, mesa } = {}) => {
       if (!restauranteId) return;
+      if (!canAccessRestaurante(restauranteId)) return;
 
       // mantém seu evento atual
       io.to(`restaurante-${restauranteId}`).emit("mesaAberta", mesa);
@@ -150,6 +170,7 @@ module.exports = (io) => {
      * =======================================================*/
     socket.on("mesaFechada", ({ restauranteId, mesaId, mesa } = {}) => {
       if (!restauranteId || !mesaId) return;
+      if (!canAccessRestaurante(restauranteId)) return;
 
       io.to(`mesa-${mesaId}`).emit("mesaFechada");
       io.to(`restaurante-${restauranteId}`).emit("mesaFechada", mesaId);
@@ -172,6 +193,7 @@ module.exports = (io) => {
         }
         const entregador = await Entregador.findById(authId);
         if (!entregador) return ack?.({ ok: false, message: "Motorista nao encontrado." });
+        socket.data.entregador = entregador;
         safeJoin(`entregador-${authId}`);
         await atualizarStatusJornada(entregador, status !== false);
         entregadoresOnline = entregadoresOnline.filter((e) => e.id !== authId);
@@ -218,29 +240,87 @@ module.exports = (io) => {
         }
         const lat = Number(latitude);
         const lng = Number(longitude);
-        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
           return ack?.({ ok: false, message: "Localizacao invalida." });
         }
-        const entregador = await Entregador.findById(authId);
+
+        const now = Date.now();
+        const rate = socket.data.locationRate || { windowStartedAt: now, count: 0 };
+        if (now - rate.windowStartedAt >= 1000) {
+          rate.windowStartedAt = now;
+          rate.count = 0;
+        }
+        rate.count += 1;
+        socket.data.locationRate = rate;
+        if (rate.count > LOCATION_MAX_EVENTS_PER_SECOND) {
+          return ack?.({ ok: true, throttled: true });
+        }
+
+        const entregador = socket.data.entregador || await Entregador.findById(authId);
         if (!entregador) return ack?.({ ok: false, message: "Motorista nao encontrado." });
-        const { jornada } = await registrarLocalizacao(entregador, { latitude: lat, longitude: lng });
+        socket.data.entregador = entregador;
+        const restauranteId = idString(entregador.restaurante);
+        const localizacao = { latitude: lat, longitude: lng };
+        entregador.localizacao = localizacao;
         entregadoresOnline = entregadoresOnline.map((item) =>
-          item.id === authId ? { ...item, localizacao: { latitude: lat, longitude: lng } } : item
+          item.id === authId ? { ...item, localizacao } : item
         );
         const payload = {
           entregadorId: authId,
           latitude: lat,
           longitude: lng,
-          distanciaPercorridaKm: Number(jornada.distanciaPercorridaKm || 0),
+          distanciaPercorridaKm: Number(socket.data.distanciaPercorridaKm || 0),
           atualizadoEm: new Date(),
         };
-        io.to(`entregador-${authId}`).emit("atualizacaoLocalizacao", payload);
-        io.to(`restaurante-${idString(entregador.restaurante)}`).emit("localizacaoAtualizada", payload);
-        io.to(`restaurante-${idString(entregador.restaurante)}`).emit(
-          "deliverersOnline",
-          entregadoresOnline.filter((e) => e.restauranteId === idString(entregador.restaurante))
-        );
-        ack?.({ ok: true });
+        io.to(`entregador-${authId}`).volatile.emit("atualizacaoLocalizacao", payload);
+        io.to(`restaurante-${restauranteId}`).volatile.emit("localizacaoAtualizada", payload);
+
+        const state = locationWriteStates.get(authId) || {
+          lastPersistAt: 0,
+          pending: null,
+          timer: null,
+          inFlight: false,
+        };
+        state.pending = { entregador, localizacao, socket };
+        locationWriteStates.set(authId, state);
+
+        const flushLocation = async () => {
+          if (state.inFlight || !state.pending) return;
+          const current = state.pending;
+          state.pending = null;
+          state.inFlight = true;
+          state.timer = null;
+          try {
+            const { jornada } = await registrarLocalizacao(current.entregador, current.localizacao);
+            state.lastPersistAt = Date.now();
+            current.socket.data.distanciaPercorridaKm = Number(jornada.distanciaPercorridaKm || 0);
+          } catch (error) {
+            console.warn("Persistencia de localizacao falhou:", error?.message || error);
+          } finally {
+            state.inFlight = false;
+            if (state.pending && !state.timer) {
+              state.timer = setTimeout(() => {
+                state.timer = null;
+                void flushLocation();
+              }, LOCATION_PERSIST_INTERVAL_MS);
+              state.timer.unref?.();
+            } else if (!state.pending && !current.socket.connected) {
+              locationWriteStates.delete(authId);
+            }
+          }
+        };
+
+        const elapsed = now - state.lastPersistAt;
+        if (!state.inFlight && elapsed >= LOCATION_PERSIST_INTERVAL_MS) {
+          void flushLocation();
+        } else if (!state.timer) {
+          state.timer = setTimeout(() => {
+            state.timer = null;
+            void flushLocation();
+          }, Math.max(1, LOCATION_PERSIST_INTERVAL_MS - elapsed));
+          state.timer.unref?.();
+        }
+        ack?.({ ok: true, queued: true });
       } catch (error) {
         console.log("localizacao motorista erro:", error?.message);
         ack?.({ ok: false, message: error?.message || "Erro de localizacao." });
@@ -304,8 +384,15 @@ module.exports = (io) => {
     });
 
     socket.on("disconnect", () => {
-      console.log("🔌 Desconectado:", socket.id);
+      if (SOCKET_DEBUG) console.log("Socket desconectado:", socket.id);
+      const removed = entregadoresOnline.find((e) => e.socketId === socket.id);
       entregadoresOnline = entregadoresOnline.filter((e) => e.socketId !== socket.id);
+      if (removed?.restauranteId) {
+        io.to(`restaurante-${removed.restauranteId}`).emit(
+          "deliverersOnline",
+          entregadoresOnline.filter((e) => e.restauranteId === removed.restauranteId)
+        );
+      }
     });
   });
 };

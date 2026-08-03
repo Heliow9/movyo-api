@@ -12,7 +12,8 @@ const config = {
   idleTimeout: Number(process.env.MYSQL_IDLE_TIMEOUT || 60000),
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
-  queueLimit: 0,
+  connectTimeout: Number(process.env.MYSQL_CONNECT_TIMEOUT || 10000),
+  queueLimit: Number(process.env.MYSQL_QUEUE_LIMIT || 200),
   charset: 'utf8mb4',
   // Os DATETIME da Movyo são gravados como horário operacional do Brasil.
   // Sem timezone explícito, servidores Linux em UTC interpretam 19:13 como 19:13Z,

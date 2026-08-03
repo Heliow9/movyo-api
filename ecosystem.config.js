@@ -5,7 +5,11 @@ module.exports = {
       script: "index.js",
       instances: 1,
       exec_mode: "fork",
-      watch: true,
+      watch: false,
+      autorestart: true,
+      exp_backoff_restart_delay: 100,
+      max_memory_restart: "750M",
+      kill_timeout: 10000,
       ignore_watch: [
         "sessions",
         "uploads",

@@ -24,6 +24,7 @@ const {
 const { enviarOferta } = require("../services/deliveryOfferService");
 const { planHasFeature } = require("../utils/planRules");
 const { baixarEstoquePorPedido } = require("../services/estoque/baixarPorPedido");
+const { confirmarPedidoNoIfood } = require("./ifoodController");
 
 const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
 
@@ -1735,6 +1736,7 @@ const atualizarStatusPedido = async (req, res) => {
 
     const statusAnterior = pedido.status;
     const tipoCancelamento = req.body?.tipoCancelamento || req.body?.tipo || "";
+    let ifoodSync = null;
 
     if (pedidoJaCancelado(pedido) && String(status || "").toLowerCase() !== "cancelado") {
       return res.status(409).json({ erro: "Pedido cancelado não pode ser reaberto por alteração de status." });
@@ -1769,6 +1771,22 @@ const atualizarStatusPedido = async (req, res) => {
         estorno: result.estorno,
         jaCancelado: !!result.jaCancelado,
       });
+    }
+
+    if (
+      String(status || "").toLowerCase() === "em_producao" &&
+      String(statusAnterior || "").toLowerCase() !== "em_producao"
+    ) {
+      try {
+        ifoodSync = await confirmarPedidoNoIfood(pedido);
+      } catch (ifoodError) {
+        console.error("[iFood] Falha ao confirmar pedido antes de aceitar no MOVYO:", ifoodError?.details || ifoodError?.message || ifoodError);
+        return res.status(ifoodError.status || 502).json({
+          erro: "Nao foi possivel confirmar o pedido no iFood.",
+          detalhes: ifoodError.message,
+          ifood: ifoodError.details || null,
+        });
+      }
     }
 
     pedido.status = status;
@@ -1858,7 +1876,7 @@ const atualizarStatusPedido = async (req, res) => {
       }
     }
 
-    return res.json({ sucesso: true, pedido, estoque });
+    return res.json({ sucesso: true, pedido, estoque, ifood: ifoodSync });
   } catch (error) {
     console.error("âŒ Erro geral ao atualizar status:", error);
     return res.status(500).json({
@@ -2863,5 +2881,4 @@ module.exports = {
   marcarItemEntregueMesa,
   marcarItemEntregueCliente,
 };
-
 

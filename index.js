@@ -5,6 +5,7 @@ require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
+const compression = require("compression");
 const socketIo = require("socket.io");
 const path = require("path");
 
@@ -12,7 +13,7 @@ const { iniciarBot } = require("./utils/bot");
 // const { startIfoodPolling } = require("./services/ifoodEventsService");
 
 const Restaurante = require("./models/Restaurante");
-const { testConnection } = require("./db/mysql");
+const { pool, testConnection } = require("./db/mysql");
 const { syncAllModels } = require("./lib/mysqlModelFactory");
 const apiMonitor = require("./utils/apiMonitor");
 const { cancelarPedidosVitrineExpirados } = require("./services/pedidoCancelamentoService");
@@ -31,6 +32,19 @@ const allowedOrigins = String(process.env.CORS_ORIGINS || "https://app.movyo.del
 
 const app = express();
 const server = http.createServer(app);
+let databaseReady = false;
+let databaseLastError = null;
+
+app.set(
+  "trust proxy",
+  process.env.TRUST_PROXY_HOPS !== undefined
+    ? Math.max(0, Number(process.env.TRUST_PROXY_HOPS) || 0)
+    : process.env.NODE_ENV === "production" ? 1 : false
+);
+
+server.keepAliveTimeout = Math.max(5000, Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 65000));
+server.headersTimeout = Math.max(server.keepAliveTimeout + 1000, Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 66000));
+server.requestTimeout = Math.max(10000, Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 120000));
 
 const io = socketIo(server, {
   cors: {
@@ -109,6 +123,10 @@ app.use(cors({
   optionsSuccessStatus: 204,
 }));
 
+app.use(compression({
+  threshold: Number(process.env.COMPRESSION_THRESHOLD_BYTES || 1024),
+}));
+
 app.use(express.json({
   limit: process.env.JSON_BODY_LIMIT || "1mb",
   verify: (req, _res, buf) => {
@@ -132,7 +150,13 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
+  etag: true,
+  lastModified: true,
+  maxAge: process.env.NODE_ENV === "production"
+    ? process.env.UPLOADS_CACHE_MAX_AGE || "1d"
+    : 0,
+}));
 
 // ✅ Compat: troca de senha fora do router /api/restaurantes, para evitar 404 em builds antigos/proxy
 try {
@@ -194,16 +218,31 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, message: "API funcionando 🚀", service: "movyo-api", ts: new Date().toISOString() });
 });
 
+app.get(["/ready", "/api/ready"], (req, res) => {
+  const status = databaseReady ? 200 : 503;
+  return res.status(status).json({
+    ok: databaseReady,
+    service: "movyo-api",
+    database: databaseReady ? "ready" : "unavailable",
+    error: databaseReady || process.env.NODE_ENV === "production" ? undefined : databaseLastError,
+    ts: new Date().toISOString(),
+  });
+});
+
 
 
 if (String(process.env.DISABLE_AUTO_CANCEL_VITRINE || "").toLowerCase() !== "true") {
   const autoCancelMs = Math.max(15000, Number(process.env.AUTO_CANCEL_VITRINE_INTERVAL_MS || 30000));
+  let autoCancelRunning = false;
   setInterval(() => {
+    if (autoCancelRunning || !databaseReady) return;
+    autoCancelRunning = true;
     cancelarPedidosVitrineExpirados({ io })
       .then((r) => {
         if (r?.cancelados) console.log(`Auto-cancelamento vitrine: ${r.cancelados} pedido(s) cancelado(s).`);
       })
-      .catch((err) => console.error("Auto-cancelamento vitrine falhou:", err?.message || err));
+      .catch((err) => console.error("Auto-cancelamento vitrine falhou:", err?.message || err))
+      .finally(() => { autoCancelRunning = false; });
   }, autoCancelMs);
 }
 
@@ -268,10 +307,16 @@ async function restaurarBotsLigados() {
 async function iniciarBanco() {
   try {
     await testConnection();
-    await syncAllModels();
+    if (String(process.env.SYNC_SCHEMA_ON_STARTUP || "true").toLowerCase() !== "false") {
+      await syncAllModels();
+    }
     await recuperarOfertasPendentes(io);
     await restaurarBotsLigados();
+    databaseReady = true;
+    databaseLastError = null;
   } catch (err) {
+    databaseReady = false;
+    databaseLastError = err?.message || String(err);
     console.error("🔴 Falha ao iniciar MySQL:", err?.message || err);
     setTimeout(iniciarBanco, 3000);
   }
@@ -288,9 +333,15 @@ server.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`))
 /* =========================================================
    ✅ SHUTDOWN GRACEFUL (não crasha ao encerrar)
    ========================================================= */
+let shuttingDown = false;
 function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  databaseReady = false;
   console.log(`\n🧯 Recebido ${signal}. Encerrando com segurança...`);
-  server.close(() => {
+  io.disconnectSockets(true);
+  server.close(async () => {
+    try { await pool.end(); } catch (_) {}
     console.log("✅ Servidor encerrado.");
     process.exit(0);
   });

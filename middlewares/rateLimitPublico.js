@@ -3,8 +3,9 @@
 const buckets = new Map();
 
 function clientKey(req) {
-  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  return forwarded || req.ip || req.socket?.remoteAddress || 'unknown';
+  // req.ip respeita a configuracao "trust proxy" do Express e evita aceitar
+  // diretamente um X-Forwarded-For forjado pelo cliente.
+  return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
 function rateLimitPublico(options = {}) {

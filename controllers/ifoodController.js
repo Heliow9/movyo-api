@@ -224,6 +224,59 @@ async function fetchIfoodOrderDetails(orderId, restaurante) {
   return data || {};
 }
 
+async function postIfoodOrderAction(restaurante, orderId, action) {
+  const token = await getTokenForRestaurante(restaurante);
+  const { data } = await axios.post(`${ORDER_BASE_URL}/orders/${encodeURIComponent(orderId)}/${action}`, null, {
+    timeout: 15000,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+  });
+  return data || {};
+}
+
+async function confirmarPedidoNoIfood(pedido) {
+  const origem = normalizeKey(pedido?.origem || pedido?.marketplace || pedido?.canalVenda);
+  const orderId = safeString(pedido?.externalOrderId, 191);
+  if (origem !== "ifood" || !orderId) return null;
+
+  // Pedido criado pelo botao "Gerar pedido teste" do MOVYO nao existe na API real do iFood.
+  if (/^IFTEST-/i.test(orderId)) {
+    return { ok: true, skipped: true, reason: "pedido_teste_movyo", orderId };
+  }
+
+  const restaurante = pedido?.restaurante && typeof pedido.restaurante === "object"
+    ? pedido.restaurante
+    : await Restaurante.findById(pedido?.restaurante);
+  if (!restaurante) {
+    const error = new Error("Restaurante do pedido iFood nao encontrado.");
+    error.status = 404;
+    throw error;
+  }
+
+  try {
+    const data = await postIfoodOrderAction(restaurante, orderId, "confirm");
+    return { ok: true, action: "confirm", orderId, data };
+  } catch (error) {
+    const status = Number(error?.response?.status || error?.status || 0);
+    const details = error?.response?.data || null;
+    const message = details?.message || details?.error?.message || error?.message || "Falha ao confirmar pedido no iFood.";
+
+    // 409 normalmente indica que a acao ja foi aplicada ou que o pedido mudou de estado.
+    // Nao travamos o operador nesses casos para evitar duplo aceite/duplicidade operacional.
+    if (status === 409) {
+      return { ok: true, action: "confirm", alreadyProcessed: true, orderId, status, details };
+    }
+
+    const syncError = new Error(message);
+    syncError.status = status || 502;
+    syncError.details = details;
+    throw syncError;
+  }
+}
+
 function normalizeItems(order = {}) {
   const rawItems = pick(order, ["items", "itens", "order.items"], []) || [];
   const list = Array.isArray(rawItems) ? rawItems : [];
@@ -838,7 +891,10 @@ exports.callbackOAuth = async (_req, res) => {
 
 exports._private = {
   buildPedidoFromIfood,
+  confirmarPedidoNoIfood,
   criarOuAtualizarPedidoIfood,
   processIfoodEvent,
   verifyWebhookSignature,
 };
+
+exports.confirmarPedidoNoIfood = confirmarPedidoNoIfood;

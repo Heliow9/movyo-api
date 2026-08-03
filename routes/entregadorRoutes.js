@@ -23,6 +23,7 @@ module.exports = (io) => {
   router.post("/me/status", authMotoristas, appController.status);
   router.post("/me/localizacao", authMotoristas, appController.localizacao);
   router.put("/me/token", authMotoristas, appController.token);
+  router.get("/me/pedidos/:pedidoId", authMotoristas, appController.obterPedido);
   router.post("/me/pedidos/:pedidoId/aceitar", authMotoristas, appController.aceitar);
   router.post("/me/pedidos/:pedidoId/recusar", authMotoristas, appController.recusar);
   router.post("/me/pedidos/:pedidoId/iniciar", authMotoristas, appController.iniciar);

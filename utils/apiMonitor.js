@@ -29,6 +29,7 @@ function trackRoute(req, ms, statusCode) {
     lastMs: 0,
     lastStatusCode: null,
     lastAt: null,
+    recentMs: [],
   };
 
   current.count += 1;
@@ -37,6 +38,8 @@ function trackRoute(req, ms, statusCode) {
   current.lastMs = Number(ms || 0);
   current.lastStatusCode = statusCode;
   current.lastAt = new Date().toISOString();
+  current.recentMs.push(Number(ms || 0));
+  if (current.recentMs.length > 100) current.recentMs.shift();
   routeStats.set(key, current);
 
   if (routeStats.size > 250) {
@@ -70,10 +73,19 @@ function captureError(err, req) {
 }
 
 function snapshot() {
+  const percentile = (values, p) => {
+    if (!values?.length) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)];
+  };
   const rotasMaisLentas = Array.from(routeStats.values())
     .map((route) => ({
       ...route,
       avgMs: Math.round(route.totalMs / Math.max(1, route.count)),
+      p50Ms: percentile(route.recentMs, 0.5),
+      p95Ms: percentile(route.recentMs, 0.95),
+      p99Ms: percentile(route.recentMs, 0.99),
+      recentMs: undefined,
     }))
     .sort((a, b) => (b.avgMs - a.avgMs) || (b.maxMs - a.maxMs))
     .slice(0, 20);

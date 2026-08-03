@@ -14,12 +14,14 @@
                     "test:delivery":  "node scripts/smoke-delivery-offer.js",
                     "test:cancelamento":  "node scripts/smoke-pedido-cancelamento.js",
                     "test:estoque-pizza":  "node scripts/smoke-estoque-pizza.js",
-                    "test:cadastro-site":  "node scripts/smoke-public-restaurant-signup.js"
+                    "test:cadastro-site":  "node scripts/smoke-public-restaurant-signup.js",
+                    "test:unit":  "node --test tests/*.test.js"
                 },
     "dependencies":  {
                          "@whiskeysockets/baileys":  "^6.7.16",
                          "axios":  "^1.8.4",
                          "bcryptjs":  "^3.0.2",
+                         "compression":  "^1.8.1",
                          "cors":  "^2.8.5",
                          "dotenv":  "^16.4.7",
                          "express":  "^5.1.0",

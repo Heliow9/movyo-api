@@ -104,6 +104,16 @@ async function estado(req, res) {
   }
 }
 
+async function obterPedido(req, res) {
+  try {
+    const pedido = await Pedido.findById(req.params.pedidoId).lean();
+    ensureOwnPedido(pedido, req.entregador._id);
+    return res.json({ ok: true, pedido });
+  } catch (error) {
+    return sendError(res, error, "Nao foi possivel carregar o pedido.");
+  }
+}
+
 async function status(req, res) {
   try {
     const online =
@@ -493,6 +503,7 @@ module.exports = {
   status,
   localizacao,
   token,
+  obterPedido,
   aceitar,
   recusar,
   iniciar,

@@ -31,6 +31,30 @@ function round2(v) {
   return Math.round((Number(v || 0) + Number.EPSILON) * 100) / 100;
 }
 
+function getIdempotencyKey(req) {
+  const raw = req?.headers?.["x-idempotency-key"] || req?.headers?.["idempotency-key"] ||
+    req?.body?.clientRequestId || req?.body?.idempotencyKey || req?.body?.requestId || "";
+  return String(raw).trim().slice(0, 120);
+}
+
+function isDuplicateEntry(error) {
+  return error?.code === "ER_DUP_ENTRY" || /duplicate entry/i.test(String(error?.message || ""));
+}
+
+const operationLocks = new Map();
+async function acquireOperationLock(key) {
+  if (!key) return () => {};
+  const previous = operationLocks.get(key) || Promise.resolve();
+  let releaseCurrent;
+  const current = new Promise((resolve) => { releaseCurrent = resolve; });
+  operationLocks.set(key, current);
+  await previous.catch(() => {});
+  return () => {
+    releaseCurrent();
+    if (operationLocks.get(key) === current) operationLocks.delete(key);
+  };
+}
+
 function normalizarMetodoPagamentoBalcao(metodo = "") {
   const raw = String(metodo || "").trim();
   const n = raw
@@ -548,6 +572,8 @@ async function gerarProximoNumeroBalcao(restauranteId, debugLog = null) {
 exports.abrirPedidoBalcao = async (req, res) => {
   const debugId = `BALCAO-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
+  const clientRequestId = getIdempotencyKey(req);
+  const restauranteIdRequest = req.body?.restauranteId;
   const log = (etapa, extra = {}) => {
     try {
       console.log(`[${debugId}] ${etapa} +${Date.now() - startedAt}ms`, JSON.stringify(extra));
@@ -574,6 +600,28 @@ exports.abrirPedidoBalcao = async (req, res) => {
       return res.status(400).json({ message: "Envie restauranteId." });
     }
 
+    if (clientRequestId) {
+      const existente = await Pedido.findOne({ restaurante: restauranteId, clientRequestId });
+      if (existente) {
+        const itensRecebidos = normalizarItensBalcao(itens);
+        const brutoRecebido = round2(itensRecebidos.reduce((acc, item) => acc + toNum(item.precoTotal), 0));
+        const descontoRecebido = Math.min(round2(Math.max(0, toNum(req.body?.descontoValor ?? req.body?.valorDesconto ?? req.body?.desconto ?? 0))), brutoRecebido);
+        const totalRecebido = round2(Math.max(0, brutoRecebido - descontoRecebido));
+        const payloadDiferente =
+          (itensRecebidos.length > 0 && !mesmosItensPedido(existente.itens, itensRecebidos)) ||
+          Math.abs(toNum(existente.valorTotal ?? existente.total) - totalRecebido) > 0.009;
+        if (payloadDiferente) {
+          return res.status(409).json({
+            message: "Esta tentativa de venda já foi processada com outros itens ou valor. Atualize os pedidos antes de tentar novamente.",
+            code: "IDEMPOTENCY_PAYLOAD_MISMATCH",
+            pedidoId: existente._id || existente.id,
+          });
+        }
+        log("PEDIDO IDEMPOTENTE REUTILIZADO", { pedidoId: existente._id || existente.id, clientRequestId });
+        return res.status(200).json({ pedido: existente, idempotente: true });
+      }
+    }
+
     log("INICIO exigirCaixaAberto");
     const caixaInicio = Date.now();
     const caixa = await exigirCaixaAberto(restauranteId);
@@ -595,6 +643,7 @@ exports.abrirPedidoBalcao = async (req, res) => {
 
     const novoPedido = new Pedido({
       numeroPedido,
+      clientRequestId: clientRequestId || null,
       restaurante: restauranteId,
       mesaId: null,
       nomeCliente: nomeCliente || "Cliente balcão",
@@ -647,6 +696,13 @@ exports.abrirPedidoBalcao = async (req, res) => {
     log("RESPOSTA ENVIADA", { status: 201, totalMs: Date.now() - startedAt });
     return res.status(201).json({ pedido: novoPedido });
   } catch (error) {
+    if (clientRequestId && restauranteIdRequest && isDuplicateEntry(error)) {
+      const existente = await Pedido.findOne({ restaurante: restauranteIdRequest, clientRequestId }).catch(() => null);
+      if (existente) {
+        log("CORRIDA IDEMPOTENTE RECUPERADA", { pedidoId: existente._id || existente.id, clientRequestId });
+        return res.status(200).json({ pedido: existente, idempotente: true });
+      }
+    }
     log("ERRO abrirPedidoBalcao", { message: error?.message, stack: error?.stack });
     const status = error?.status || 500;
     return res.status(status).json({
@@ -762,9 +818,12 @@ exports.adicionarItensBalcao = async (req, res) => {
    PAGAMENTO PARCIAL (dinheiro/cartão)
 ========================= */
 exports.registrarPagamentoBalcao = async (req, res) => {
+  const paymentRequestId = getIdempotencyKey(req);
+  let releaseOperation = () => {};
   try {
     const { pedidoId } = req.params;
     const { metodo, valor, obs } = req.body;
+    releaseOperation = await acquireOperationLock(paymentRequestId ? `pagamento:${pedidoId}:${paymentRequestId}` : "");
 
     const pagamentoNormalizado = normalizarMetodoPagamentoBalcao(metodo || req.body?.formaPagamento || req.body?.formadePagamento);
     if (!pagamentoNormalizado) {
@@ -783,6 +842,16 @@ exports.registrarPagamentoBalcao = async (req, res) => {
         : await Pedido.findById(pedidoId);
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    if (paymentRequestId) {
+      const pagamentoExistente = (Array.isArray(pedido.pagamentos) ? pedido.pagamentos : []).find((pagamento) =>
+        String(pagamento?.clientRequestId || pagamento?.idempotencyKey || pagamento?.idPagamento || "") === paymentRequestId
+      );
+      if (pagamentoExistente) {
+        const { total, pago, pendente } = recalcPagamentoPedido(pedido);
+        return res.json({ ok: true, idempotente: true, fechado: pendente <= 0 && total > 0, pedido, total, pago, pendente });
+      }
+    }
 
     const caixa = await exigirCaixaAberto(pedido.restaurante || req.body?.restauranteId);
     await vincularPedidoAoCaixa(pedido, caixa);
@@ -823,6 +892,9 @@ exports.registrarPagamentoBalcao = async (req, res) => {
     }
 
     pedido.pagamentos.push({
+      clientRequestId: paymentRequestId || undefined,
+      idempotencyKey: paymentRequestId || undefined,
+      idPagamento: paymentRequestId || undefined,
       metodo: m,
       valor: v,
       status: "confirmado",
@@ -873,6 +945,8 @@ exports.registrarPagamentoBalcao = async (req, res) => {
   } catch (error) {
     const status = error?.status || 500;
     return res.status(status).json({ message: error?.message || "Erro ao registrar pagamento (balcão)" });
+  } finally {
+    releaseOperation();
   }
 };
 
@@ -880,9 +954,12 @@ exports.registrarPagamentoBalcao = async (req, res) => {
    GERAR PIX PARCIAL (balcão)
 ========================= */
 exports.gerarPixBalcao = async (req, res) => {
+  const pixRequestId = getIdempotencyKey(req);
+  let releaseOperation = () => {};
   try {
     const { pedidoId } = req.params;
     const valorReq = req.body?.valor;
+    releaseOperation = await acquireOperationLock(pixRequestId ? `pix:${pedidoId}:${pixRequestId}` : "");
 
     const pedido =
       req.role === "garcom"
@@ -890,6 +967,28 @@ exports.gerarPixBalcao = async (req, res) => {
         : await Pedido.findById(pedidoId);
 
     if (!pedido) return res.status(404).json({ message: "Pedido não encontrado." });
+
+    if (pixRequestId) {
+      const pixExistente = (Array.isArray(pedido.pagamentos) ? pedido.pagamentos : []).find((pagamento) =>
+        String(pagamento?.clientRequestId || pagamento?.idempotencyKey || "") === pixRequestId &&
+        String(pagamento?.metodo || "").toLowerCase() === "pix"
+      );
+      if (pixExistente?.mpPaymentId) {
+        return res.json({
+          ok: true,
+          idempotente: true,
+          pedidoId: String(pedido._id),
+          paymentId: String(pixExistente.mpPaymentId),
+          statusPagamento: pixExistente.mpStatus || pixExistente.status || "pending",
+          valor: Number(pixExistente.valor || 0),
+          qrCode: pixExistente.pixQrCode || "",
+          qrCodeBase64: pixExistente.pixQrCodeBase64 || "",
+          total: pedido.valorTotal,
+          pago: pedido.valorPago,
+          pendente: pedido.valorPendente,
+        });
+      }
+    }
 
     const caixa = await exigirCaixaAberto(pedido.restaurante || req.body?.restauranteId);
     await vincularPedidoAoCaixa(pedido, caixa);
@@ -956,6 +1055,8 @@ exports.gerarPixBalcao = async (req, res) => {
     }
 
     pedido.pagamentos.push({
+      clientRequestId: pixRequestId || undefined,
+      idempotencyKey: pixRequestId || undefined,
       metodo: "pix",
       valor: valorPix,
       status: "pendente",
@@ -1004,6 +1105,8 @@ exports.gerarPixBalcao = async (req, res) => {
       message: mpData?.message || mpData?.error || error?.message || "Erro ao gerar Pix (balcão).",
       error: mpData || error?.message,
     });
+  } finally {
+    releaseOperation();
   }
 };
 
@@ -1308,4 +1411,10 @@ exports.enviarPixWhatsappBalcao = async (req, res) => {
       error: error?.message,
     });
   }
+};
+
+exports._private = {
+  getIdempotencyKey,
+  acquireOperationLock,
+  isDuplicateEntry,
 };

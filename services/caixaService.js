@@ -239,18 +239,32 @@ async function registrarMovimentoVenda({ pedido, pagamento, caixa, restauranteId
     return CaixaMovimento.findById(existenteId);
   }
 
-  return CaixaMovimento.create({
-    restauranteId: String(restauranteId || pedido.restaurante || caixa.restauranteId),
-    caixaSessaoId: caixaId,
-    operadorId: caixa.operadorId,
-    tipo: 'venda',
-    valor,
-    formaPagamento: forma,
-    origem: pedido.origem || 'pedido',
-    pedidoId,
-    referenciaPagamento: referenciaPagamento || null,
-    descricao: `Pedido ${pedido.numeroPedido || pedidoId}`.trim(),
-  });
+  try {
+    return await CaixaMovimento.create({
+      restauranteId: String(restauranteId || pedido.restaurante || caixa.restauranteId),
+      caixaSessaoId: caixaId,
+      operadorId: caixa.operadorId,
+      tipo: 'venda',
+      valor,
+      formaPagamento: forma,
+      origem: pedido.origem || 'pedido',
+      pedidoId,
+      referenciaPagamento: referenciaPagamento || null,
+      descricao: `Pedido ${pedido.numeroPedido || pedidoId}`.trim(),
+    });
+  } catch (error) {
+    // Duas instâncias podem passar pelo SELECT ao mesmo tempo. O índice único é
+    // a barreira definitiva; quem perder a corrida reutiliza o movimento vencedor.
+    if (referenciaPagamento && (error?.code === 'ER_DUP_ENTRY' || /duplicate entry/i.test(String(error?.message || '')))) {
+      const [rows] = await queryWithRetry(
+        `SELECT id FROM caixa_movimentos WHERE referenciaPagamento = ? LIMIT 1`,
+        [referenciaPagamento],
+        { label: 'caixa.movimentoVenda.recuperarDuplicado' }
+      );
+      if (rows?.[0]?.id) return CaixaMovimento.findById(rows[0].id);
+    }
+    throw error;
+  }
 }
 
 async function calcularTotaisCaixa(caixaId) {
