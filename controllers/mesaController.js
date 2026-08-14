@@ -1599,7 +1599,7 @@ exports.resumoHomeApp = async (req, res) => {
       [String(restauranteId)]
     ).then(([rows]) => rows?.[0] || null);
 
-    const [mesasRows, caixaAberto] = await Promise.all([
+    const [mesasRows, caixaAberto, pedidosHojeRestaurante] = await Promise.all([
       queryWithRetry(
         `SELECT id, numero, status, pedidoAtualId, ocupadaDesde
            FROM mesas
@@ -1607,6 +1607,15 @@ exports.resumoHomeApp = async (req, res) => {
         [String(restauranteId)]
       ).then(([rows]) => rows),
       caixaAbertoPromise,
+      queryWithRetry(
+        `SELECT COUNT(*) AS total
+           FROM pedidos
+          WHERE restaurante = ?
+            AND criadoEm >= ?
+            AND criadoEm <= ?
+            AND LOWER(COALESCE(status, '')) NOT IN ('cancelado', 'cancelada', 'canceled', 'cancelled', 'expirado', 'estornado')`,
+        [String(restauranteId), inicio, fim]
+      ).then(([rows]) => Number(rows?.[0]?.total || 0)),
     ]);
 
     const caixaAbertoId = caixaAberto?.id ? String(caixaAberto.id) : "";
@@ -1727,6 +1736,7 @@ exports.resumoHomeApp = async (req, res) => {
     const data = {
       mesasAbertas,
       mesasOcupadas: mesasAbertas,
+      pedidosHojeRestaurante,
       pedidosPendentes,
       pedidosFila: pedidosPendentes,
       pedidosHojeGarcom: pedidosHojeGarcom.length,
