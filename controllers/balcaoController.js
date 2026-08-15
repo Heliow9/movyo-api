@@ -640,6 +640,29 @@ exports.abrirPedidoBalcao = async (req, res) => {
     log("FIM gerarProximoNumeroBalcao", { etapaMs: Date.now() - numeroInicio, numeroPedido });
 
     const agoraPedido = new Date();
+    const metodoInicial = normalizarMetodoPagamentoBalcao(
+      req.body?.metodoPagamento || req.body?.pagamento || req.body?.formaPagamento || req.body?.formadePagamento
+    );
+    const pagamentoImediato = !!metodoInicial && req.body?.pixPendente !== true && req.body?.pagamentoPendente !== true;
+    const gCriacao = getGarcomFromReq(req);
+    const pagamentoRequestId = clientRequestId ? `${clientRequestId}:pagamento` : undefined;
+    const pagamentosIniciais = pagamentoImediato
+      ? [{
+          clientRequestId: pagamentoRequestId,
+          idempotencyKey: pagamentoRequestId,
+          idPagamento: pagamentoRequestId,
+          metodo: metodoInicial.metodo,
+          valor: totalInicial,
+          status: "confirmado",
+          recebidoEm: agoraPedido,
+          recebidoPor: gCriacao.id && mongoose.Types.ObjectId.isValid(gCriacao.id)
+            ? new mongoose.Types.ObjectId(gCriacao.id)
+            : null,
+          recebidoPorRole: gCriacao.id ? "garcom" : "restaurante",
+          recebidoPorNome: gCriacao.nome || null,
+          obs: String(req.body?.observacaoPagamento || "").trim(),
+        }]
+      : [];
 
     const novoPedido = new Pedido({
       numeroPedido,
@@ -655,11 +678,14 @@ exports.abrirPedidoBalcao = async (req, res) => {
       valorTotal: totalInicial,
       total: totalInicial,
       origem: "balcao",
-      status: "aguardando_pagamento",
-      formadePagamento: "pendente",
-      pagamentos: [],
-      valorPago: 0,
-      valorPendente: totalInicial,
+      status: pagamentoImediato ? "em_producao" : "aguardando_pagamento",
+      statusPagamento: pagamentoImediato ? "pago" : "pendente",
+      formadePagamento: pagamentoImediato ? metodoInicial.forma : "pendente",
+      formaPagamento: pagamentoImediato ? metodoInicial.forma : "pendente",
+      pagamentos: pagamentosIniciais,
+      valorPago: pagamentoImediato ? totalInicial : 0,
+      valorPendente: pagamentoImediato ? 0 : totalInicial,
+      pagoEm: pagamentoImediato ? agoraPedido : null,
       criadoEm: agoraPedido,
       created_at: agoraPedido,
     });
@@ -668,7 +694,7 @@ exports.abrirPedidoBalcao = async (req, res) => {
     // Não depende apenas de req.role, pois em alguns fluxos do Hub o token traz garcomId
     // mesmo quando a role não chega exatamente como "garcom".
     {
-      const g = getGarcomFromReq(req);
+      const g = gCriacao;
       if (g.id) {
         novoPedido.garcomId = g.id;
         novoPedido.garcomNome = g.nome || "Garçom";
@@ -688,9 +714,20 @@ exports.abrirPedidoBalcao = async (req, res) => {
     await novoPedido.save();
     log("FIM salvarPedido", { etapaMs: Date.now() - salvarInicio, pedidoId: novoPedido?._id || novoPedido?.id || null });
 
+    if (pagamentoImediato) {
+      await registrarPagamentosConfirmadosNoCaixa({ pedido: novoPedido, caixa, restauranteId });
+      await recalcularCaixa(caixa._id || caixa.id);
+      await novoPedido.save();
+    }
+
     if (req.io) {
-      // Não dispara "novoPedido" aqui: balcão com PIX ainda pendente não deve tocar notificação no desktop.
-      req.io.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", novoPedido);
+      const room = `restaurante-${restauranteId}`;
+      req.io.to(room).emit("pedidoAtualizado", novoPedido);
+      if (pagamentoImediato) {
+        req.io.to(room).emit("novoPedido", novoPedido);
+        req.io.to(room).emit("balcaoAtualizado", novoPedido);
+        emitirAtualizacaoAtendimento(req, restauranteId, { pedidoId: String(novoPedido?._id || novoPedido?.id || ""), origem: "balcao" });
+      }
     }
 
     log("RESPOSTA ENVIADA", { status: 201, totalMs: Date.now() - startedAt });
