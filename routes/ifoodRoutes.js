@@ -23,6 +23,9 @@ module.exports = function buildIfoodRoutes({ enqueueEvent } = {}) {
   router.post("/complete", authRestaurante, ifood.completeAuthorization);
   router.post("/disconnect", authRestaurante, ifood.disconnect);
   router.post("/pedido-teste", authRestaurante, ifood.criarPedidoTeste);
+  router.post("/pedidos/:pedidoId/ready", authRestaurante, ifood.marcarPronto);
+  router.get("/pedidos/:pedidoId/cancellation-reasons", authRestaurante, ifood.cancellationReasons);
+  router.get("/pedidos/:pedidoId/tracking", authRestaurante, ifood.tracking);
 
   // Webhook publico configurado no Developer Portal do iFood.
   router.post("/webhook", ifood.webhook);

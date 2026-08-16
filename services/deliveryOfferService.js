@@ -2,6 +2,7 @@ const Pedido = require("../models/Pedido");
 const Entregador = require("../models/Entregador");
 const Restaurante = require("../models/Restaurante");
 const { sendExpoPushToken } = require("./webPushService");
+const { despacharPedidoNoIfood } = require("../controllers/ifoodController");
 
 const OFFER_TIMEOUT_SECONDS = Math.max(
   30,
@@ -152,6 +153,11 @@ async function enviarOferta({
       error.status = 409;
       throw error;
     }
+    if (String(pedido.origem || "").toLowerCase() === "ifood" && String(pedido.deliveryProvider || "").toUpperCase() === "IFOOD") {
+      const error = new Error("Este pedido usa entrega integrada do iFood. Aguarde o entregador do iFood.");
+      error.status = 409;
+      throw error;
+    }
 
     const entregador = await Entregador.findById(entregadorId);
     if (!entregador || idString(entregador.restaurante) !== restId) {
@@ -262,6 +268,10 @@ async function aceitarOferta({ pedidoId, entregadorId, io }) {
     }
 
     const agora = new Date();
+    let ifoodDispatch = null;
+    if (String(pedido.origem || "").toLowerCase() === "ifood") {
+      ifoodDispatch = await despacharPedidoNoIfood(pedido);
+    }
     pedido.entregador = entregadorId;
     pedido.status = "em_rota";
     pedido.aceitoEm = agora;
@@ -277,6 +287,7 @@ async function aceitarOferta({ pedidoId, entregadorId, io }) {
     emitOfferResult(io, pedido, "pedidoAceito", {
       entregadorId,
       segundosResposta: pedido.ofertaEntrega.segundosResposta,
+      ifood: ifoodDispatch,
     });
     return pedido;
   });

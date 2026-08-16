@@ -8,6 +8,7 @@ const axios = require("axios");
 
 const Restaurante = require("../models/Restaurante");
 const Pedido = require("../models/Pedido");
+const IfoodEvent = require("../models/IfoodEvent");
 const { queryWithRetry } = require("../lib/mysqlRetry");
 const {
   getCaixaAberto,
@@ -74,7 +75,6 @@ function toMoney(raw) {
   }
   const n = toNum(value);
   if (!Number.isFinite(n)) return 0;
-  if (Number.isInteger(n) && Math.abs(n) >= 1000 && Math.abs(n) % 5 === 0) return round2(n / 100);
   return round2(n);
 }
 
@@ -224,9 +224,9 @@ async function fetchIfoodOrderDetails(orderId, restaurante) {
   return data || {};
 }
 
-async function postIfoodOrderAction(restaurante, orderId, action) {
+async function postIfoodOrderAction(restaurante, orderId, action, body = null) {
   const token = await getTokenForRestaurante(restaurante);
-  const { data } = await axios.post(`${ORDER_BASE_URL}/orders/${encodeURIComponent(orderId)}/${action}`, null, {
+  const { data } = await axios.post(`${ORDER_BASE_URL}/orders/${encodeURIComponent(orderId)}/${action}`, body, {
     timeout: 15000,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -235,6 +235,41 @@ async function postIfoodOrderAction(restaurante, orderId, action) {
     },
   });
   return data || {};
+}
+
+async function getIfoodOrderResource(restaurante, orderId, resource) {
+  const token = await getTokenForRestaurante(restaurante);
+  const { data } = await axios.get(`${ORDER_BASE_URL}/orders/${encodeURIComponent(orderId)}/${resource}`, {
+    timeout: 15000,
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+  return data || {};
+}
+
+function isIfoodPedido(pedido) {
+  return normalizeKey(pedido?.origem || pedido?.marketplace || pedido?.canalVenda) === "ifood" && !!safeString(pedido?.externalOrderId, 191);
+}
+
+async function getRestauranteDoPedido(pedido) {
+  const restaurante = pedido?.restaurante && typeof pedido.restaurante === "object"
+    ? pedido.restaurante
+    : await Restaurante.findById(pedido?.restaurante);
+  if (!restaurante) {
+    const error = new Error("Restaurante do pedido iFood nao encontrado.");
+    error.status = 404;
+    throw error;
+  }
+  return restaurante;
+}
+
+function normalizeIfoodActionError(error, fallbackMessage) {
+  const status = Number(error?.response?.status || error?.status || 0);
+  const details = error?.response?.data || null;
+  if (status === 409) return { ok: true, alreadyProcessed: true, status, details };
+  const syncError = new Error(details?.message || details?.error?.message || error?.message || fallbackMessage);
+  syncError.status = status || 502;
+  syncError.details = details;
+  throw syncError;
 }
 
 async function confirmarPedidoNoIfood(pedido) {
@@ -274,6 +309,84 @@ async function confirmarPedidoNoIfood(pedido) {
     syncError.status = status || 502;
     syncError.details = details;
     throw syncError;
+  }
+}
+
+async function marcarPedidoProntoNoIfood(pedido) {
+  if (!isIfoodPedido(pedido)) return null;
+  if (/^IFTEST-/i.test(pedido.externalOrderId)) return { ok: true, skipped: true, action: "readyToPickup" };
+  const restaurante = await getRestauranteDoPedido(pedido);
+  try {
+    const data = await postIfoodOrderAction(restaurante, pedido.externalOrderId, "readyToPickup");
+    return { ok: true, action: "readyToPickup", orderId: pedido.externalOrderId, data };
+  } catch (error) {
+    return { ...normalizeIfoodActionError(error, "Falha ao informar pedido pronto ao iFood."), action: "readyToPickup", orderId: pedido.externalOrderId };
+  }
+}
+
+async function iniciarPreparoNoIfood(pedido) {
+  if (!isIfoodPedido(pedido)) return null;
+  const startAt = pedido.ifoodPreparationStartAt ? new Date(pedido.ifoodPreparationStartAt).getTime() : 0;
+  if (Number.isFinite(startAt) && startAt > Date.now() + 60000) {
+    const error = new Error(`Pedido agendado. Inicie o preparo a partir de ${new Date(startAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}.`);
+    error.status = 409;
+    throw error;
+  }
+  if (/^IFTEST-/i.test(pedido.externalOrderId)) return { ok: true, skipped: true, action: "startPreparation" };
+  const restaurante = await getRestauranteDoPedido(pedido);
+  try {
+    const data = await postIfoodOrderAction(restaurante, pedido.externalOrderId, "startPreparation");
+    return { ok: true, action: "startPreparation", orderId: pedido.externalOrderId, data };
+  } catch (error) {
+    return { ...normalizeIfoodActionError(error, "Falha ao iniciar o preparo no iFood."), action: "startPreparation", orderId: pedido.externalOrderId };
+  }
+}
+
+async function despacharPedidoNoIfood(pedido) {
+  if (!isIfoodPedido(pedido)) return null;
+  const provider = normalizeKey(pedido.deliveryProvider || getByPath(pedido.externalPayload, "order.delivery.deliveredBy"));
+  if (provider === "ifood") {
+    const error = new Error("A entrega deste pedido e feita pelo iFood. Nao acione motorista proprio.");
+    error.status = 409;
+    throw error;
+  }
+  if (/^IFTEST-/i.test(pedido.externalOrderId)) return { ok: true, skipped: true, action: "dispatch" };
+  const restaurante = await getRestauranteDoPedido(pedido);
+  try {
+    const data = await postIfoodOrderAction(restaurante, pedido.externalOrderId, "dispatch", { deliveredBy: "MERCHANT" });
+    return { ok: true, action: "dispatch", orderId: pedido.externalOrderId, data };
+  } catch (error) {
+    return { ...normalizeIfoodActionError(error, "Falha ao despachar pedido no iFood."), action: "dispatch", orderId: pedido.externalOrderId };
+  }
+}
+
+async function cancellationReasonsForPedido(pedido) {
+  if (!isIfoodPedido(pedido)) return [];
+  if (/^IFTEST-/i.test(pedido.externalOrderId)) return [
+    { code: "503", description: "Item indisponivel" },
+    { code: "504", description: "Restaurante sem entregador" },
+    { code: "509", description: "Dificuldades internas" },
+  ];
+  const restaurante = await getRestauranteDoPedido(pedido);
+  const data = await getIfoodOrderResource(restaurante, pedido.externalOrderId, "cancellationReasons");
+  return Array.isArray(data) ? data : Array.isArray(data?.reasons) ? data.reasons : [];
+}
+
+async function solicitarCancelamentoNoIfood(pedido, reason) {
+  if (!isIfoodPedido(pedido)) return null;
+  const code = safeString(reason, 80);
+  if (!code) {
+    const error = new Error("Selecione um motivo de cancelamento aceito pelo iFood.");
+    error.status = 400;
+    throw error;
+  }
+  if (/^IFTEST-/i.test(pedido.externalOrderId)) return { ok: true, skipped: true, action: "requestCancellation", reason: code };
+  const restaurante = await getRestauranteDoPedido(pedido);
+  try {
+    const data = await postIfoodOrderAction(restaurante, pedido.externalOrderId, "requestCancellation", { reason: code });
+    return { ok: true, pending: true, action: "requestCancellation", reason: code, data };
+  } catch (error) {
+    return { ...normalizeIfoodActionError(error, "Falha ao solicitar cancelamento no iFood."), action: "requestCancellation", reason: code };
   }
 }
 
@@ -360,6 +473,19 @@ function isPrepaid(order = {}) {
   return normalizePaymentMethod(order) !== "dinheiro";
 }
 
+function isFinalCancellationCode(code = "") {
+  return ["can", "cancelled", "canceled", "ordercancelled", "ordercanceled"].includes(normalizeKey(code));
+}
+
+function initialLocalStatus(event = {}, order = {}) {
+  const code = normalizeKey(event.fullCode || event.code || order.status);
+  if (isFinalCancellationCode(code)) return "cancelado";
+  if (code.includes("concluded") || code === "con") return "entregue";
+  if (code.includes("dispatch") || code.includes("collected") || code === "dsp") return "em_entrega";
+  if (code.includes("confirmed") || code === "cfm" || code.includes("preparation")) return "em_producao";
+  return "pendente";
+}
+
 async function gerarNumeroIfood(restauranteId) {
   const [rows] = await queryWithRetry(
     `SELECT numeroPedido
@@ -396,6 +522,21 @@ function buildPedidoFromIfood(order = {}, event = {}, restaurante = {}) {
   const agora = new Date();
   const customer = pick(order, ["customer"], {}) || {};
   const formaPagamento = normalizePaymentMethod(order);
+  const orderType = safeString(pick(order, ["orderType", "type"], "DELIVERY"), 40).toUpperCase();
+  const orderTiming = safeString(pick(order, ["orderTiming", "timing"], "IMMEDIATE"), 40).toUpperCase();
+  const deliveredBy = safeString(pick(order, ["delivery.deliveredBy", "delivery.deliveryBy"], orderType === "DELIVERY" ? "MERCHANT" : "CUSTOMER"), 40).toUpperCase();
+  const deliveryObservations = safeString(pick(order, ["delivery.observations", "delivery.observation", "delivery.instructions"], ""), 800);
+  const orderObservations = safeString(pick(order, ["observations", "observation", "extraInfo"], ""), 800);
+  const payments = pick(order, ["payments.methods"], []);
+  const paymentMethod = Array.isArray(payments) ? payments[0] || {} : {};
+  const benefits = pick(order, ["benefits", "discounts", "coupons"], []);
+  const descontoValor = round2((Array.isArray(benefits) ? benefits : []).reduce((sum, benefit) => (
+    sum + toMoney(pick(benefit, ["value", "amount", "total", "discount.value"], 0))
+  ), 0));
+  const scheduledToRaw = pick(order, ["scheduling.to", "scheduling.deliveryDateTime", "delivery.deliveryDateTime", "preparationStartDateTime"], null);
+  const preparationStartRaw = pick(order, ["preparationStartDateTime", "scheduling.preparationStartDateTime"], null);
+  const coordinates = pick(order, ["delivery.deliveryAddress.coordinates", "delivery.address.coordinates"], {}) || {};
+  const initialStatus = initialLocalStatus(event, order);
 
   return {
     restaurante: restauranteId,
@@ -407,6 +548,14 @@ function buildPedidoFromIfood(order = {}, event = {}, restaurante = {}) {
     externalMerchantId: merchantId,
     externalStatus: safeString(pick(event, ["fullCode", "code"], pick(order, ["status"], "PLACED")), 80),
     externalPayload: { event, order },
+    externalOrderType: orderType,
+    externalOrderTiming: orderTiming,
+    deliveryProvider: deliveredBy,
+    pickupCode: safeString(pick(order, ["delivery.pickupCode", "takeout.pickupCode"], ""), 80),
+    deliveryLocalizer: safeString(pick(order, ["customer.phone.localizer", "phone.localizer", "delivery.localizer"], ""), 120),
+    deliveryObservations,
+    scheduledTo: scheduledToRaw ? normalizeDate(scheduledToRaw) : null,
+    ifoodPreparationStartAt: preparationStartRaw ? normalizeDate(preparationStartRaw) : null,
     nomeCliente: safeString(pick(customer, ["name", "nome"], "Cliente iFood"), 120),
     telefoneCliente: onlyDigits(pick(customer, ["phone.number", "phone", "phoneNumber"], "")),
     enderecoCliente: normalizeAddress(order),
@@ -415,6 +564,8 @@ function buildPedidoFromIfood(order = {}, event = {}, restaurante = {}) {
     residenciaReferencia: safeString(pick(order, ["delivery.deliveryAddress.reference", "delivery.address.reference"], ""), 180),
     residenciaBairro: safeString(pick(order, ["delivery.deliveryAddress.neighborhood", "delivery.address.neighborhood"], ""), 120),
     residenciaCep: onlyDigits(pick(order, ["delivery.deliveryAddress.postalCode", "delivery.address.postalCode"], "")),
+    latitudeCliente: toNum(pick(coordinates, ["latitude", "lat"], 0)) || 0,
+    longitudeCliente: toNum(pick(coordinates, ["longitude", "lng", "lon"], 0)) || 0,
     itens,
     total,
     valorTotal: total,
@@ -422,19 +573,34 @@ function buildPedidoFromIfood(order = {}, event = {}, restaurante = {}) {
     taxaEntrega,
     taxaMarketplace: toMoney(pick(order, ["fees.marketplace", "commission.value", "financial.commission"], 0)),
     valorRepasse: toMoney(pick(order, ["financial.netValue", "settlement.value", "netValue"], 0)),
+    descontoValor,
+    valorDesconto: descontoValor,
     formaPagamento,
     formadePagamento: formaPagamento,
-    status: "pendente",
+    status: initialStatus,
     statusPagamento: pago ? "pago" : "pendente",
     valorPago: pago ? total : 0,
     valorPendente: pago ? 0 : total,
     pagoEm: pago ? agora : null,
+    aceitoEm: initialStatus === "em_producao" ? agora : null,
+    emProducaoEm: initialStatus === "em_producao" ? agora : null,
+    emEntregaEm: initialStatus === "em_entrega" ? agora : null,
+    entregueEm: initialStatus === "entregue" ? agora : null,
+    canceladoEm: initialStatus === "cancelado" ? agora : null,
     criadoEm: normalizeDate(pick(order, ["createdAt", "created_at", "orderCreatedAt"], event.createdAt || Date.now()), agora),
     statusAtualizadoEm: agora,
     pagamentos: pago
       ? [{ metodo: formaPagamento, valor: total, status: "confirmado", recebidoEm: agora, confirmadoEm: agora, recebidoPorRole: "ifood" }]
       : [],
-    observacao: safeString(pick(order, ["observations", "observation", "extraInfo"], ""), 800),
+    observacao: safeString([orderObservations, deliveryObservations].filter(Boolean).join(" | "), 1200),
+    pagamento: {
+      prepaid: pago,
+      method: formaPagamento,
+      brand: safeString(pick(paymentMethod, ["card.brand", "brand", "cardBrand"], ""), 80),
+      changeFor: toMoney(pick(paymentMethod, ["cash.changeFor", "changeFor", "cash.change"], 0)),
+      methods: Array.isArray(payments) ? payments : [],
+      benefits: Array.isArray(benefits) ? benefits : [],
+    },
     recebidoPor: "ifood",
     recebidoPorNome: "iFood",
   };
@@ -464,6 +630,35 @@ async function criarOuAtualizarPedidoIfood(order, event, restaurante, io = null)
     Object.assign(pedido, {
       externalStatus: normalized.externalStatus,
       externalPayload: normalized.externalPayload,
+      externalOrderType: normalized.externalOrderType,
+      externalOrderTiming: normalized.externalOrderTiming,
+      deliveryProvider: normalized.deliveryProvider,
+      pickupCode: normalized.pickupCode,
+      deliveryLocalizer: normalized.deliveryLocalizer,
+      deliveryObservations: normalized.deliveryObservations,
+      scheduledTo: normalized.scheduledTo,
+      ifoodPreparationStartAt: normalized.ifoodPreparationStartAt,
+      nomeCliente: normalized.nomeCliente,
+      telefoneCliente: normalized.telefoneCliente,
+      enderecoCliente: normalized.enderecoCliente,
+      residenciaNumero: normalized.residenciaNumero,
+      residenciaComplemento: normalized.residenciaComplemento,
+      residenciaReferencia: normalized.residenciaReferencia,
+      residenciaBairro: normalized.residenciaBairro,
+      residenciaCep: normalized.residenciaCep,
+      latitudeCliente: normalized.latitudeCliente,
+      longitudeCliente: normalized.longitudeCliente,
+      itens: normalized.itens,
+      total: normalized.total,
+      valorTotal: normalized.valorTotal,
+      totalBruto: normalized.totalBruto,
+      descontoValor: normalized.descontoValor,
+      valorDesconto: normalized.valorDesconto,
+      taxaEntrega: normalized.taxaEntrega,
+      taxaMarketplace: normalized.taxaMarketplace,
+      valorRepasse: normalized.valorRepasse,
+      observacao: normalized.observacao,
+      pagamento: normalized.pagamento,
       statusAtualizadoEm: new Date(),
     });
     await pedido.save();
@@ -475,7 +670,15 @@ async function criarOuAtualizarPedidoIfood(order, event, restaurante, io = null)
   pedido = new Pedido(normalized);
   const caixa = await getCaixaAberto(restauranteId).catch(() => null);
   if (caixa) await vincularPedidoAoCaixa(pedido, caixa);
-  await pedido.save();
+  try {
+    await pedido.save();
+  } catch (error) {
+    if (error?.code === "ER_DUP_ENTRY" || Number(error?.errno) === 1062) {
+      const existente = await Pedido.findOne({ restaurante: restauranteId, origem: "ifood", externalOrderId: normalized.externalOrderId });
+      if (existente) return { pedido: existente, created: false, duplicate: true };
+    }
+    throw error;
+  }
 
   if (caixa && pedido.statusPagamento === "pago") {
     await registrarMovimentoVenda({
@@ -510,6 +713,16 @@ async function findRestauranteByMerchant(merchantId) {
   return found ? Restaurante.findById(found._id || found.id) : null;
 }
 
+async function updateIfoodEventRecord(event, patch = {}) {
+  const eventId = safeString(event?.id || event?.eventId, 191);
+  if (!eventId) return null;
+  const record = await IfoodEvent.findOne({ eventId });
+  if (!record) return null;
+  Object.assign(record, patch);
+  await record.save();
+  return record;
+}
+
 function shouldRetryImport(error) {
   const status = Number(error?.response?.status || error?.status || 0);
   return !status || status === 404 || status === 408 || status === 409 || status === 429 || status >= 500;
@@ -533,6 +746,7 @@ function scheduleIfoodOrderImport(event, restauranteId, io = null, attempt = 0) 
         ultimoPedidoImportadoId: orderId,
         lastError: null,
       });
+      await updateIfoodEventRecord(event, { status: "processado", processadoEm: new Date(), ultimoErro: null }).catch(() => null);
       console.log(`[iFood] Pedido ${orderId} ${result.created ? "criado" : "atualizado"}.`);
     } catch (error) {
       const message = error?.response?.data?.message || error?.message || String(error);
@@ -541,6 +755,7 @@ function scheduleIfoodOrderImport(event, restauranteId, io = null, attempt = 0) 
         lastError: message,
         ultimoErroEm: new Date(),
       }).catch(() => null);
+      await updateIfoodEventRecord(event, { status: "erro", tentativas: attempt + 1, ultimoErro: message }).catch(() => null);
       if (attempt < IMPORT_BACKOFF_MS.length && shouldRetryImport(error)) {
         scheduleIfoodOrderImport(event, restauranteId, io, attempt + 1);
       }
@@ -616,12 +831,31 @@ async function processIfoodEvent(event, io = null) {
     return { ok: true, accepted: true, action: "import_scheduled" };
   }
 
-  if (code.includes("cancel")) {
+  const cancellationRequestFailed = code.includes("cancellationrequestfailed") || code === "crf";
+  const cancellationRequested = code === "cancellationrequested" || code === "car";
+  if (cancellationRequestFailed || cancellationRequested || isFinalCancellationCode(code)) {
+    if (cancellationRequestFailed) {
+      const pedido = await updateExistingOrderStatus(event, restaurante, {
+        ifoodCancellationStatus: "falhou",
+        ifoodCancellationReason: safeString(event.metadata?.reason || event.metadata?.reasonDescription || "Cancelamento rejeitado pelo iFood", 255),
+      });
+      if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
+      return { ok: true, accepted: true, action: "cancellation_failed", pedidoId: pedido?._id || pedido?.id || null };
+    }
+    if (cancellationRequested) {
+      const pedido = await updateExistingOrderStatus(event, restaurante, {
+        ifoodCancellationStatus: "solicitado",
+        ifoodCancellationReason: safeString(event.metadata?.reason || event.metadata?.reasonDescription || "", 255),
+      });
+      if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
+      return { ok: true, accepted: true, action: "cancellation_requested", pedidoId: pedido?._id || pedido?.id || null };
+    }
     const pedido = await updateExistingOrderStatus(event, restaurante, {
       status: "cancelado",
       statusPagamento: "cancelado",
       canceladoEm: new Date(),
       motivoCancelamento: safeString(event.metadata?.cancelReasonDescription || event.metadata?.reasonDescription || "Cancelado no iFood", 255),
+      ifoodCancellationStatus: "confirmado",
     });
     if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
     return { ok: true, accepted: true, action: "cancel_updated", pedidoId: pedido?._id || pedido?.id || null };
@@ -629,21 +863,215 @@ async function processIfoodEvent(event, io = null) {
 
   if (code.includes("confirmed") || code === "cfm") {
     const pedido = await updateExistingOrderStatus(event, restaurante, { status: "em_producao", aceitoEm: new Date() });
+    if (!pedido) scheduleIfoodOrderImport(event, restauranteId, io, 0);
     if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
     return { ok: true, accepted: true, action: "confirmed_updated", pedidoId: pedido?._id || pedido?.id || null };
   }
 
-  if (code.includes("concluded")) {
+  if (code.includes("concluded") || code === "con") {
     const pedido = await updateExistingOrderStatus(event, restaurante, { status: "entregue", entregueEm: new Date() });
+    if (!pedido) scheduleIfoodOrderImport(event, restauranteId, io, 0);
     if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
     return { ok: true, accepted: true, action: "concluded_updated", pedidoId: pedido?._id || pedido?.id || null };
   }
 
+  if (code.includes("readytopickup") || code === "rtp") {
+    const pedido = await updateExistingOrderStatus(event, restaurante, { ifoodReadyAt: new Date() });
+    if (!pedido) scheduleIfoodOrderImport(event, restauranteId, io, 0);
+    if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
+    return { ok: true, accepted: true, action: "ready_updated", pedidoId: pedido?._id || pedido?.id || null };
+  }
+
+  if (code.includes("dispatched") || code === "dsp" || code.includes("collected")) {
+    const pedido = await updateExistingOrderStatus(event, restaurante, {
+      status: "em_entrega",
+      emEntregaEm: new Date(),
+      ifoodDispatchedAt: new Date(),
+    });
+    if (!pedido) scheduleIfoodOrderImport(event, restauranteId, io, 0);
+    if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
+    return { ok: true, accepted: true, action: "dispatched_updated", pedidoId: pedido?._id || pedido?.id || null };
+  }
+
+  if (code.includes("assigndriver") || code.includes("goingtoorigin") || code.includes("arrivedatorigin") || code.includes("arrivedatdestination")) {
+    const existing = await Pedido.findOne({ restaurante: restauranteId, origem: "ifood", externalOrderId: safeString(event.orderId || event.metadata?.id || event.metadata?.orderId, 191) });
+    const driver = { ...(existing?.ifoodDriver || {}), ...(event.metadata || {}), lastEvent: event.fullCode || event.code || "", updatedAt: new Date() };
+    const pedido = await updateExistingOrderStatus(event, restaurante, { ifoodDriver: driver });
+    if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
+    return { ok: true, accepted: true, action: "driver_updated", pedidoId: pedido?._id || pedido?.id || null };
+  }
+
+  if (code.includes("orderpatched") || code.includes("addresschange") || code.includes("phonechange")) {
+    scheduleIfoodOrderImport(event, restauranteId, io, 0);
+    return { ok: true, accepted: true, action: "refresh_scheduled" };
+  }
+
+  const pedido = await updateExistingOrderStatus(event, restaurante).catch(() => null);
+  if (pedido) io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
   await patchRestauranteIfood(restauranteId, {
     ultimoEventoRecebidoEm: new Date(),
     ultimoEventoCodigo: event.fullCode || event.code || "",
   }).catch(() => null);
   return { ok: true, ignored: true, action: "event_registered" };
+}
+
+async function recuperarEventosIfoodPendentes(io = null) {
+  const registros = await IfoodEvent.find({ status: { $in: ["recebido", "agendado", "erro"] } })
+    .sort({ recebidoEm: 1 })
+    .limit(100);
+  let recuperados = 0;
+  for (const registro of registros) {
+    const event = registro.payload && typeof registro.payload === "object" ? registro.payload : {};
+    if (!event.id && registro.eventId) event.id = registro.eventId;
+    if (!event.merchantId && registro.merchantId) event.merchantId = registro.merchantId;
+    if (!event.orderId && registro.orderId) event.orderId = registro.orderId;
+    try {
+      await processQueuedIfoodEvent(event, io);
+      recuperados += 1;
+    } catch (error) {
+      registro.status = "erro";
+      registro.tentativas = Number(registro.tentativas || 0) + 1;
+      registro.ultimoErro = safeString(error?.message || error, 1000);
+      await registro.save().catch(() => null);
+    }
+  }
+  if (recuperados) console.log(`[iFood] ${recuperados} evento(s) pendente(s) retomado(s).`);
+  return { recuperados, encontrados: registros.length };
+}
+
+async function processQueuedIfoodEvent(event, io = null) {
+  const eventId = safeString(event?.id || event?.eventId, 191);
+  const record = eventId ? await IfoodEvent.findOne({ eventId }) : null;
+  if (record && String(record.status || "") === "processado") return { ok: true, duplicate: true, eventId };
+  if (record) {
+    record.status = "processando";
+    record.tentativas = Number(record.tentativas || 0) + 1;
+    record.ultimoErro = null;
+    await record.save();
+  }
+  try {
+    const result = await processIfoodEvent(event, io);
+    if (record) {
+      const restaurante = await findRestauranteByMerchant(event.merchantId || event.metadata?.merchantId || event.payload?.merchantId);
+      record.restauranteId = restaurante?._id || restaurante?.id || null;
+      record.status = result?.action === "import_scheduled" || result?.action === "refresh_scheduled" ? "agendado" : "processado";
+      record.processadoEm = record.status === "processado" ? new Date() : null;
+      await record.save();
+    }
+    return result;
+  } catch (error) {
+    if (record) {
+      record.status = "erro";
+      record.ultimoErro = safeString(error?.response?.data?.message || error?.message || error, 2000);
+      await record.save().catch(() => null);
+    }
+    throw error;
+  }
+}
+
+async function activeMerchantIds(requestedIds = []) {
+  const wanted = new Set((requestedIds || []).map((id) => safeString(id, 191)).filter(Boolean));
+  if (!wanted.size) return [];
+  const restaurantes = await Restaurante.find({ ifoodStatus: true }).lean();
+  const active = new Set();
+  for (const restaurante of restaurantes) {
+    const ifood = parseJsonSafe(restaurante.ifood, {});
+    const ids = [restaurante.ifoodIdentificador, ifood.merchantId, ...(Array.isArray(ifood.merchantIds) ? ifood.merchantIds : [])];
+    ids.map((id) => safeString(id, 191)).filter((id) => wanted.has(id)).forEach((id) => active.add(id));
+  }
+  return [...active];
+}
+
+async function persistPollingEvent(event) {
+  const eventId = safeString(event?.id || event?.eventId, 191);
+  if (!eventId) return { record: null, duplicate: false };
+  const existing = await IfoodEvent.findOne({ eventId });
+  if (existing) return { record: existing, duplicate: true };
+  try {
+    const record = new IfoodEvent({
+      eventId,
+      merchantId: safeString(event.merchantId || event.metadata?.merchantId, 191),
+      orderId: safeString(event.orderId || event.metadata?.orderId, 191),
+      code: safeString(event.fullCode || event.code, 120),
+      payload: event,
+      status: "recebido",
+      tentativas: 0,
+      recebidoEm: new Date(),
+    });
+    await record.save();
+    return { record, duplicate: false };
+  } catch (error) {
+    if (error?.code === "ER_DUP_ENTRY" || Number(error?.errno) === 1062) {
+      return { record: await IfoodEvent.findOne({ eventId }), duplicate: true };
+    }
+    throw error;
+  }
+}
+
+let pollingRunning = false;
+async function pollIfoodEvents(io = null) {
+  if (pollingRunning) return { skipped: true, reason: "already_running" };
+  pollingRunning = true;
+  let lojas = 0;
+  let eventosRecebidos = 0;
+  try {
+    const restaurantes = await Restaurante.find({ ifoodStatus: true }).lean();
+    for (const restaurante of restaurantes) {
+      const ifood = parseJsonSafe(restaurante.ifood, {});
+      const merchantId = safeString(restaurante.ifoodIdentificador || ifood.merchantId, 191);
+      if (!merchantId || ifood.conectado === false) continue;
+      lojas += 1;
+      try {
+        const token = await getTokenForRestaurante(restaurante);
+        const response = await axios.get(`${API_BASE_URL}/events/v1.0/events:polling`, {
+          timeout: 12000,
+          validateStatus: (status) => status === 200 || status === 204,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json",
+            "x-polling-merchants": merchantId,
+          },
+        });
+        const events = Array.isArray(response.data) ? response.data : [];
+        if (!events.length) continue;
+        eventosRecebidos += events.length;
+        const persisted = [];
+        for (const event of events) {
+          const saved = await persistPollingEvent(event);
+          if (saved.record) persisted.push(event);
+        }
+        await axios.post(
+          `${API_BASE_URL}/events/v1.0/events/acknowledgment`,
+          events.map((event) => ({ id: event.id })).filter((event) => event.id),
+          { timeout: 12000, headers: { Authorization: `Bearer ${token}`, Accept: "application/json", "Content-Type": "application/json" } }
+        );
+        persisted.forEach((event) => {
+          setImmediate(() => processQueuedIfoodEvent(event, io).catch((error) => {
+            console.error(`[iFood polling] Falha no evento ${event.id}:`, error?.response?.data || error?.message || error);
+          }));
+        });
+        await patchRestauranteIfood(restaurante._id || restaurante.id, { ultimoPollingEm: new Date(), lastError: null }).catch(() => null);
+      } catch (error) {
+        const message = error?.response?.data?.message || error?.message || String(error);
+        console.error(`[iFood polling] Loja ${merchantId}:`, message);
+        await patchRestauranteIfood(restaurante._id || restaurante.id, { lastError: message, ultimoErroEm: new Date() }).catch(() => null);
+      }
+    }
+    return { lojas, eventosRecebidos };
+  } finally {
+    pollingRunning = false;
+  }
+}
+
+let pollingTimer = null;
+function startIfoodPolling(io = null) {
+  if (pollingTimer || normalizeKey(process.env.IFOOD_ENABLE_POLLING || "true") === "false") return pollingTimer;
+  const intervalMs = Math.max(30000, Number(process.env.IFOOD_POLLING_INTERVAL_MS || 30000));
+  setImmediate(() => pollIfoodEvents(io).catch((error) => console.error("[iFood polling]", error?.message || error)));
+  pollingTimer = setInterval(() => pollIfoodEvents(io).catch((error) => console.error("[iFood polling]", error?.message || error)), intervalMs);
+  pollingTimer.unref?.();
+  console.log(`[iFood] Polling de eventos ativo a cada ${Math.round(intervalMs / 1000)}s.`);
+  return pollingTimer;
 }
 
 exports.status = async (req, res) => {
@@ -665,6 +1093,7 @@ exports.status = async (req, res) => {
       tokenExpiraEm: ifood.tokenExpiraEm || null,
       ultimoOAuthEm: ifood.ultimoOAuthEm || null,
       ultimoPedidoImportadoEm: ifood.ultimoPedidoImportadoEm || null,
+      ultimoPollingEm: ifood.ultimoPollingEm || null,
       lastError: ifood.lastError || null,
       userCode: ifood.userCode || "",
       verificationUrl: ifood.verificationUrl || "",
@@ -743,7 +1172,15 @@ exports.completeAuthorization = async (req, res) => {
     const accessToken = tokenValue(data);
     if (!accessToken) throw new Error("iFood nao retornou accessToken.");
     const merchantIds = merchantIdsFromToken(accessToken);
+    if (merchantIdManual && merchantIds.length && !merchantIds.includes(merchantIdManual)) {
+      return res.status(422).json({ ok: false, message: "O merchantId informado nao pertence a autorizacao recebida do iFood." });
+    }
     const merchantId = merchantIdManual || merchantIds[0] || ifood.merchantId || restaurante.ifoodIdentificador || "";
+    if (!merchantId) return res.status(422).json({ ok: false, message: "O iFood nao retornou um merchantId para esta loja." });
+    const vinculoExistente = await Restaurante.findOne({ ifoodIdentificador: merchantId });
+    if (vinculoExistente && String(vinculoExistente._id || vinculoExistente.id) !== restauranteId) {
+      return res.status(409).json({ ok: false, message: "Esta loja iFood ja esta vinculada a outro restaurante MOVYO." });
+    }
     const nextIfood = {
       ...ifood,
       conectado: true,
@@ -816,7 +1253,48 @@ exports.webhook = async (req, res) => {
     const events = normalizeEvents(req.body);
     const results = [];
     for (const event of events) {
-      results.push(await processIfoodEvent(event, req.io));
+      const code = normalizeKey(event?.fullCode || event?.code);
+      if (code === "keepalive") {
+        const merchantIds = await activeMerchantIds(event?.merchantIds || []);
+        return res.status(202).json({ merchantIds });
+      }
+      const eventId = safeString(event?.id || event?.eventId, 191) || crypto.createHash("sha256").update(JSON.stringify(event || {})).digest("hex");
+      event.id = eventId;
+      let record = await IfoodEvent.findOne({ eventId });
+      if (record && String(record.status || "") === "processado") {
+        results.push({ ok: true, duplicate: true, eventId });
+        continue;
+      }
+      if (!record) {
+        try {
+          record = new IfoodEvent({
+            eventId,
+            merchantId: safeString(event.merchantId || event.metadata?.merchantId || event.payload?.merchantId, 191),
+            orderId: safeString(event.orderId || event.metadata?.id || event.metadata?.orderId, 191),
+            code: safeString(event.fullCode || event.code || event.eventType || event.type, 120),
+            payload: event,
+            status: "recebido",
+            tentativas: 0,
+            recebidoEm: new Date(),
+          });
+          await record.save();
+        } catch (createError) {
+          if (createError?.code === "ER_DUP_ENTRY" || Number(createError?.errno) === 1062) {
+            results.push({ ok: true, duplicate: true, eventId });
+            continue;
+          }
+          throw createError;
+        }
+      } else {
+        if (String(record.status || "") === "processando") {
+          results.push({ ok: true, duplicate: true, processing: true, eventId });
+          continue;
+        }
+      }
+      setImmediate(() => processQueuedIfoodEvent(event, req.io).catch((eventError) => {
+        console.error(`[iFood webhook] Falha no evento ${eventId}:`, eventError?.response?.data || eventError?.message || eventError);
+      }));
+      results.push({ ok: true, accepted: true, eventId });
     }
     return res.status(202).json({ ok: true, received: events.length, results });
   } catch (error) {
@@ -881,6 +1359,73 @@ exports.criarPedidoTeste = async (req, res) => {
   }
 };
 
+async function pedidoIfoodAutenticado(req, res) {
+  const restauranteId = String(req.restauranteId || req.userId || "");
+  const pedido = await Pedido.findById(req.params.pedidoId);
+  if (!pedido) {
+    res.status(404).json({ ok: false, message: "Pedido nao encontrado." });
+    return null;
+  }
+  if (String(pedido.restaurante?._id || pedido.restaurante) !== restauranteId) {
+    res.status(403).json({ ok: false, message: "Pedido pertence a outro restaurante." });
+    return null;
+  }
+  if (!isIfoodPedido(pedido)) {
+    res.status(409).json({ ok: false, message: "Este pedido nao e do iFood." });
+    return null;
+  }
+  return pedido;
+}
+
+exports.marcarPronto = async (req, res) => {
+  try {
+    const pedido = await pedidoIfoodAutenticado(req, res);
+    if (!pedido) return;
+    const result = await marcarPedidoProntoNoIfood(pedido);
+    pedido.ifoodReadyAt = new Date();
+    pedido.externalStatus = "READY_TO_PICKUP";
+    pedido.statusAtualizadoEm = new Date();
+    await pedido.save();
+    req.io?.to(`restaurante-${pedido.restaurante}`).emit("pedidoAtualizado", pedido);
+    return res.json({ ok: true, pedido, ifood: result });
+  } catch (error) {
+    return res.status(error.status || 500).json({ ok: false, message: error.message, ifood: error.details || null });
+  }
+};
+
+exports.cancellationReasons = async (req, res) => {
+  try {
+    const pedido = await pedidoIfoodAutenticado(req, res);
+    if (!pedido) return;
+    const reasons = await cancellationReasonsForPedido(pedido);
+    return res.json({ ok: true, reasons });
+  } catch (error) {
+    return res.status(error.status || error?.response?.status || 500).json({ ok: false, message: error?.response?.data?.message || error.message });
+  }
+};
+
+exports.tracking = async (req, res) => {
+  try {
+    const pedido = await pedidoIfoodAutenticado(req, res);
+    if (!pedido) return;
+    if (normalizeKey(pedido.deliveryProvider) !== "ifood") return res.status(409).json({ ok: false, message: "Rastreio iFood disponivel apenas quando a entrega e feita pelo iFood." });
+    const lastTrackingAt = pedido.ifoodTracking?.consultadoEm ? new Date(pedido.ifoodTracking.consultadoEm).getTime() : 0;
+    if (Number.isFinite(lastTrackingAt) && Date.now() - lastTrackingAt < 30000) {
+      return res.json({ ok: true, cached: true, tracking: pedido.ifoodTracking });
+    }
+    const restaurante = await getRestauranteDoPedido(pedido);
+    const trackingData = /^IFTEST-/i.test(pedido.externalOrderId)
+      ? { test: true, message: "Rastreio simulado para pedido de teste." }
+      : await getIfoodOrderResource(restaurante, pedido.externalOrderId, "tracking");
+    const tracking = { ...(trackingData || {}), consultadoEm: new Date() };
+    pedido.ifoodTracking = tracking;
+    await pedido.save();
+    return res.json({ ok: true, tracking });
+  } catch (error) {
+    return res.status(error.status || error?.response?.status || 500).json({ ok: false, message: error?.response?.data?.message || error.message });
+  }
+};
+
 // Compatibilidade com rota antiga /connect-url.
 // O fluxo recomendado agora e userCode: a tela nova chama /user-code.
 exports.startOAuth = exports.requestUserCode;
@@ -895,6 +1440,24 @@ exports._private = {
   criarOuAtualizarPedidoIfood,
   processIfoodEvent,
   verifyWebhookSignature,
+  initialLocalStatus,
+  marcarPedidoProntoNoIfood,
+  iniciarPreparoNoIfood,
+  despacharPedidoNoIfood,
+  solicitarCancelamentoNoIfood,
+  cancellationReasonsForPedido,
+  recuperarEventosIfoodPendentes,
+  processQueuedIfoodEvent,
+  activeMerchantIds,
+  persistPollingEvent,
+  pollIfoodEvents,
 };
 
 exports.confirmarPedidoNoIfood = confirmarPedidoNoIfood;
+exports.marcarPedidoProntoNoIfood = marcarPedidoProntoNoIfood;
+exports.iniciarPreparoNoIfood = iniciarPreparoNoIfood;
+exports.despacharPedidoNoIfood = despacharPedidoNoIfood;
+exports.recuperarEventosIfoodPendentes = recuperarEventosIfoodPendentes;
+exports.startIfoodPolling = startIfoodPolling;
+exports.solicitarCancelamentoNoIfood = solicitarCancelamentoNoIfood;
+exports.cancellationReasonsForPedido = cancellationReasonsForPedido;

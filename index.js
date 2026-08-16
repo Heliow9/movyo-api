@@ -18,6 +18,7 @@ const { syncAllModels } = require("./lib/mysqlModelFactory");
 const apiMonitor = require("./utils/apiMonitor");
 const { cancelarPedidosVitrineExpirados } = require("./services/pedidoCancelamentoService");
 const { recuperarOfertasPendentes } = require("./services/deliveryOfferService");
+const { recuperarEventosIfoodPendentes, startIfoodPolling } = require("./controllers/ifoodController");
 
 const mercadoPagoPublicoRoutes = require("./routes/mercadoPagoPublicoRoutes");
 const garcomRoutes = require("./routes/garcomRoutes");
@@ -311,6 +312,8 @@ async function iniciarBanco() {
       await syncAllModels();
     }
     await recuperarOfertasPendentes(io);
+    await recuperarEventosIfoodPendentes(io);
+    startIfoodPolling(io);
     await restaurarBotsLigados();
     databaseReady = true;
     databaseLastError = null;

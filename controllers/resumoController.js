@@ -274,7 +274,10 @@ exports.obter = async (req, res) => {
       const pagamento = groupLabel(order.formaPagamento, "pagamento");
       pagamentos.set(pagamento, round2((pagamentos.get(pagamento) || 0) + netTotal(order)));
       const origem = groupLabel(order.origem, "origem");
-      origens.set(origem, (origens.get(origem) || 0) + 1);
+      const origemAtual = origens.get(origem) || { nome: origem, pedidos: 0, faturamento: 0 };
+      origemAtual.pedidos += 1;
+      origemAtual.faturamento = round2(origemAtual.faturamento + netTotal(order));
+      origens.set(origem, origemAtual);
 
       parseJson(order.itens, []).forEach((item) => {
         if (isFreteItem(item)) return;
@@ -290,6 +293,19 @@ exports.obter = async (req, res) => {
     });
 
     const pico = [...serie].sort((a, b) => b.pedidos - a.pedidos || b.faturamento - a.faturamento)[0];
+    const saleRows = rows.filter(isSale);
+    const averageMinutes = (fromField, toField) => {
+      const samples = saleRows.map((order) => {
+        const from = order[fromField] ? new Date(order[fromField]).getTime() : NaN;
+        const to = order[toField] ? new Date(order[toField]).getTime() : NaN;
+        return Number.isFinite(from) && Number.isFinite(to) && to >= from ? (to - from) / 60000 : null;
+      }).filter((value) => value !== null);
+      return samples.length ? round2(samples.reduce((sum, value) => sum + value, 0) / samples.length) : 0;
+    };
+    const origemLista = [...origens.values()]
+      .map((item) => ({ ...item, percentual: resumo.pedidos ? round2((item.pedidos / resumo.pedidos) * 100) : 0 }))
+      .sort((a, b) => b.pedidos - a.pedidos);
+
     return res.json({
       periodo: {
         tipo: periodo,
@@ -309,11 +325,18 @@ exports.obter = async (req, res) => {
       },
       serie,
       pagamentos: [...pagamentos.entries()].map(([nome, valor]) => ({ nome, valor })).sort((a, b) => b.valor - a.valor),
-      origens: [...origens.entries()].map(([nome, pedidos]) => ({ nome, pedidos })).sort((a, b) => b.pedidos - a.pedidos),
+      origens: origemLista,
       topProdutos: [...produtos.values()].sort((a, b) => b.quantidade - a.quantidade).slice(0, 8),
       insights: {
         pico: pico?.pedidos ? { label: pico.label, pedidos: pico.pedidos, faturamento: pico.faturamento } : null,
         melhorProduto: [...produtos.values()].sort((a, b) => b.faturamento - a.faturamento)[0] || null,
+      },
+      operacao: {
+        tempoAceiteMedioMin: averageMinutes("criadoEm", "emProducaoEm"),
+        tempoPreparoMedioMin: averageMinutes("emProducaoEm", "emEntregaEm"),
+        tempoEntregaMedioMin: averageMinutes("emEntregaEm", "entregueEm"),
+        pedidosIfood: origemLista.find((item) => item.nome === "iFood")?.pedidos || 0,
+        participacaoIfood: origemLista.find((item) => item.nome === "iFood")?.percentual || 0,
       },
     });
   } catch (error) {

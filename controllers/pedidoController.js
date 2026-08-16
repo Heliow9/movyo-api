@@ -24,7 +24,12 @@ const {
 const { enviarOferta } = require("../services/deliveryOfferService");
 const { planHasFeature } = require("../utils/planRules");
 const { baixarEstoquePorPedido } = require("../services/estoque/baixarPorPedido");
-const { confirmarPedidoNoIfood } = require("./ifoodController");
+const {
+  confirmarPedidoNoIfood,
+  despacharPedidoNoIfood,
+  solicitarCancelamentoNoIfood,
+  iniciarPreparoNoIfood,
+} = require("./ifoodController");
 
 const STATUS_ENTREGA_ATIVA = ["aguardando_resposta", "em_rota", "em_entrega"];
 
@@ -114,6 +119,9 @@ function rowToPedidoLean(row = {}) {
   pedido.comprovanteEntrega = parseJsonSafe(row.comprovanteEntrega, null);
   pedido.ocorrenciasEntrega = parseJsonSafe(row.ocorrenciasEntrega, []);
   pedido.linkEntrega = parseJsonSafe(row.linkEntrega, null);
+  pedido.externalPayload = parseJsonSafe(row.externalPayload, {});
+  pedido.ifoodDriver = parseJsonSafe(row.ifoodDriver, {});
+  pedido.ifoodTracking = parseJsonSafe(row.ifoodTracking, {});
   // Normaliza aliases do MySQL para os nomes usados pelos clientes.
   pedido.createdAt = row.createdAt || row.created_at || row.criadoEm || null;
   pedido.updatedAt = row.updatedAt || row.updated_at || row.statusAtualizadoEm || null;
@@ -135,7 +143,11 @@ const pedidosListCountCache = new Map();
 const PEDIDOS_LIST_COLUMNS = `
   id, numeroPedido, restaurante, cliente, entregador, mesaId, mesaNumero, nomeCliente,
   telefoneCliente, enderecoCliente, itens, total, taxaEntrega, formaPagamento, status,
-  statusPagamento, origem, observacao, pagamento, pagamentos, descontoValor, valorDesconto,
+  statusPagamento, origem, canalVenda, marketplace, externalOrderId, externalMerchantId,
+  externalStatus, externalPayload, externalOrderType, externalOrderTiming, deliveryProvider,
+  pickupCode, deliveryLocalizer, deliveryObservations, scheduledTo, ifoodPreparationStartAt, ifoodReadyAt,
+  ifoodDispatchedAt, ifoodCancellationStatus, ifoodCancellationReason, ifoodDriver,
+  ifoodTracking, observacao, pagamento, pagamentos, descontoValor, valorDesconto,
   totalBruto, valorPago, valorPendente, mpPaymentId, garcomId, garcomNome, recebidoPor,
   recebidoPorNome, fechadoPor, fechadoPorNome, criadoPor, criadoPorNome, criadoEm, pagoEm,
   aceitoEm, emProducaoEm, emEntregaEm, statusAtualizadoEm, entregueEm, canceladoEm,
@@ -1778,13 +1790,30 @@ const atualizarStatusPedido = async (req, res) => {
       String(statusAnterior || "").toLowerCase() !== "em_producao"
     ) {
       try {
-        ifoodSync = await confirmarPedidoNoIfood(pedido);
+        const confirmacao = await confirmarPedidoNoIfood(pedido);
+        const preparo = await iniciarPreparoNoIfood(pedido);
+        ifoodSync = { ok: true, action: "confirm_and_start_preparation", confirmacao, preparo };
       } catch (ifoodError) {
-        console.error("[iFood] Falha ao confirmar pedido antes de aceitar no MOVYO:", ifoodError?.details || ifoodError?.message || ifoodError);
+        console.error("[iFood] Falha ao aceitar/iniciar preparo no MOVYO:", ifoodError?.details || ifoodError?.message || ifoodError);
         return res.status(ifoodError.status || 502).json({
-          erro: "Nao foi possivel confirmar o pedido no iFood.",
+          erro: "Nao foi possivel confirmar ou iniciar o preparo do pedido no iFood.",
           detalhes: ifoodError.message,
           ifood: ifoodError.details || null,
+        });
+      }
+    }
+
+    if (
+      String(status || "").toLowerCase() === "em_entrega" &&
+      String(statusAnterior || "").toLowerCase() !== "em_entrega" &&
+      String(pedido.origem || "").toLowerCase() === "ifood"
+    ) {
+      try {
+        ifoodSync = await despacharPedidoNoIfood(pedido);
+      } catch (ifoodError) {
+        return res.status(ifoodError.status || 502).json({
+          erro: ifoodError.message || "Nao foi possivel despachar o pedido no iFood.",
+          detalhes: ifoodError.details || null,
         });
       }
     }
@@ -2215,6 +2244,32 @@ const cancelarPedido = async (req, res) => {
     const motivo = (req.body?.motivo || req.body?.descricao || "").toString().trim() || null;
     const role = req.user?.role === "garcom" ? "garcom" : "restaurante";
     const canceladoPor = role === "garcom" ? req.garcomId || req.user?._id || null : req.userId || null;
+
+    if (String(pedido.origem || "").toLowerCase() === "ifood" && String(pedido.externalOrderId || "")) {
+      const reasonCode = String(req.body?.ifoodReasonCode || req.body?.reasonCode || "").trim();
+      if (!reasonCode) {
+        return res.status(400).json({
+          code: "IFOOD_REASON_REQUIRED",
+          message: "Selecione um motivo de cancelamento aceito pelo iFood.",
+        });
+      }
+      const ifood = await solicitarCancelamentoNoIfood(pedido, reasonCode);
+      if (!ifood?.skipped) {
+        pedido.ifoodCancellationStatus = "solicitado";
+        pedido.ifoodCancellationReason = reasonCode;
+        pedido.externalStatus = "CANCELLATION_REQUESTED";
+        pedido.statusAtualizadoEm = new Date();
+        await pedido.save();
+        req.io?.to(`restaurante-${restauranteId}`).emit("pedidoAtualizado", pedido);
+        return res.status(202).json({
+          ok: true,
+          cancelamentoPendente: true,
+          message: "Cancelamento solicitado ao iFood. O pedido sera removido quando o iFood confirmar.",
+          pedido,
+          ifood,
+        });
+      }
+    }
 
     const result = await cancelarPedidoComAuditoria(pedido, {
       motivo: motivo || "Cancelamento do pedido",
@@ -2881,4 +2936,3 @@ module.exports = {
   marcarItemEntregueMesa,
   marcarItemEntregueCliente,
 };
-
