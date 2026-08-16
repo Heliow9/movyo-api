@@ -1179,7 +1179,28 @@ exports.completeAuthorization = async (req, res) => {
     if (!merchantId) return res.status(422).json({ ok: false, message: "O iFood nao retornou um merchantId para esta loja." });
     const vinculoExistente = await Restaurante.findOne({ ifoodIdentificador: merchantId });
     if (vinculoExistente && String(vinculoExistente._id || vinculoExistente.id) !== restauranteId) {
-      return res.status(409).json({ ok: false, message: "Esta loja iFood ja esta vinculada a outro restaurante MOVYO." });
+      const vinculoIfood = parseJsonSafe(vinculoExistente.ifood, {});
+      const vinculoAtivo = (vinculoExistente.ifoodStatus === true || vinculoExistente.ifoodStatus === 1) && vinculoIfood.conectado !== false;
+      if (vinculoAtivo) {
+        return res.status(409).json({ ok: false, message: "Esta loja iFood ja esta vinculada a outro restaurante MOVYO." });
+      }
+      // Corrige automaticamente vinculos antigos que foram desconectados antes de
+      // o campo legado ifoodIdentificador passar a ser limpo pelo endpoint.
+      await Restaurante.findByIdAndUpdate(vinculoExistente._id || vinculoExistente.id, {
+        $set: {
+          ifoodIdentificador: null,
+          ifood: {
+            ...vinculoIfood,
+            conectado: false,
+            merchantId: null,
+            merchantIds: [],
+            accessToken: null,
+            refreshToken: null,
+            tokenExpiraEm: null,
+            vinculoLiberadoEm: new Date(),
+          },
+        },
+      }, { new: true });
     }
     const nextIfood = {
       ...ifood,
@@ -1229,12 +1250,21 @@ exports.disconnect = async (req, res) => {
     await Restaurante.findByIdAndUpdate(restauranteId, {
       $set: {
         ifoodStatus: false,
+        ifoodIdentificador: null,
         ifood: {
           ...ifood,
           conectado: false,
+          merchantId: null,
+          merchantIds: [],
           accessToken: null,
           refreshToken: null,
           tokenExpiraEm: null,
+          userCode: "",
+          authorizationCodeVerifier: "",
+          verificationUrl: "",
+          verificationUrlComplete: "",
+          codeExpiresAt: null,
+          lastError: null,
           desconectadoEm: new Date(),
         },
       },
