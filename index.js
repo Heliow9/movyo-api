@@ -26,7 +26,7 @@ const rateLimitPublico = require("./middlewares/rateLimitPublico");
 
 // Middlewares de segurança HTTP sem novas dependências.
 // Mantém compatibilidade com app/mobile e restringe navegador por CORS quando configurado.
-const allowedOrigins = String(process.env.CORS_ORIGINS || "https://app.movyo.delivery,https://movyo.delivery,http://localhost:5173,http://localhost:3000,https://hub.movyo.delivery ")
+const allowedOrigins = String(process.env.CORS_ORIGINS || "https://app.movyo.delivery,https://movyo.delivery,http://localhost:5173,http://localhost:3000,https://hub.movyo.delivery,https://movyo-saas-dashboard.onrender.com ")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
