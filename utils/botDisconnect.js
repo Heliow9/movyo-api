@@ -27,6 +27,8 @@ function isInvalidSessionDisconnect(code, message, reasons = {}) {
     "not-authorized",
     "device removed",
     "device_removed",
+    "invalid account signature",
+    "failed to verify account signature",
   ].some((marker) => normalizedMessage.includes(marker));
 }
 

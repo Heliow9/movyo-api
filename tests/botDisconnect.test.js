@@ -27,7 +27,10 @@ test("stream error 500 sem motivo conhecido é reiniciável", () => {
 test("logout e sessão explicitamente inválida continuam removendo credenciais", () => {
   assert.equal(isInvalidSessionDisconnect(401, "Logged Out", reasons), true);
   assert.equal(isInvalidSessionDisconnect(500, "Bad Session", reasons), true);
+  assert.equal(isInvalidSessionDisconnect(500, "Invalid account signature", reasons), true);
+  assert.equal(isInvalidSessionDisconnect(500, "Failed to verify account signature", reasons), true);
   assert.equal(isRestartableDisconnect(500, "Bad Session", reasons), false);
+  assert.equal(isRestartableDisconnect(500, "Invalid account signature", reasons), false);
 });
 
 test("restart required e timeout são reiniciáveis", () => {

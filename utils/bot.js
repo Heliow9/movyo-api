@@ -1285,8 +1285,9 @@ async function iniciarBot(restauranteId, onQRCode, onConectado, options = {}) {
           timedOut: DisconnectReason.timedOut,
         };
 
-        if (isInvalidSessionDisconnect(code, message, disconnectReasons)) {
+        if (Number(code) === Number(DisconnectReason.loggedOut)) {
           const pasta = path.resolve(__dirname, "../sessions", `session-${restauranteId}`);
+          try { sock.ev?.removeAllListeners?.("creds.update"); } catch {}
           if (fs.existsSync(pasta)) fs.rmSync(pasta, { recursive: true, force: true });
 
           await atualizarStatusBot(restauranteId, {
@@ -1297,6 +1298,29 @@ async function iniciarBot(restauranteId, onQRCode, onConectado, options = {}) {
           });
 
           console.log(`📴 Bot foi deslogado ou sessão ficou inválida – sessão resetada (${nome})`);
+          return;
+        }
+
+        if (isInvalidSessionDisconnect(code, message, disconnectReasons)) {
+          const pasta = path.resolve(__dirname, "../sessions", `session-${restauranteId}`);
+          try { sock.ev?.removeAllListeners?.("creds.update"); } catch {}
+          if (fs.existsSync(pasta)) fs.rmSync(pasta, { recursive: true, force: true });
+
+          reconnectAttempts[restauranteId] = 0;
+          await atualizarStatusBot(restauranteId, {
+            "statusBot.ligado": true,
+            "statusBot.conectado": false,
+            "statusBot.ultimoQr": null,
+            "statusBot.erroConexao": "Credenciais inválidas removidas. Gerando um novo QR Code...",
+          });
+
+          console.log(`♻️ Credenciais inválidas removidas; gerando novo QR (${nome})`);
+          agendarReconexao(
+            restauranteId,
+            { onQRCode, onConectado },
+            BOT_RESTART_REQUIRED_DELAY_MS,
+            `reset_invalid_credentials_${code || "unknown"}`
+          );
           return;
         }
 
