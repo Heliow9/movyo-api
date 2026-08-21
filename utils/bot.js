@@ -16,6 +16,10 @@ const Produto = require("../models/Produto");
 const CategoriaProduto = require("../models/CategoriaProduto");
 const Pedido = require("../models/Pedido");
 const { criarPagamentoPix } = require("../services/mercadoPagoPixService");
+const {
+  isInvalidSessionDisconnect,
+  isRestartableDisconnect,
+} = require("./botDisconnect");
 
 // ✅ NOVO: horários de atendimento (horariosFuncionamento)
 const { statusAtendimento } = require("./atendimento");
@@ -120,8 +124,8 @@ function getDisconnectCode(lastDisconnect) {
 
 function getDisconnectMessage(lastDisconnect) {
   return (
-    lastDisconnect?.error?.output?.payload?.message ||
     lastDisconnect?.error?.message ||
+    lastDisconnect?.error?.output?.payload?.message ||
     lastDisconnect?.error?.toString?.() ||
     "desconhecido"
   );
@@ -157,21 +161,6 @@ function isBotLigado(restaurante) {
   // Só consideramos desligado quando vier false/0/off de forma explícita.
   const st = safeJson(restaurante?.statusBot, restaurante?.statusBot || {});
   return normalizeBoolean(st?.ligado, true);
-}
-
-function isRestartableDisconnect(code, message) {
-  const c = Number(code);
-  const msg = String(message || "").toLowerCase();
-  return (
-    c === 515 ||
-    c === 408 ||
-    c === DisconnectReason.restartRequired ||
-    c === DisconnectReason.timedOut ||
-    msg.includes("stream errored") ||
-    msg.includes("restart required") ||
-    msg.includes("timed out") ||
-    msg.includes("request time-out")
-  );
 }
 
 function getRestartDelayMs(restauranteId, isFastRestart = false) {
@@ -1277,6 +1266,9 @@ async function iniciarBot(restauranteId, onQRCode, onConectado, options = {}) {
 
       if (connection === "close") {
         limparInstancia(restauranteId, { fechar: false });
+        // O QR que originou este socket deixa de ser válido assim que a conexão
+        // fecha (inclusive após a leitura). Não deixe o polling devolver imagem antiga.
+        delete qrs[restauranteId];
 
         const code = getDisconnectCode(lastDisconnect);
         const message = getDisconnectMessage(lastDisconnect);
@@ -1286,7 +1278,14 @@ async function iniciarBot(restauranteId, onQRCode, onConectado, options = {}) {
 
         console.warn(`🔌 Bot fechado (${nome}) code=${code || "-"} motivo=${message}`);
 
-        if (code === DisconnectReason.loggedOut || code === DisconnectReason.badSession) {
+        const disconnectReasons = {
+          loggedOut: DisconnectReason.loggedOut,
+          badSession: DisconnectReason.badSession,
+          restartRequired: DisconnectReason.restartRequired,
+          timedOut: DisconnectReason.timedOut,
+        };
+
+        if (isInvalidSessionDisconnect(code, message, disconnectReasons)) {
           const pasta = path.resolve(__dirname, "../sessions", `session-${restauranteId}`);
           if (fs.existsSync(pasta)) fs.rmSync(pasta, { recursive: true, force: true });
 
@@ -1307,11 +1306,12 @@ async function iniciarBot(restauranteId, onQRCode, onConectado, options = {}) {
 
           // 515/408 são comuns durante handshake/init queries do Baileys.
           // Não apaga sessão: recria o socket e tenta continuar.
-          const restartRapido = isRestartableDisconnect(code, message);
+          const restartRapido = isRestartableDisconnect(code, message, disconnectReasons);
           const delay = getRestartDelayMs(restauranteId, restartRapido);
 
           await atualizarStatusBot(restauranteId, {
             "statusBot.conectado": false,
+            "statusBot.ultimoQr": null,
             "statusBot.erroConexao": restartRapido
               ? `WhatsApp/Baileys pediu restart do socket (${code || "sem código"}). Reconectando...`
               : `Conexão fechada (${code || "sem código"}): ${message}`,
@@ -1326,6 +1326,7 @@ async function iniciarBot(restauranteId, onQRCode, onConectado, options = {}) {
         } else {
           await atualizarStatusBot(restauranteId, {
             "statusBot.conectado": false,
+            "statusBot.ultimoQr": null,
             "statusBot.erroConexao": message,
           });
 

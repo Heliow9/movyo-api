@@ -136,6 +136,19 @@ exports.getQrCode = async (req, res) => {
   const { restauranteId } = req.params;
 
   try {
+    // Depois da leitura, o polling do modal ainda pode fazer uma última chamada.
+    // Não rebaixa o status persistido de uma conexão que já abriu.
+    if (estaConectado(restauranteId)) {
+      return res.json({
+        ok: true,
+        qr: null,
+        connecting: false,
+        conectado: true,
+        estado: getEstadoBot(restauranteId),
+        mensagem: 'WhatsApp conectado',
+      });
+    }
+
     const qrAtual = getQr(restauranteId);
     if (qrAtual) return res.json({ ok: true, qr: qrAtual, connecting: false });
 
@@ -164,6 +177,18 @@ exports.getQrCode = async (req, res) => {
 
     // Pequena espera para capturar QR recém-gerado sem segurar a rota por segundos.
     await new Promise((resolve) => setTimeout(resolve, 120));
+
+    if (estaConectado(restauranteId)) {
+      return res.json({
+        ok: true,
+        qr: null,
+        connecting: false,
+        conectado: true,
+        estado: getEstadoBot(restauranteId),
+        mensagem: 'WhatsApp conectado',
+      });
+    }
+
     const qrDepois = getQr(restauranteId);
 
     return res.json({
