@@ -502,6 +502,33 @@ function getCardapioUrl(restaurante) {
   return slug ? `${CARDAPIO_BASE_URL}/p/${encodeURIComponent(slug)}` : `${CARDAPIO_BASE_URL}/p/`;
 }
 
+function getMensagensPersonalizadas(restaurante) {
+  const mensagens = safeJson(restaurante?.mensagensPersonalizadas, {});
+  return mensagens && typeof mensagens === "object" ? mensagens : {};
+}
+
+function personalizarMensagem(texto, { restaurante, nomeCliente = "" } = {}) {
+  return String(texto || "")
+    .replaceAll("{nomeCliente}", nomeCliente || "cliente")
+    .replaceAll("{nomeRestaurante}", restaurante?.nome || "nosso restaurante")
+    .trim();
+}
+
+function adicionarLinkCardapio(texto, restaurante) {
+  const mensagem = String(texto || "").trim();
+  const url = getCardapioUrl(restaurante);
+  if (!url || mensagem.includes(url)) return mensagem;
+  return `${mensagem}\n\n🌐 Cardápio: ${url}`;
+}
+
+function getMensagemLojaFechada(restaurante, textoPadrao, nomeCliente = "") {
+  const personalizada = String(getMensagensPersonalizadas(restaurante)?.mensagemLojaFechada || "").trim();
+  const texto = personalizada
+    ? personalizarMensagem(personalizada, { restaurante, nomeCliente })
+    : String(textoPadrao || "⛔ Estamos fechados no momento.").trim();
+  return adicionarLinkCardapio(texto, restaurante);
+}
+
 function deveIgnorarMensagem(remoteJid) {
   const jid = String(remoteJid || "");
   if (!jid) return true;
@@ -1502,7 +1529,7 @@ async function enviarPixWhatsapp(restauranteId, numero, payload) {
    SAUDAÇÃO (reage + digitando 6s + envia msg com link)
 ========================================================= */
 function tratarMensagemSaudacao(sock) {
-  const saudacoes = ["oi", "olá", "ola", "eai", "e aí", "fala", "bom dia", "boa tarde", "boa noite"];
+  const saudacoesPadrao = ["oi", "olá", "ola", "eai", "e aí", "fala", "bom dia", "boa tarde", "boa noite"];
 
   sock.ev.on("messages.upsert", async ({ messages }) => {
     try {
@@ -1528,9 +1555,8 @@ function tratarMensagemSaudacao(sock) {
         if (parecePerguntaDeDisponibilidade(textoFechado)) return;
 
         if (podeAvisarFechado(restauranteId, remote)) {
-          const url = getCardapioUrl(restaurante);
           await sock.sendMessage(remote, {
-            text: `${stAt.texto}${url ? `\n\n🌐 Cardápio: ${url}` : ""}`,
+            text: getMensagemLojaFechada(restaurante, stAt.texto, extrairNomeCliente(sock, remote, msg)),
           });
         }
         return;
@@ -1543,7 +1569,12 @@ function tratarMensagemSaudacao(sock) {
       if (parecePerguntaDeDisponibilidade(texto)) return;
 
       const textoLower = normalizeText(texto);
-      if (!saudacoes.some((s) => textoLower.includes(normalizeText(s)))) return;
+      const saudacoesConfiguradas = getMensagensPersonalizadas(restaurante)?.saudacoes;
+      const saudacoes = Array.isArray(saudacoesConfiguradas) && saudacoesConfiguradas.some((item) => String(item || "").trim())
+        ? saudacoesConfiguradas.map((item) => String(item || "").trim()).filter(Boolean)
+        : saudacoesPadrao;
+      const textoComLimites = ` ${textoLower} `;
+      if (!saudacoes.some((s) => textoComLimites.includes(` ${normalizeText(s)} `))) return;
 
       const msgId = msg.key?.id;
       if (msgId) {
@@ -1563,6 +1594,7 @@ function tratarMensagemSaudacao(sock) {
       const nomeRest = restaurante.nome || "nosso restaurante";
       const nomeCliente = extrairNomeCliente(sock, remote, msg);
       const url = getCardapioUrl(restaurante);
+      const respostaConfigurada = String(getMensagensPersonalizadas(restaurante)?.respostaSaudacao || "").trim();
 
       try {
         await sock.sendMessage(remote, { react: { text: "❤️", key: msg.key } });
@@ -1570,10 +1602,16 @@ function tratarMensagemSaudacao(sock) {
 
       await typingDelay(sock, remote, 6000);
 
-      const bodyText =
+      const saudacaoPadrao =
         `Olá${nomeCliente ? `, ${nomeCliente}` : ""}! 😄👋\n` +
-        `Somos o restaurante *${nomeRest}*.\n\n` +
-        (url ? `🌐 Cardápio: ${url}` : "Me diga o que você deseja que eu te ajudo por aqui 🙂");
+        `Somos o restaurante *${nomeRest}*.`;
+      const saudacao = respostaConfigurada
+        ? personalizarMensagem(respostaConfigurada, { restaurante, nomeCliente })
+        : saudacaoPadrao;
+      const bodyText = adicionarLinkCardapio(
+        saudacao || (url ? "" : "Me diga o que você deseja que eu te ajudo por aqui 🙂"),
+        restaurante
+      );
 
       await sock.sendMessage(remote, { text: bodyText });
 
@@ -1675,7 +1713,7 @@ Mas você pode fazer o primeiro agora pelo cardápio: ${url}` });
         if (podeAvisarFechado(restauranteId, remote)) {
           await reagirAntesDeResponder(sock, msg, texto);
           await sock.sendMessage(remote, {
-            text: `${stAt.texto}${url ? `\n\n🌐 Cardápio: ${url}` : ""}`,
+            text: getMensagemLojaFechada(restaurante, stAt.texto, extrairNomeCliente(sock, remote, msg)),
           });
         }
         return;
