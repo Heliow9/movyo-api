@@ -23,6 +23,7 @@ const {
 } = require("../services/pedidoCancelamentoService");
 const { enviarOferta } = require("../services/deliveryOfferService");
 const { planHasFeature } = require("../utils/planRules");
+const { isExtraPaused } = require("../utils/productDefaults");
 const { baixarEstoquePorPedido } = require("../services/estoque/baixarPorPedido");
 const {
   confirmarPedidoNoIfood,
@@ -525,22 +526,35 @@ function getSelectedOptions(item = {}) {
     item.opcionais,
     item.opcoes,
   ];
-  return buckets.flatMap((v) => (Array.isArray(v) ? v : [])).filter(Boolean);
+  const tiposExtras = item.tiposExtrasSelecionados && typeof item.tiposExtrasSelecionados === "object"
+    ? Object.values(item.tiposExtrasSelecionados).flatMap((value) => Array.isArray(value) ? value : [])
+    : [];
+  return [...buckets.flatMap((v) => (Array.isArray(v) ? v : [])), ...tiposExtras].filter(Boolean);
+}
+
+function flattenOptionBucket(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (value && typeof value === "object") {
+    return Object.values(value).flatMap((items) => Array.isArray(items) ? items : []).filter(Boolean);
+  }
+  return [];
 }
 
 function getProductOptionCatalog(produto = {}) {
   const buckets = [produto.extras, produto.adicionais, produto.complementos, produto.sabores, produto.bordas];
-  return buckets.flatMap((v) => (Array.isArray(v) ? v : [])).filter(Boolean);
+  return buckets.flatMap(flattenOptionBucket).filter((option) => !isExtraPaused(option));
+}
+
+function optionMatches(selected = {}, option = {}) {
+  const selectedId = String(selected._id || selected.id || selected.opcaoId || selected.adicionalId || selected.complementoId || "");
+  const selectedName = normalizeText(selected.nome || selected.name || selected.titulo || selected.title || "");
+  const optionId = String(option._id || option.id || option.opcaoId || option.adicionalId || option.complementoId || "");
+  const optionName = normalizeText(option.nome || option.name || option.titulo || option.title || "");
+  return (selectedId && optionId && selectedId === optionId) || (selectedName && optionName && selectedName === optionName);
 }
 
 function matchOptionPrice(selected = {}, catalog = []) {
-  const selectedId = String(selected._id || selected.id || selected.opcaoId || selected.adicionalId || selected.complementoId || "");
-  const selectedName = normalizeText(selected.nome || selected.name || selected.titulo || selected.title || "");
-  const found = catalog.find((opt) => {
-    const optId = String(opt._id || opt.id || opt.opcaoId || opt.adicionalId || opt.complementoId || "");
-    const optName = normalizeText(opt.nome || opt.name || opt.titulo || opt.title || "");
-    return (selectedId && optId && selectedId === optId) || (selectedName && optName && selectedName === optName);
-  });
+  const found = catalog.find((opt) => optionMatches(selected, opt));
   return found ? round2(found.preco ?? found.valor ?? found.price ?? 0) : 0;
 }
 
@@ -596,7 +610,13 @@ async function recalcularItensPublicos({ itens = [], restauranteId }) {
     const quantidade = Math.max(1, Math.min(99, Number(item.quantidade || item.qtd || 1) || 1));
     let precoUnitario = round2(produto.preco || 0);
     const catalog = getProductOptionCatalog(produto);
+    const extrasPausados = flattenOptionBucket(produto.extras).filter(isExtraPaused);
     for (const selected of getSelectedOptions(item)) {
+      if (extrasPausados.some((option) => optionMatches(selected, option))) {
+        const err = new Error(`O adicional "${selected?.nome || "selecionado"}" não está disponível no momento.`);
+        err.statusCode = 409;
+        throw err;
+      }
       precoUnitario = round2(precoUnitario + matchOptionPrice(selected, catalog));
     }
 

@@ -15,6 +15,7 @@ const jwt = require("jsonwebtoken");
 const { criarRecipient } = require("../services/criarRecipientPagarme");
 const { resumoCobrancaRestaurante, gerarPixMensalidade: gerarPixMensalidadeSaas } = require("../services/saasBillingService");
 const { getPlanSummary, planHasFeature } = require("../utils/planRules");
+const { withDefaultProductImage, filterAvailableExtras } = require("../utils/productDefaults");
 const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
@@ -934,7 +935,7 @@ module.exports = {
             nome: p.nome,
             descricao: p.descricao,
             precoBase: p.precoBase,
-            imagem: p.imagem,
+            imagem: withDefaultProductImage(p.imagem),
 
             destaque: isProdutoDestaque(p),
             ordem: p.ordem || 0,
@@ -946,7 +947,7 @@ module.exports = {
               ? p.complementos
               : (complementosDisponiveis || []),
 
-            extras: p.extras || {},
+            extras: filterAvailableExtras(p.extras || {}),
             ativo: p.ativo,
             ativoVitrine: p.ativoVitrine !== false,
 
@@ -1059,7 +1060,7 @@ module.exports = {
             nome: p.nome,
             descricao: p.descricao,
             precoBase: p.precoBase,
-            imagem: p.imagem,
+            imagem: withDefaultProductImage(p.imagem),
 
             destaque: isProdutoDestaque(p),
             ordem: p.ordem || 0,
@@ -1071,7 +1072,7 @@ module.exports = {
               ? p.complementos
               : (complementosDisponiveis || []),
 
-            extras: p.extras || {},
+            extras: filterAvailableExtras(p.extras || {}),
             ativo: p.ativo,
             ativoVitrine: p.ativoVitrine !== false,
 

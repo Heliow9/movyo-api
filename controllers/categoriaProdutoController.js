@@ -1,6 +1,7 @@
 const CategoriaProduto = require('../models/CategoriaProduto');
 const Produto = require('../models/Produto');
 const { queryWithRetry } = require('../lib/mysqlRetry');
+const { withDefaultProductImage } = require('../utils/productDefaults');
 
 
 function parseJsonSafe(value, fallback) {
@@ -259,7 +260,8 @@ const duplicarCategoria = async (req, res) => {
       ...prod.toObject(),
       _id: undefined,
       categoria: categoriaSalva._id,
-      nome: `${prod.nome} (Cópia)`
+      nome: `${prod.nome} (Cópia)`,
+      imagem: withDefaultProductImage(prod.imagem)
     }));
 
     await Produto.insertMany(produtosDuplicados);

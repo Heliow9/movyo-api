@@ -2,6 +2,8 @@
 const Produto = require("../models/Produto");
 const CategoriaProduto = require("../models/CategoriaProduto");
 const { queryWithRetry } = require("../lib/mysqlRetry");
+const { withDefaultProductImage } = require("../utils/productDefaults");
+const { invalidateCardapioCache } = require("./vitrineController");
 
 /** =========================
  * Helpers
@@ -67,6 +69,9 @@ function normalizeProdutoBody(body = {}, { partial = false } = {}) {
   const imprimeNaCozinha = toBool(raw, partial ? undefined : true);
 
   const normalized = { ...body };
+  if (!partial || Object.prototype.hasOwnProperty.call(normalized, "imagem")) {
+    normalized.imagem = withDefaultProductImage(normalized.imagem);
+  }
   normalized.setorImpressao = normalizeSetorImpressao(normalized.setorImpressao);
 
   // remove aliases pra não ficar lixo no doc
@@ -152,6 +157,7 @@ function normalizeProdutoResponse(produto) {
   const preco = parseMoney(plain.preco ?? plain.precoBase ?? 0);
   plain.preco = preco;
   plain.precoBase = preco;
+  plain.imagem = withDefaultProductImage(plain.imagem);
   const tipoItem = normalizeTipoItem(plain.tipoItem || plain.tipo || "comum");
   plain.tipoItem = tipoItem;
   plain.tipo = plain.tipo || tipoItem;
@@ -190,6 +196,7 @@ const criarProduto = async (req, res) => {
     const erroEstoquePizza = validarEstoquePizza(payload);
     if (erroEstoquePizza) return res.status(400).json({ erro: erroEstoquePizza });
     const novoProduto = await Produto.create(payload);
+    invalidateCardapioCache();
     res.status(201).json(normalizeProdutoResponse(novoProduto));
   } catch (err) {
     console.error("Erro ao criar produto:", err);
@@ -213,6 +220,7 @@ const editarProduto = async (req, res) => {
     });
 
     if (!atualizado) return res.status(404).json({ erro: "Produto não encontrado." });
+    invalidateCardapioCache();
     res.json(normalizeProdutoResponse(atualizado));
   } catch (err) {
     console.error("Erro ao editar produto:", err);
@@ -411,8 +419,10 @@ const duplicarProduto = async (req, res) => {
     // ✅ garante que o campo novo exista na cópia (caso doc antigo não tenha)
     if (copia.imprimeNaCozinha === undefined) copia.imprimeNaCozinha = true;
     if (copia.ativoVitrine === undefined) copia.ativoVitrine = true;
+    copia.imagem = withDefaultProductImage(copia.imagem);
 
     const novoProduto = await Produto.create(copia);
+    invalidateCardapioCache();
     res.status(201).json(normalizeProdutoResponse(novoProduto));
   } catch (err) {
     console.error("Erro ao duplicar produto:", err);

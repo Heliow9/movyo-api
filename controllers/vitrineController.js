@@ -1,8 +1,11 @@
 const { queryWithRetry } = require("../lib/mysqlRetry");
 const { planHasFeature } = require("../utils/planRules");
+const { withDefaultProductImage, filterAvailableExtras } = require("../utils/productDefaults");
 
 const cardapioCache = new Map();
 const CARDAPIO_CACHE_MS = Math.max(0, Number(process.env.VITRINE_CARDAPIO_CACHE_MS || 30000));
+
+exports.invalidateCardapioCache = () => cardapioCache.clear();
 
 function parseJsonSafe(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
@@ -133,7 +136,7 @@ function normalizeProduto(row, categoria) {
     descricao: row.descricao || "",
     preco,
     precoBase: preco,
-    imagem: row.imagem || "",
+    imagem: withDefaultProductImage(row.imagem),
     destaque: isProdutoDestaque(row),
     ordem: asNumber(row.ordem, 0),
     ativo: asBool(row.ativo, true),
@@ -141,7 +144,7 @@ function normalizeProduto(row, categoria) {
     disponivel: asBool(row.disponivel, true),
     imprimeNaCozinha: asBool(row.imprimeNaCozinha, true),
     tempoPreparoMin: asNumber(row.tempoPreparoMin, 0),
-    extras: parseJsonSafe(row.extras, {}),
+    extras: filterAvailableExtras(parseJsonSafe(row.extras, {})),
     estoque: parseJsonSafe(row.estoque, {}),
     sabores: parseJsonSafe(row.sabores, []),
     bordas: parseJsonSafe(row.bordas, []),
