@@ -202,6 +202,7 @@ app.use("/api/garcons", garcomRoutes);
 app.use("/api/estoque", require("./routes/estoqueRoutes"));
 app.use("/api/balcao", require("./routes/balcaoRoutes"));
 app.use("/api/caixa", require("./routes/caixaRoutes"));
+app.use("/api/financeiro", require("./routes/financeiroRoutes"));
 app.use("/api/resumo", require("./routes/resumoRoutes"));
 app.use("/api/push", require("./routes/pushRoutes"));
 app.use("/api/ifood", require("./routes/ifoodRoutes")());
