@@ -1,0 +1,3 @@
+const test=require('node:test');const assert=require('node:assert/strict');const {stableJson,bodyHash,signRequest,verifySignature}=require('../services/pontoCertoSignature');
+test('stable json is key-order independent',()=>assert.equal(stableJson({b:2,a:{z:1,y:2}}),stableJson({a:{y:2,z:1},b:2})));
+test('signature validates and body tampering fails',()=>{const input={method:'PUT',path:'/api/internal/ponto-certo/customers/1/subscription',timestamp:'1789840000000',nonce:'abc',body:{status:'ACTIVE',planCode:'professional'}};const sig=signRequest(input,'secret');assert.equal(verifySignature(input,'secret',sig),true);assert.equal(verifySignature({...input,body:{...input.body,status:'BLOCKED'}},'secret',sig),false);assert.equal(bodyHash(input.body).length,64);});

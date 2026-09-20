@@ -176,6 +176,7 @@ try {
 // -------------------------------
 // ROTAS PADRONIZADAS
 // -------------------------------
+app.use("/api/internal/ponto-certo", require("./routes/pontoCertoInternalRoutes"));
 app.use("/api/restaurantes", require("./routes/restauranteRoutes"));
 app.use("/api/saas", require("./routes/saasRoutes"));
 app.use("/api/auditoria", require("./routes/auditoriaRoutes"));

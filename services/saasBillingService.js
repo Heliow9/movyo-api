@@ -3,6 +3,7 @@ const axios = require("axios");
 const Restaurante = require("../models/Restaurante");
 const PlanoSaas = require("../models/PlanoSaas");
 const CobrancaSaas = require("../models/CobrancaSaas");
+const { buildPontoCertoBillingSummary, buildLegacyBillingSummary } = require("./saasBillingSummary");
 
 const MP_API = "https://api.mercadopago.com";
 
@@ -112,11 +113,21 @@ async function calcularMensalidade(restaurante) {
   };
 }
 
+function isPontoCertoManaged(restaurante) {
+  return String(restaurante?.billingSource || '').trim().toUpperCase() === 'PONTO_CERTO';
+}
+
+async function resumoPontoCerto(restaurante) {
+  const mensalidade = await calcularMensalidade(restaurante);
+  return buildPontoCertoBillingSummary({ restaurante, mensalidade, daysUntil });
+}
+
 async function resumoCobrancaRestaurante(restauranteOrId) {
   let restaurante = typeof restauranteOrId === "string"
     ? await Restaurante.findById(restauranteOrId).lean()
     : restauranteOrId;
   if (!restaurante) return null;
+  if (isPontoCertoManaged(restaurante)) return resumoPontoCerto(restaurante);
 
   let pagamentoConfirmado = false;
   let pendentes = await CobrancaSaas.find({
@@ -153,28 +164,13 @@ async function resumoCobrancaRestaurante(restauranteOrId) {
   }
 
   const mensalidade = await calcularMensalidade(restaurante);
-  const vencimento = restaurante.dataFimPlano || null;
-  const diasParaVencer = daysUntil(vencimento);
-  const mostrarPix = mensalidade.valorFinal > 0 && diasParaVencer !== null && diasParaVencer <= 3;
-
-  return {
-    restauranteId: restaurante._id || restaurante.id,
-    vencimento,
-    diasParaVencer,
-    mostrarPix,
+  return buildLegacyBillingSummary({
+    restaurante,
+    mensalidade,
+    cobranca: cobrancaPendente,
     pagamentoConfirmado,
-    ...mensalidade,
-    cobranca: cobrancaPendente
-      ? {
-          id: cobrancaPendente._id || cobrancaPendente.id,
-          status: cobrancaPendente.status,
-          paymentId: cobrancaPendente.mpPaymentId || null,
-          qrCode: cobrancaPendente.qrCode || cobrancaPendente.pixCopiaECola || "",
-          qrCodeBase64: cobrancaPendente.qrCodeBase64 || "",
-          valorFinal: Number(cobrancaPendente.valorFinal || mensalidade.valorFinal),
-        }
-      : null,
-  };
+    daysUntil,
+  });
 }
 
 async function gerarPixMensalidade(restauranteId) {
@@ -182,6 +178,12 @@ async function gerarPixMensalidade(restauranteId) {
   if (!restaurante) {
     const err = new Error("Restaurante nao encontrado.");
     err.status = 404;
+    throw err;
+  }
+  if (isPontoCertoManaged(restaurante)) {
+    const err = new Error("A mensalidade deste restaurante é gerida pelo Ponto Certo.");
+    err.status = 409;
+    err.code = "BILLING_MANAGED_BY_PONTO_CERTO";
     throw err;
   }
 
@@ -356,6 +358,12 @@ async function cancelarPlanoComEstornoProporcional(restauranteId, opts = {}) {
     err.status = 404;
     throw err;
   }
+  if (isPontoCertoManaged(restaurante)) {
+    const err = new Error("Cancelamento financeiro deve ser realizado no Ponto Certo.");
+    err.status = 409;
+    err.code = "BILLING_MANAGED_BY_PONTO_CERTO";
+    throw err;
+  }
 
   const rid = String(restaurante._id || restaurante.id);
   const cobrancas = await CobrancaSaas.find({
@@ -474,4 +482,5 @@ module.exports = {
   confirmarPagamentoMensalidade,
   processarWebhookMensalidade,
   cancelarPlanoComEstornoProporcional,
+  isPontoCertoManaged,
 };

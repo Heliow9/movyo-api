@@ -1,0 +1,4 @@
+Base commit: d26224be5bc44551153cc4acbb0e6a418f8f0489
+Base branch: feature/v4-movyo-central
+Patch: V4.1 first-cycle prorata
+Data: 2026-09-19

@@ -648,6 +648,7 @@ module.exports = {
       console.error("gerar pix mensalidade:", error?.response?.data || error);
       return res.status(error.status || error?.response?.status || 500).json({
         mensagem: error?.response?.data?.message || error.message || "Erro ao gerar Pix da mensalidade.",
+        code: error.code || null,
         erro: error?.response?.data || error.message,
       });
     }

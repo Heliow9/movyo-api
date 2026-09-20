@@ -66,7 +66,7 @@ module.exports = async function authRestaurante(req, res, next) {
 
     // ✅ valida plano/assinatura e força logout quando o SaaS altera plano/status/vencimento.
     const restAuth = await Restaurante.findById(req.restauranteId).select(
-      "garcons ativo bloqueado nome plano statusAssinatura dataFimPlano sessaoVersao email emailCobranca taxaConvenienciaPix descontoMensalidadePercentual valorMensalidadeCustomizado"
+      "garcons ativo bloqueado nome plano statusAssinatura dataFimPlano sessaoVersao email emailCobranca taxaConvenienciaPix descontoMensalidadePercentual valorMensalidadeCustomizado billingSource billingStatus billingAccessBlocked billingCurrentPeriodEnd billingGraceUntil billingLastSyncAt billingChargeStatus billingChargeId billingDueDate billingAmount billingPaymentMethod billingPaymentUrl billingPdfUrl billingDigitableLine billingPixCopyPaste billingPixQrCode"
     );
 
     if (!restAuth) return res.status(404).json({ mensagem: "Restaurante não encontrado." });
@@ -79,19 +79,33 @@ module.exports = async function authRestaurante(req, res, next) {
       return Number.isNaN(d.getTime()) ? null : d;
     };
     const agora = new Date();
-    const fimPlano = dataLocal(restAuth.dataFimPlano);
-    const venceu = !!(fimPlano && fimPlano.getTime() < agora.getTime());
+    const billingManagedByPontoCerto = String(restAuth.billingSource || '').trim().toUpperCase() === 'PONTO_CERTO';
 
-    if (venceu) {
-      // Licença vencida deve ser tratada como licença vencida, não como bloqueio/desativação.
-      // Não derrubamos sessaoVersao aqui para evitar o falso erro “Sua sessão foi atualizada”.
+    // Assinaturas migradas têm a política de tolerância/bloqueio controlada pelo Ponto Certo.
+    // O dataFimPlano continua como espelho para UI, mas não deve bloquear antes do fim da tolerância.
+    if (billingManagedByPontoCerto && restAuth.billingAccessBlocked === true) {
       const assinaturaCobranca = await resumoCobrancaRestaurante(restAuth).catch(() => null);
       return res.status(403).json({
-        mensagem: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
-        code: "LICENCA_VENCIDA",
+        mensagem: "Assinatura com acesso financeiro bloqueado. Regularize a cobrança para continuar usando o Movyo.",
+        code: "LICENCA_FINANCEIRA_BLOQUEADA",
         restauranteId: String(restAuth._id || restAuth.id || req.restauranteId || ""),
         assinaturaCobranca,
       });
+    }
+
+    if (!billingManagedByPontoCerto) {
+      const fimPlano = dataLocal(restAuth.dataFimPlano);
+      const venceu = !!(fimPlano && fimPlano.getTime() < agora.getTime());
+      if (venceu) {
+        // Regra legada: licença vencida segue sendo aplicada apenas enquanto a própria Movyo gerencia a cobrança.
+        const assinaturaCobranca = await resumoCobrancaRestaurante(restAuth).catch(() => null);
+        return res.status(403).json({
+          mensagem: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
+          code: "LICENCA_VENCIDA",
+          restauranteId: String(restAuth._id || restAuth.id || req.restauranteId || ""),
+          assinaturaCobranca,
+        });
+      }
     }
 
     if (restAuth?.ativo === false || restAuth?.bloqueado === true || String(restAuth.statusAssinatura || '').toLowerCase() === 'bloqueado') {
