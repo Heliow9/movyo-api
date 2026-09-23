@@ -41,6 +41,11 @@ export async function saveSession({ token, restaurante, garcom, tipo = "garcom" 
           status: r.status || null,
           statusAssinatura: r.statusAssinatura || r.statusPlano || r.statusLicenca || null,
           dataFimPlano: r.dataFimPlano || r.dataVencimentoPlano || r.vencimentoPlano || r.vencimento || null,
+          billingSource: r.billingSource || null,
+          billingStatus: r.billingStatus || null,
+          billingAccessBlocked: safeBool(r.billingAccessBlocked),
+          billingCurrentPeriodEnd: r.billingCurrentPeriodEnd || null,
+          billingGraceUntil: r.billingGraceUntil || null,
 
           // ✅ manter status MercadoPago no app
           mercadoPago: {

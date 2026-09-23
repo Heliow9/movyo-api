@@ -25,6 +25,23 @@ function boolFalse(v) {
   return false;
 }
 
+function billingManagedByPontoCerto(r = {}) {
+  return String(r?.billingSource || "").trim().toUpperCase() === "PONTO_CERTO";
+}
+
+function billingBlockedByPontoCerto(r = {}) {
+  if (!billingManagedByPontoCerto(r)) return false;
+  const status = String(r?.billingStatus || "").trim().toUpperCase();
+  return boolTrue(r?.billingAccessBlocked) || status === "BLOCKED" || status === "CANCELED";
+}
+
+function staleLegacyFinancialBlock(r = {}) {
+  return billingManagedByPontoCerto(r)
+    && r?.bloqueado !== true
+    && r?.ativo === false
+    && text(r?.statusAssinatura) === "bloqueado";
+}
+
 function parseDate(value) {
   if (!value) return null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
@@ -67,8 +84,9 @@ export function pickRestauranteFromPayload(payload) {
 
 export function isRestauranteBloqueado(restaurante = {}) {
   const r = restaurante || {};
+  if (billingBlockedByPontoCerto(r)) return true;
   if (boolTrue(r.bloqueado || r.blocked || r.suspenso || r.suspended)) return true;
-  if (boolFalse(r.ativo ?? r.active ?? r.habilitado ?? r.enabled)) return true;
+  if (!staleLegacyFinancialBlock(r) && boolFalse(r.ativo ?? r.active ?? r.habilitado ?? r.enabled)) return true;
 
   const statusFields = [r.status, r.statusConta, r.statusSistema, r.statusRestaurante, r.situacao, r.situacaoConta];
   return statusFields.some((v) => BLOCKED_WORDS.includes(text(v)));
@@ -76,6 +94,7 @@ export function isRestauranteBloqueado(restaurante = {}) {
 
 export function isLicencaVencida(restaurante = {}) {
   const r = restaurante || {};
+  if (billingManagedByPontoCerto(r)) return false;
   const statusFields = [r.statusAssinatura, r.statusPlano, r.statusLicenca, r.statusLicença, r.planoStatus, r.assinaturaStatus];
   if (statusFields.some((v) => EXPIRED_WORDS.includes(text(v)))) return true;
 
@@ -104,6 +123,7 @@ export function getRestauranteAccessBlockMessage(restaurante) {
   // 1) bloqueio/desativação só quando o cadastro realmente está bloqueado/inativo;
   // 2) vencimento só quando campo/status de licença/plano indicar vencido.
   // Assim não mistura “restaurante bloqueado” com “licença vencida”.
+  if (billingBlockedByPontoCerto(restaurante)) return "Assinatura com acesso financeiro bloqueado. Regularize a cobrança para continuar usando o Movyo.";
   if (isRestauranteBloqueado(restaurante)) return RESTAURANTE_BLOQUEADO_MSG;
   if (isLicencaVencida(restaurante)) return LICENCA_VENCIDA_MSG;
   return null;

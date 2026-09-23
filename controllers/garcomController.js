@@ -5,6 +5,7 @@ const jwt = require("jsonwebtoken");
 const { createObjectId } = require("../lib/objectId");
 const { queryWithRetry } = require("../lib/mysqlRetry");
 const { getPlanSummary } = require("../utils/planRules");
+const { getRestaurantAccessDecision } = require("../utils/restaurantAccessPolicy");
 
 const DEFAULT_PERMISSOES = {
   verPedidos: true,
@@ -333,7 +334,7 @@ exports.loginGarcom = async (req, res) => {
 
     // ✅ AQUI ESTAVA O BUG: você não trazia mercadoPago.conectado
     const SELECT_LOGIN =
-      "nome slugIdentificador garcons ativo bloqueado plano statusAssinatura dataFimPlano sessaoVersao mercadoPago.conectado";
+      "nome slugIdentificador garcons ativo bloqueado plano statusAssinatura dataFimPlano sessaoVersao mercadoPago.conectado billingSource billingStatus billingAccessBlocked billingCurrentPeriodEnd billingGraceUntil";
 
     // ✅ modo novo principal: slug + telefone
     if (slugFinal && telFinal) {
@@ -359,22 +360,13 @@ exports.loginGarcom = async (req, res) => {
       if (!restaurante) return res.status(404).json({ message: "Restaurante não encontrado." });
     }
 
-    // Trava restaurante por motivo correto: bloqueio real separado de licença vencida.
-    const hojeLogin = new Date(); hojeLogin.setHours(0,0,0,0);
-    const fimPlanoLogin = restaurante?.dataFimPlano ? new Date(restaurante.dataFimPlano) : null;
-    const licencaVencidaLogin = fimPlanoLogin && !isNaN(fimPlanoLogin.getTime()) && fimPlanoLogin < hojeLogin;
-
-    if (licencaVencidaLogin) {
+    // A cobrança gerida pelo Ponto Certo respeita a tolerância e usa billingAccessBlocked
+    // como autoridade financeira; dataFimPlano fica apenas como espelho de compatibilidade.
+    const accessDecision = getRestaurantAccessDecision(restaurante, new Date());
+    if (accessDecision.blocked) {
       return res.status(403).json({
-        message: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
-        code: "LICENCA_VENCIDA",
-      });
-    }
-
-    if (restaurante?.ativo === false || restaurante?.bloqueado === true || String(restaurante?.statusAssinatura || '').toLowerCase() === 'bloqueado') {
-      return res.status(403).json({
-        message: "Restaurante bloqueado/desativado. Fale com o suporte.",
-        code: "RESTAURANTE_BLOQUEADO",
+        message: accessDecision.message,
+        code: accessDecision.code,
       });
     }
 
@@ -424,9 +416,16 @@ exports.loginGarcom = async (req, res) => {
         _id: restaurante._id,
         nome: restaurante.nome,
         slugIdentificador: restaurante.slugIdentificador,
+        ativo: restaurante.ativo !== false,
+        bloqueado: restaurante.bloqueado === true,
         plano: restaurante.plano || 'free',
         statusAssinatura: restaurante.statusAssinatura || 'ativo',
         dataFimPlano: restaurante.dataFimPlano || null,
+        billingSource: restaurante.billingSource || 'MOVYO_LEGACY',
+        billingStatus: restaurante.billingStatus || 'ACTIVE',
+        billingAccessBlocked: restaurante.billingAccessBlocked === true,
+        billingCurrentPeriodEnd: restaurante.billingCurrentPeriodEnd || null,
+        billingGraceUntil: restaurante.billingGraceUntil || null,
         sessaoVersao: Number(restaurante.sessaoVersao || 1),
         planoInfo: getPlanSummary(restaurante),
         mercadoPago: {
@@ -473,9 +472,16 @@ exports.meApp = async (req, res) => {
         nome: garcom.restauranteNome || null,
         // se você quiser enviar slug aqui, pode usar req.restauranteSlug
         slugIdentificador: req.restauranteSlug || null,
+        ativo: restaurante.ativo !== false,
+        bloqueado: restaurante.bloqueado === true,
         plano: restaurante.plano || "free",
         statusAssinatura: restaurante.statusAssinatura || "ativo",
         dataFimPlano: restaurante.dataFimPlano || null,
+        billingSource: restaurante.billingSource || "MOVYO_LEGACY",
+        billingStatus: restaurante.billingStatus || "ACTIVE",
+        billingAccessBlocked: restaurante.billingAccessBlocked === true,
+        billingCurrentPeriodEnd: restaurante.billingCurrentPeriodEnd || null,
+        billingGraceUntil: restaurante.billingGraceUntil || null,
         planoInfo: getPlanSummary(restaurante),
       },
     });

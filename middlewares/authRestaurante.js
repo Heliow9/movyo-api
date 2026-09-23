@@ -3,6 +3,7 @@ const jwt = require("jsonwebtoken");
 const Restaurante = require("../models/Restaurante");
 const { resumoCobrancaRestaurante } = require("../services/saasBillingService");
 const { getPlanSummary } = require("../utils/planRules");
+const { getRestaurantAccessDecision } = require("../utils/restaurantAccessPolicy");
 require("dotenv").config();
 
 function extractToken(req) {
@@ -71,47 +72,17 @@ module.exports = async function authRestaurante(req, res, next) {
 
     if (!restAuth) return res.status(404).json({ mensagem: "Restaurante não encontrado." });
 
-    const dataLocal = (value) => {
-      if (!value) return null;
-      const text = String(value);
-      const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
-      const d = match ? new Date(Number(match[1]), Number(match[2])-1, Number(match[3]), 23, 59, 59, 999) : new Date(value);
-      return Number.isNaN(d.getTime()) ? null : d;
-    };
-    const agora = new Date();
-    const billingManagedByPontoCerto = String(restAuth.billingSource || '').trim().toUpperCase() === 'PONTO_CERTO';
-
-    // Assinaturas migradas têm a política de tolerância/bloqueio controlada pelo Ponto Certo.
-    // O dataFimPlano continua como espelho para UI, mas não deve bloquear antes do fim da tolerância.
-    if (billingManagedByPontoCerto && restAuth.billingAccessBlocked === true) {
-      const assinaturaCobranca = await resumoCobrancaRestaurante(restAuth).catch(() => null);
+    const accessDecision = getRestaurantAccessDecision(restAuth, new Date());
+    if (accessDecision.blocked) {
+      const withBillingSummary = accessDecision.reason === "FINANCIAL" || accessDecision.reason === "LEGACY_EXPIRED";
+      const assinaturaCobranca = withBillingSummary
+        ? await resumoCobrancaRestaurante(restAuth).catch(() => null)
+        : null;
       return res.status(403).json({
-        mensagem: "Assinatura com acesso financeiro bloqueado. Regularize a cobrança para continuar usando o Movyo.",
-        code: "LICENCA_FINANCEIRA_BLOQUEADA",
+        mensagem: accessDecision.message,
+        code: accessDecision.code,
         restauranteId: String(restAuth._id || restAuth.id || req.restauranteId || ""),
-        assinaturaCobranca,
-      });
-    }
-
-    if (!billingManagedByPontoCerto) {
-      const fimPlano = dataLocal(restAuth.dataFimPlano);
-      const venceu = !!(fimPlano && fimPlano.getTime() < agora.getTime());
-      if (venceu) {
-        // Regra legada: licença vencida segue sendo aplicada apenas enquanto a própria Movyo gerencia a cobrança.
-        const assinaturaCobranca = await resumoCobrancaRestaurante(restAuth).catch(() => null);
-        return res.status(403).json({
-          mensagem: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
-          code: "LICENCA_VENCIDA",
-          restauranteId: String(restAuth._id || restAuth.id || req.restauranteId || ""),
-          assinaturaCobranca,
-        });
-      }
-    }
-
-    if (restAuth?.ativo === false || restAuth?.bloqueado === true || String(restAuth.statusAssinatura || '').toLowerCase() === 'bloqueado') {
-      return res.status(403).json({
-        mensagem: "Restaurante bloqueado/desativado. Fale com o suporte Movyo.",
-        code: "RESTAURANTE_BLOQUEADO",
+        ...(withBillingSummary ? { assinaturaCobranca } : {}),
       });
     }
 

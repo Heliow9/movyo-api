@@ -95,6 +95,7 @@ async function bloquearVencidos(){
            updated_at = NOW()
      WHERE dataFimPlano IS NOT NULL
        AND dataFimPlano < CURDATE()
+       AND UPPER(COALESCE(billingSource, 'MOVYO_LEGACY')) <> 'PONTO_CERTO'
        AND LOWER(COALESCE(statusAssinatura, 'ativo')) NOT IN ('bloqueado','cancelado')
   `);
   return Number(result?.affectedRows || 0);
@@ -827,11 +828,11 @@ module.exports = {
     }catch(e){ console.error('saas detalhe restaurante:',e); res.status(500).json({mensagem:'Erro ao carregar restaurante.', erro:e.message }); }
   },
   async bloquearRestaurante(req,res){
-    try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:false,statusAssinatura:'bloqueado'}, $inc:{ sessaoVersao:1 }}); await registrarAuditoria(req,'saas.restaurante_bloqueado','restaurante',req.params.id,{restauranteId:req.params.id}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
+    try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:false,bloqueado:true,statusAssinatura:'bloqueado'}, $inc:{ sessaoVersao:1 }}); await registrarAuditoria(req,'saas.restaurante_bloqueado','restaurante',req.params.id,{restauranteId:req.params.id}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
     catch(e){ res.status(500).json({mensagem:'Erro ao bloquear restaurante.', erro:e.message}); }
   },
   async ativarRestaurante(req,res){
-    try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:true,statusAssinatura:req.body.statusAssinatura || 'ativo'}, $inc:{ sessaoVersao:1 }}); await registrarAuditoria(req,'saas.restaurante_ativado','restaurante',req.params.id,{restauranteId:req.params.id}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
+    try{ await Restaurante.findByIdAndUpdate(req.params.id, {$set:{ativo:true,bloqueado:false,statusAssinatura:req.body.statusAssinatura || 'ativo'}, $inc:{ sessaoVersao:1 }}); await registrarAuditoria(req,'saas.restaurante_ativado','restaurante',req.params.id,{restauranteId:req.params.id}); res.json(publicRestaurante(await Restaurante.findById(req.params.id).lean())); }
     catch(e){ res.status(500).json({mensagem:'Erro ao ativar restaurante.', erro:e.message}); }
   },
   async cancelarPlanoRestaurante(req,res){

@@ -4,6 +4,7 @@ const Restaurante = require('../models/Restaurante');
 const CobrancaSaas = require('../models/CobrancaSaas');
 const RequestLog = require('../models/PontoCertoIntegrationRequest');
 const { normalizePlanCode } = require('../utils/planRules');
+const { isOperationallyBlocked } = require('../utils/restaurantAccessPolicy');
 
 function idOf(value) {
   return String(value?._id || value?.id || value || '');
@@ -29,6 +30,25 @@ function normalizeSlug(value) {
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
     .slice(0, 180);
+}
+
+function shouldRepairLegacyAutoBlock(current = {}, update = {}) {
+  const managed = String(update.billingSource || current.billingSource || '').trim().toUpperCase() === 'PONTO_CERTO';
+  const status = String(update.billingStatus || '').trim().toUpperCase();
+  if (!managed || update.billingAccessBlocked !== false || !['ACTIVE', 'GRACE'].includes(status)) return false;
+  // A rotina antiga de expiração gravava ativo=0 + statusAssinatura=bloqueado, sem marcar bloqueado=true.
+  // Se existir bloqueio operacional explícito (bloqueado=true), ele é preservado.
+  return current?.bloqueado !== true
+    && current?.ativo === false
+    && String(current?.statusAssinatura || '').trim().toLowerCase() === 'bloqueado';
+}
+
+function applyLegacyAutoBlockRepair(current = {}, update = {}) {
+  if (shouldRepairLegacyAutoBlock(current, update)) {
+    update.ativo = true;
+    update.statusAssinatura = 'ativo';
+  }
+  return update;
 }
 
 async function legacyBillingSummary(restauranteId) {
@@ -240,7 +260,7 @@ exports.updateSubscription = async (req, res) => {
   if (replayIfAvailable(req, res)) return;
   const current = await Restaurante.findById(req.params.id).lean();
   if (!current) return respond(req, res, 404, { code: 'MOVYO_CUSTOMER_NOT_FOUND', mensagem: 'Restaurante não encontrado.' });
-  const update = billingUpdate(req.body || {});
+  const update = applyLegacyAutoBlockRepair(current, billingUpdate(req.body || {}));
   await Restaurante.findByIdAndUpdate(req.params.id, { $set: update, $inc: { sessaoVersao: 1 } });
   const updated = await Restaurante.findById(req.params.id).lean();
   return respond(req, res, 200, publicForPonto(updated));
@@ -269,13 +289,13 @@ exports.unblockCustomer = async (req, res) => {
   const current = await Restaurante.findById(req.params.id).lean();
   if (!current) return respond(req, res, 404, { code: 'MOVYO_CUSTOMER_NOT_FOUND', mensagem: 'Restaurante não encontrado.' });
   const status = String(req.body?.billingStatus || (req.body?.graceUntil ? 'GRACE' : 'ACTIVE')).toUpperCase();
-  const update = {
+  const update = applyLegacyAutoBlockRepair(current, {
     billingSource: 'PONTO_CERTO',
     billingStatus: status,
     billingAccessBlocked: false,
     billingGraceUntil: parseDate(req.body?.graceUntil),
     billingLastSyncAt: new Date(),
-  };
+  });
   const end = parseDate(req.body?.currentPeriodEnd);
   if (end) { update.billingCurrentPeriodEnd = end; update.dataFimPlano = end; }
   await Restaurante.findByIdAndUpdate(req.params.id, { $set: update, $inc: { sessaoVersao: 1 } });
@@ -298,8 +318,8 @@ exports.getLicense = async (req, res) => {
     pontoCertoCustomerId: c.pontoCertoCustomerId,
     pontoCertoSubscriptionId: c.pontoCertoSubscriptionId,
     operationalActive: c.ativo,
-    operationalBlocked: c.bloqueado || String(c.statusAssinatura).toLowerCase() === 'bloqueado',
+    operationalBlocked: isOperationallyBlocked(current),
   });
 };
 
-exports._test = { publicForPonto, billingUpdate, legacyBillingSummary };
+exports._test = { publicForPonto, billingUpdate, legacyBillingSummary, shouldRepairLegacyAutoBlock, applyLegacyAutoBlockRepair };

@@ -15,6 +15,7 @@ const jwt = require("jsonwebtoken");
 const { criarRecipient } = require("../services/criarRecipientPagarme");
 const { resumoCobrancaRestaurante, gerarPixMensalidade: gerarPixMensalidadeSaas } = require("../services/saasBillingService");
 const { getPlanSummary, planHasFeature } = require("../utils/planRules");
+const { getRestaurantAccessDecision } = require("../utils/restaurantAccessPolicy");
 const { withDefaultProductImage, filterAvailableExtras } = require("../utils/productDefaults");
 const path = require("path");
 const fs = require("fs");
@@ -366,24 +367,17 @@ module.exports = {
         return res.status(401).json({ mensagem: "Senha incorreta." });
       }
 
-      const hojeLogin = new Date(); hojeLogin.setHours(0,0,0,0);
-      const fimPlanoLogin = restaurante?.dataFimPlano ? new Date(restaurante.dataFimPlano) : null;
-      const licencaVencidaLogin = fimPlanoLogin && !isNaN(fimPlanoLogin.getTime()) && fimPlanoLogin < hojeLogin;
-
-      if (licencaVencidaLogin) {
-        const assinaturaCobranca = await resumoCobrancaRestaurante(restaurante).catch(() => null);
+      const accessDecision = getRestaurantAccessDecision(restaurante, new Date());
+      if (accessDecision.blocked) {
+        const withBillingSummary = accessDecision.reason === "FINANCIAL" || accessDecision.reason === "LEGACY_EXPIRED";
+        const assinaturaCobranca = withBillingSummary
+          ? await resumoCobrancaRestaurante(restaurante).catch(() => null)
+          : null;
         return res.status(403).json({
-          mensagem: "Licença vencida. Regularize o plano para continuar usando o Movyo.",
-          code: "LICENCA_VENCIDA",
+          mensagem: accessDecision.message,
+          code: accessDecision.code,
           restauranteId: String(restaurante._id || restaurante.id || ""),
-          assinaturaCobranca,
-        });
-      }
-
-      if (restaurante?.ativo === false || restaurante?.bloqueado === true || String(restaurante?.statusAssinatura || '').toLowerCase() === 'bloqueado') {
-        return res.status(403).json({
-          mensagem: "Restaurante bloqueado/desativado. Fale com o suporte Movyo.",
-          code: "RESTAURANTE_BLOQUEADO",
+          ...(withBillingSummary ? { assinaturaCobranca } : {}),
         });
       }
 
@@ -432,23 +426,17 @@ module.exports = {
         });
       }
 
-      const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
-      const fimPlano = restaurante?.dataFimPlano ? new Date(restaurante.dataFimPlano) : null;
-      const licencaVencida = fimPlano && !Number.isNaN(fimPlano.getTime()) && fimPlano < hoje;
-      if (licencaVencida) {
-        const assinaturaCobranca = await resumoCobrancaRestaurante(restaurante).catch(() => null);
+      const accessDecision = getRestaurantAccessDecision(restaurante, new Date());
+      if (accessDecision.blocked) {
+        const withBillingSummary = accessDecision.reason === "FINANCIAL" || accessDecision.reason === "LEGACY_EXPIRED";
+        const assinaturaCobranca = withBillingSummary
+          ? await resumoCobrancaRestaurante(restaurante).catch(() => null)
+          : null;
         return res.status(403).json({
-          mensagem: "Licenca vencida. Regularize o plano para continuar usando o Movyo.",
-          code: "LICENCA_VENCIDA",
+          mensagem: accessDecision.message,
+          code: accessDecision.code,
           restauranteId: String(restaurante._id || restaurante.id || ""),
-          assinaturaCobranca,
-        });
-      }
-
-      if (restaurante?.ativo === false || restaurante?.bloqueado === true || String(restaurante?.statusAssinatura || "").toLowerCase() === "bloqueado") {
-        return res.status(403).json({
-          mensagem: "Restaurante bloqueado/desativado. Fale com o suporte Movyo.",
-          code: "RESTAURANTE_BLOQUEADO",
+          ...(withBillingSummary ? { assinaturaCobranca } : {}),
         });
       }
 
